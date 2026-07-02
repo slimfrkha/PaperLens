@@ -1,0 +1,194 @@
+"""FastAPI app: chat (SSE), papers, tags, admin status, and static SPA."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from sse_starlette.sse import EventSourceResponse
+
+from rag.config import load_config
+from rag.index import open_collection
+from rag.manifest import Manifest
+from rag.pipeline import pending_papers
+from rag.search import Searcher
+
+from .agent import ChatAgent
+from .chats import ChatStore, generate_name
+from .schemas import ChatRequest
+from .worker import IngestionWorker
+
+def create_app(config_path: str | None = None) -> FastAPI:
+    cfg = load_config(config_path)
+    web_dist = Path(cfg.paths.web_dist)
+    manifest = Manifest(cfg.paths.rag_db)
+    chats = ChatStore(cfg.paths.chat_history)
+    worker = IngestionWorker(cfg, manifest)
+    # Ensure the collection exists so the chat Searcher can open it even when the
+    # DB is still empty (ingestion creates it too, but chat may be hit first).
+    open_collection(cfg.paths.rag_db, cfg.collection)
+
+    # Chat models (embedder + reranker + LLM) are heavy — build lazily on first use.
+    lazy: dict = {"agent": None}
+
+    def get_agent() -> ChatAgent:
+        if lazy["agent"] is None:
+            searcher = Searcher(
+                db_dir=cfg.paths.rag_db,
+                collection=cfg.collection,
+                embedder_model=cfg.embedding.model,
+                reranker_model=cfg.reranker.model,
+            )
+            lazy["agent"] = ChatAgent(cfg, searcher, manifest)
+        return lazy["agent"]
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        if cfg.ingestion.auto_start:
+            worker.trigger()
+        yield
+
+    app = FastAPI(title="PaperLens", lifespan=lifespan)
+
+    # ---- API ----
+    @app.get("/api/papers")
+    def list_papers():
+        return manifest.papers()
+
+    @app.get("/api/papers/{paper_id}")
+    def get_paper(paper_id: str):
+        path = Path(cfg.paths.markdown_dir) / f"{paper_id}.md"
+        if not path.exists():
+            return JSONResponse({"error": "not found"}, status_code=404)
+        md = re.sub(r"<!--.*?-->", "", path.read_text(), flags=re.DOTALL)
+        rec = manifest.get(paper_id) or {}
+        return {
+            "paper_id": paper_id,
+            "title": rec.get("title", paper_id),
+            "tags": rec.get("tags", []),
+            "arxiv_id": rec.get("arxiv_id"),
+            "markdown": md,
+        }
+
+    @app.get("/api/tags")
+    def list_tags():
+        return manifest.all_tags()
+
+    @app.get("/api/admin/status")
+    def admin_status():
+        papers = manifest.papers()
+        return {
+            "db": {
+                "n_papers": len(papers),
+                "n_chunks": sum(p.get("n_chunks", 0) for p in papers),
+            },
+            "tags": manifest.all_tags(),
+            "pending": [p.name for p in pending_papers(cfg, manifest)],
+            "ingestion": worker.snapshot(),
+        }
+
+    @app.post("/api/admin/rescan")
+    def admin_rescan():
+        return {"started": worker.trigger()}
+
+    # ---- chat sessions ----
+    @app.get("/api/chats")
+    def list_chats():
+        return chats.list()
+
+    @app.post("/api/chats")
+    def new_chat():
+        return chats.create()
+
+    @app.get("/api/chats/{chat_id}")
+    def get_chat(chat_id: str):
+        c = chats.get(chat_id)
+        return c or JSONResponse({"error": "not found"}, status_code=404)
+
+    @app.delete("/api/chats/{chat_id}")
+    def delete_chat(chat_id: str):
+        chats.delete(chat_id)
+        return {"ok": True}
+
+    @app.post("/api/chat")
+    async def chat(req: ChatRequest):
+        agent = get_agent()
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def emit(event: str, data: str):
+            loop.call_soon_threadsafe(queue.put_nowait, {"event": event, "data": data})
+
+        def work():
+            trace_entries: list = []
+
+            def on_trace(e):
+                trace_entries.append(e)
+                emit("trace", json.dumps(e))
+
+            try:
+                text, citations = agent.run(
+                    [m.model_dump() for m in req.messages],
+                    req.tags,
+                    req.paper,
+                    on_text=lambda t: emit("token", t),
+                    on_trace=on_trace,
+                )
+                emit("citations", json.dumps(citations))
+                # Persist the turn (append user + assistant) and name new sessions.
+                if req.chat_id and req.messages:
+                    existing = chats.get(req.chat_id)
+                    name = None
+                    if not existing or not existing.get("name"):
+                        name = generate_name(req.messages[0].content, cfg.llm.tagging)
+                    saved = chats.append_turn(
+                        req.chat_id, req.messages[-1].content, text, citations,
+                        trace_entries, name=name,
+                    )
+                    emit("meta", json.dumps({"chat_id": saved["id"], "name": saved["name"]}))
+            except Exception as e:  # surface errors to the client
+                emit("error", str(e))
+            finally:
+                emit("done", "")
+
+        loop.run_in_executor(None, work)
+
+        async def event_stream():
+            while True:
+                msg = await queue.get()
+                yield msg
+                if msg["event"] == "done":
+                    break
+
+        return EventSourceResponse(event_stream())
+
+    # ---- static SPA (prod build) ----
+    @app.get("/{full_path:path}")
+    def spa(full_path: str):
+        if not web_dist.exists():
+            return PlainTextResponse(
+                "Frontend not built. Run `npm --prefix web run build`, "
+                "or use the Vite dev server (`npm --prefix web run dev`).",
+            )
+        candidate = web_dist / full_path
+        if full_path and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(web_dist / "index.html")
+
+    return app
+
+
+def main() -> None:
+    import uvicorn
+
+    cfg = load_config()
+    uvicorn.run(create_app(), host=cfg.server.host, port=cfg.server.port)
+
+
+if __name__ == "__main__":
+    main()
