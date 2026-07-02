@@ -121,3 +121,18 @@ web/                   # Vite + React + Mantine frontend
 data/                  # git-ignored runtime: papers/, rag_db/, chat_history/
 docs/                  # notes (e.g. done.md)
 ```
+
+## Development gate
+
+Run this 4-command gate before considering any change done — it is identical
+locally and in CI:
+
+```bash
+uv run ruff format --check src   # formatting
+uv run ruff check src            # lint
+uv run ty check src              # type check
+uv run pytest                    # tests
+```
+
+Auto-fix formatting/lint with `uv run ruff format src` and
+`uv run ruff check --fix src`.

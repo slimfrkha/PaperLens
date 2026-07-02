@@ -56,9 +56,7 @@ class LLMSpec(BaseModel):
 
 
 class LLMCfg(BaseModel):
-    tagging: LLMSpec = Field(
-        default_factory=lambda: LLMSpec(model="claude-haiku-4-5-20251001")
-    )
+    tagging: LLMSpec = Field(default_factory=lambda: LLMSpec(model="claude-haiku-4-5-20251001"))
     chat: LLMSpec = Field(default_factory=lambda: LLMSpec(model="claude-opus-4-8"))
 
 

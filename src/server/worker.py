@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 import traceback
+from typing import Any
 
 from rag.config import Config
 from rag.index import open_collection
@@ -22,12 +23,12 @@ class IngestionWorker:
         self.manifest = manifest
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
-        self._status = {
-            "state": "idle",   # idle | running | error
+        self._status: dict[str, Any] = {
+            "state": "idle",  # idle | running | error
             "total": 0,
             "done": 0,
-            "current": None,   # {"name", "stage", "pct"}
-            "errors": [],      # [{"name", "error"}]
+            "current": None,  # {"name", "stage", "pct"}
+            "errors": [],  # [{"name", "error"}]
         }
 
     def snapshot(self) -> dict:
@@ -57,8 +58,9 @@ class IngestionWorker:
     def _run(self) -> None:
         try:
             pending = pending_papers(self.cfg, self.manifest)
-            self._set(total=len(pending), done=0, current=None,
-                      state="running" if pending else "idle")
+            self._set(
+                total=len(pending), done=0, current=None, state="running" if pending else "idle"
+            )
             if not pending:
                 return
 
@@ -71,7 +73,11 @@ class IngestionWorker:
                 self._set(current={"name": paper.name, "stage": "queued", "pct": 0.0})
                 try:
                     ingest_paper(
-                        paper, self.cfg, embedder, collection, self.manifest,
+                        paper,
+                        self.cfg,
+                        embedder,
+                        collection,
+                        self.manifest,
                         on_stage=lambda s, pct, name=paper.name: self._set(
                             current={"name": name, "stage": s, "pct": pct}
                         ),

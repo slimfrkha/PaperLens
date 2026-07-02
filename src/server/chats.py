@@ -38,7 +38,7 @@ class ChatStore:
     def _path(self, chat_id: str) -> Path:
         return self.dir / f"{chat_id}.json"
 
-    def list(self) -> list[dict]:
+    def list_all(self) -> list[dict]:
         out = []
         for p in self.dir.glob("*.json"):
             try:
@@ -72,13 +72,24 @@ class ChatStore:
         self._write(chat)
         return chat
 
-    def append_turn(self, chat_id: str, user_content: str, assistant_content: str,
-                    citations: list, trace: list, name: str | None = None) -> dict:
+    def append_turn(
+        self,
+        chat_id: str,
+        user_content: str,
+        assistant_content: str,
+        citations: list,
+        trace: list,
+        name: str | None = None,
+    ) -> dict:
         """Append one user+assistant exchange, preserving prior turns."""
         with self._lock:
             chat = self.get(chat_id) or {
-                "id": chat_id, "name": "", "created_at": _now(),
-                "messages": [], "citations": [], "traces": [],
+                "id": chat_id,
+                "name": "",
+                "created_at": _now(),
+                "messages": [],
+                "citations": [],
+                "traces": [],
             }
             chat.setdefault("traces", [])
             # Keep parallel arrays aligned even for sessions created before traces.

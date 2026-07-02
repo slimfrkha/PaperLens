@@ -54,25 +54,27 @@ def collect_chunks(docs_dir: str, **chunk_kwargs) -> list[Chunk]:
     return chunks
 
 
-def open_collection(db_dir: str, collection: str, *, embedder_name: str | None = None,
-                    reset: bool = False):
+def open_collection(
+    db_dir: str, collection: str, *, embedder_name: str | None = None, reset: bool = False
+):
     """Open (or create) the persistent Chroma collection, cosine space."""
+    import contextlib
+
     import chromadb
 
     client = chromadb.PersistentClient(path=db_dir)
     if reset:
-        try:
+        with contextlib.suppress(Exception):
             client.delete_collection(collection)
-        except Exception:
-            pass
     meta = {"hnsw:space": "cosine"}
     if embedder_name:
         meta["embedder"] = embedder_name
     return client.get_or_create_collection(name=collection, metadata=meta)
 
 
-def upsert_chunks(collection, embedder, chunks: list[Chunk], batch_size: int = 32,
-                  progress=None) -> int:
+def upsert_chunks(
+    collection, embedder, chunks: list[Chunk], batch_size: int = 32, progress=None
+) -> int:
     """Embed and upsert chunks in batches. `progress(done, total)` is optional."""
     for i in range(0, len(chunks), batch_size):
         batch = chunks[i : i + batch_size]
@@ -88,9 +90,17 @@ def upsert_chunks(collection, embedder, chunks: list[Chunk], batch_size: int = 3
     return len(chunks)
 
 
-def index_markdown(collection, embedder, md_path: str, paper_id: str, *,
-                   max_tokens: int = 512, overlap_tokens: int = 64,
-                   batch_size: int = 32, progress=None) -> int:
+def index_markdown(
+    collection,
+    embedder,
+    md_path: str,
+    paper_id: str,
+    *,
+    max_tokens: int = 512,
+    overlap_tokens: int = 64,
+    batch_size: int = 32,
+    progress=None,
+) -> int:
     """Chunk one markdown file and upsert it. Returns the chunk count."""
     with open(md_path) as f:
         md = f.read()
@@ -131,32 +141,47 @@ def build(args) -> None:
     print(f"== Embedding + upserting into {args.db_dir} :: {args.collection} ==")
     t0 = time.time()
     upsert_chunks(
-        collection, embedder, chunks, batch_size=args.batch_size,
+        collection,
+        embedder,
+        chunks,
+        batch_size=args.batch_size,
         progress=lambda done, total: print(f"  {done:4d}/{total} embedded", end="\r"),
     )
     dt = time.time() - t0
 
     print()
-    print(f"Done. {collection.count()} chunks indexed in {dt:.1f}s "
-          f"({len(chunks) / dt:.0f} chunks/s) using {embedder.name()}.")
+    print(
+        f"Done. {collection.count()} chunks indexed in {dt:.1f}s "
+        f"({len(chunks) / dt:.0f} chunks/s) using {embedder.name()}."
+    )
     print(f"DB: {os.path.abspath(args.db_dir)}  collection: {args.collection!r}")
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--docs-dir", default="papers/text", help="dir of extracted *.md papers")
     p.add_argument("--db-dir", default="rag_db", help="Chroma persistent directory")
     p.add_argument("--collection", default="arxiv_papers")
-    p.add_argument("--embedder", default=DEFAULT_EMBEDDER,
-                   help="HF model id, or API model name when --embedder-type openai")
+    p.add_argument(
+        "--embedder",
+        default=DEFAULT_EMBEDDER,
+        help="HF model id, or API model name when --embedder-type openai",
+    )
     p.add_argument("--embedder-type", choices=["hf", "openai"], default="hf")
     p.add_argument("--api-base", default=None, help="base URL for OpenAI-compatible endpoint")
-    p.add_argument("--api-key-env", default="OPENAI_API_KEY",
-                   help="env var holding the API key (openai type)")
+    p.add_argument(
+        "--api-key-env", default="OPENAI_API_KEY", help="env var holding the API key (openai type)"
+    )
     p.add_argument("--max-tokens", type=int, default=512, help="target max tokens per chunk")
     p.add_argument("--overlap", type=int, default=64, help="overlap tokens between sub-chunks")
-    p.add_argument("--max-seq-length", type=int, default=1024,
-                   help="cap embedder input length (guards MPS 2**32 tensor limit)")
+    p.add_argument(
+        "--max-seq-length",
+        type=int,
+        default=1024,
+        help="cap embedder input length (guards MPS 2**32 tensor limit)",
+    )
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--reset", action="store_true", help="drop the collection before indexing")
     build(p.parse_args())

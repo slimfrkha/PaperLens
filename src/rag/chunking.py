@@ -111,9 +111,7 @@ def _is_caption_noise(body: str) -> bool:
     if _CAPTION.match(body) or _CAPTION_INLINE.search(body):
         return True
     toks = body.split()
-    if toks and sum(bool(_NUMERIC_TOK.match(t)) for t in toks) / len(toks) > 0.4:
-        return True
-    return False
+    return bool(toks) and sum(bool(_NUMERIC_TOK.match(t)) for t in toks) / len(toks) > 0.4
 
 
 def _pack_blocks(blocks: list[str], max_tokens: int, overlap_tokens: int) -> list[str]:

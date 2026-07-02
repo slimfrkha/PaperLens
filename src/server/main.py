@@ -23,6 +23,7 @@ from .chats import ChatStore, generate_name
 from .schemas import ChatRequest
 from .worker import IngestionWorker
 
+
 def create_app(config_path: str | None = None) -> FastAPI:
     cfg = load_config(config_path)
     web_dist = Path(cfg.paths.web_dist)
@@ -99,7 +100,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
     # ---- chat sessions ----
     @app.get("/api/chats")
     def list_chats():
-        return chats.list()
+        return chats.list_all()
 
     @app.post("/api/chats")
     def new_chat():
@@ -147,8 +148,12 @@ def create_app(config_path: str | None = None) -> FastAPI:
                     if not existing or not existing.get("name"):
                         name = generate_name(req.messages[0].content, cfg.llm.tagging)
                     saved = chats.append_turn(
-                        req.chat_id, req.messages[-1].content, text, citations,
-                        trace_entries, name=name,
+                        req.chat_id,
+                        req.messages[-1].content,
+                        text,
+                        citations,
+                        trace_entries,
+                        name=name,
                     )
                     emit("meta", json.dumps({"chat_id": saved["id"], "name": saved["name"]}))
             except Exception as e:  # surface errors to the client

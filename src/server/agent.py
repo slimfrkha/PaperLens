@@ -61,9 +61,10 @@ class ChatAgent:
         self.client = build_llm(cfg.llm.chat)
 
     def _system(self, paper_ids: list[str] | None) -> str:
-        papers = ", ".join(
-            f"{p['paper_id']} ({p['title']})" for p in self.manifest.papers()
-        ) or "(none yet)"
+        papers = (
+            ", ".join(f"{p['paper_id']} ({p['title']})" for p in self.manifest.papers())
+            or "(none yet)"
+        )
         if paper_ids is not None:
             note = (
                 "The user restricted this conversation to these papers: "
@@ -121,7 +122,7 @@ class ChatAgent:
                     "snippet": r.body[:500],
                 }
                 # Full passage — exactly what the model receives, shown verbatim in the trace.
-                blocks.append(f"[{ref}] paper={r.paper_id}  section=\"{r.breadcrumb}\"\n{r.body}")
+                blocks.append(f'[{ref}] paper={r.paper_id}  section="{r.breadcrumb}"\n{r.body}')
             observation = "\n\n".join(blocks)
             trace({"type": "observation", "text": observation})
             return observation

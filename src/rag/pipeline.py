@@ -9,14 +9,14 @@ from __future__ import annotations
 import os
 import re
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import httpx
 
 from .config import Config, Paper
 from .extract import pdf_to_markdown
-from .index import index_markdown, open_collection
+from .index import index_markdown
 from .manifest import Manifest
 from .tagger import generate_tags
 
@@ -32,8 +32,12 @@ def build_embedder_from_config(cfg: Config):
 
     e = cfg.embedding
     return build_embedder(
-        e.model, e.type, batch_size=e.batch_size,
-        api_base=e.api_base, api_key_env=e.api_key_env, max_seq_length=e.max_seq_length,
+        e.model,
+        e.type,
+        batch_size=e.batch_size,
+        api_base=e.api_base,
+        api_key_env=e.api_key_env,
+        max_seq_length=e.max_seq_length,
     )
 
 
@@ -72,6 +76,7 @@ def ingest_paper(
     on_stage: OnStage | None = None,
 ) -> dict:
     """Run one paper through the full pipeline and record it in the manifest."""
+
     def stage(name: str, pct: float = 0.0):
         if on_stage:
             on_stage(name, pct)

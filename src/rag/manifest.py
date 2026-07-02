@@ -53,7 +53,5 @@ class Manifest:
         """Paper ids tagged with ANY of the given tags (OR semantics)."""
         wanted = set(tags)
         return [
-            rec["paper_id"]
-            for rec in self._load().values()
-            if wanted & set(rec.get("tags", []))
+            rec["paper_id"] for rec in self._load().values() if wanted & set(rec.get("tags", []))
         ]

@@ -26,7 +26,8 @@ def retag(cfg, manifest: Manifest) -> None:
         if not md_path.exists():
             continue
         tags = generate_tags(
-            md_path.read_text(), cfg.llm.tagging,
+            md_path.read_text(),
+            cfg.llm.tagging,
             existing_tags=[t["tag"] for t in manifest.all_tags()],
         )
         rec["tags"] = tags
@@ -37,8 +38,11 @@ def retag(cfg, manifest: Manifest) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", default=None)
-    p.add_argument("--retag", action="store_true",
-                   help="regenerate tags for already-ingested papers, then exit")
+    p.add_argument(
+        "--retag",
+        action="store_true",
+        help="regenerate tags for already-ingested papers, then exit",
+    )
     args = p.parse_args()
 
     cfg = load_config(args.config)
@@ -61,7 +65,11 @@ def main() -> None:
     for paper in pending:
         print(f"\n-- {paper.name} ({paper.arxiv_id}) --")
         rec = ingest_paper(
-            paper, cfg, embedder, collection, manifest,
+            paper,
+            cfg,
+            embedder,
+            collection,
+            manifest,
             on_stage=lambda s, pct: print(f"   {s:9s} {int(pct * 100):3d}%"),
         )
         print(f"   -> {rec['n_chunks']} chunks, tags: {', '.join(rec['tags']) or '(none)'}")

@@ -18,7 +18,7 @@ import argparse
 import json
 import os
 from abc import ABC, abstractmethod
-from typing import Callable
+from collections.abc import Callable
 
 from .config import LLMSpec
 
@@ -51,8 +51,7 @@ class LLMBackend(ABC):
         self.spec = spec
 
     @abstractmethod
-    def complete(self, system: str, user: str, max_tokens: int | None = None) -> str:
-        ...
+    def complete(self, system: str, user: str, max_tokens: int | None = None) -> str: ...
 
     @abstractmethod
     def run_tools(
@@ -64,8 +63,7 @@ class LLMBackend(ABC):
         on_text: OnText | None = None,
         on_reasoning: OnText | None = None,
         max_rounds: int = 8,
-    ) -> str:
-        ...
+    ) -> str: ...
 
 
 class AnthropicBackend(LLMBackend):
@@ -86,8 +84,9 @@ class AnthropicBackend(LLMBackend):
         )
         return "".join(b.text for b in msg.content if b.type == "text")
 
-    def run_tools(self, system, messages, tools, execute, on_text=None,
-                  on_reasoning=None, max_rounds=8):
+    def run_tools(
+        self, system, messages, tools, execute, on_text=None, on_reasoning=None, max_rounds=8
+    ):
         client = self._client()
         convo = [dict(m) for m in messages]
         final_text = ""
@@ -116,17 +115,19 @@ class AnthropicBackend(LLMBackend):
             if not tool_uses:
                 return final_text
             convo.append({"role": "assistant", "content": msg.content})
-            convo.append({
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tu.id,
-                        "content": execute(tu.name, tu.input or {}),
-                    }
-                    for tu in tool_uses
-                ],
-            })
+            convo.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tu.id,
+                            "content": execute(tu.name, tu.input or {}),
+                        }
+                        for tu in tool_uses
+                    ],
+                }
+            )
         return final_text
 
 
@@ -155,8 +156,9 @@ class OpenAICompatBackend(LLMBackend):
         )
         return resp.choices[0].message.content or ""
 
-    def run_tools(self, system, messages, tools, execute, on_text=None,
-                  on_reasoning=None, max_rounds=8):
+    def run_tools(
+        self, system, messages, tools, execute, on_text=None, on_reasoning=None, max_rounds=8
+    ):
         client = self._client()
         oai_tools = [
             {
@@ -211,28 +213,32 @@ class OpenAICompatBackend(LLMBackend):
             if not tool_calls:
                 return final_text
 
-            convo.append({
-                "role": "assistant",
-                "content": content or None,
-                "tool_calls": [
-                    {
-                        "id": c["id"],
-                        "type": "function",
-                        "function": {"name": c["name"], "arguments": c["args"] or "{}"},
-                    }
-                    for c in tool_calls.values()
-                ],
-            })
+            convo.append(
+                {
+                    "role": "assistant",
+                    "content": content or None,
+                    "tool_calls": [
+                        {
+                            "id": c["id"],
+                            "type": "function",
+                            "function": {"name": c["name"], "arguments": c["args"] or "{}"},
+                        }
+                        for c in tool_calls.values()
+                    ],
+                }
+            )
             for c in tool_calls.values():
                 try:
                     args = json.loads(c["args"] or "{}")
                 except json.JSONDecodeError:
                     args = {}
-                convo.append({
-                    "role": "tool",
-                    "tool_call_id": c["id"],
-                    "content": execute(c["name"], args),
-                })
+                convo.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": c["id"],
+                        "content": execute(c["name"], args),
+                    }
+                )
         return final_text
 
 
@@ -245,6 +251,7 @@ class SGLangBackend(OpenAICompatBackend):
 
 
 # ---- Gemini (Google Generative Language API — its own wire format) ---------
+
 
 def _gemini_type(t: str):
     from google.genai import types
@@ -317,8 +324,9 @@ class GeminiBackend(LLMBackend):
         )
         return resp.text or ""
 
-    def run_tools(self, system, messages, tools, execute, on_text=None,
-                  on_reasoning=None, max_rounds=8):
+    def run_tools(
+        self, system, messages, tools, execute, on_text=None, on_reasoning=None, max_rounds=8
+    ):
         from google.genai import types
 
         client = self._client()
@@ -389,10 +397,10 @@ def build_llm(spec: LLMSpec) -> LLMBackend:
     """Instantiate the backend for a config LLMSpec."""
     try:
         return _BACKENDS[spec.provider](spec)
-    except KeyError:
+    except KeyError as err:
         raise ValueError(
             f"Unknown LLM provider {spec.provider!r}; expected one of {sorted(_BACKENDS)}"
-        )
+        ) from err
 
 
 def _selftest() -> None:
@@ -420,7 +428,9 @@ def _selftest() -> None:
 
     out = llm.run_tools(
         system="You are a helpful assistant. Use tools when needed.",
-        messages=[{"role": "user", "content": "What's the weather in Paris? Use the tool, then answer."}],
+        messages=[
+            {"role": "user", "content": "What's the weather in Paris? Use the tool, then answer."}
+        ],
         tools=tools,
         execute=execute,
         on_text=lambda t: print(t, end="", flush=True),

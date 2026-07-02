@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import textwrap
 from dataclasses import dataclass
+from typing import Any, cast
 
 from .embedders import HFEmbedder
 
@@ -68,9 +69,7 @@ class Searcher:
         if self._reranker is None:
             from sentence_transformers import CrossEncoder
 
-            self._reranker = CrossEncoder(
-                self._reranker_model, device=self.device, max_length=512
-            )
+            self._reranker = CrossEncoder(self._reranker_model, device=self.device, max_length=512)
         return self._reranker
 
     def search(
@@ -92,11 +91,16 @@ class Searcher:
         where = {"paper_id": {"$in": ids}} if ids is not None else None
 
         qvec = self.embedder([query])
-        res = self.collection.query(
-            query_embeddings=qvec,
-            n_results=candidates,
-            where=where,
-            include=["documents", "metadatas", "distances"],
+        # Chroma's type stubs narrow query_embeddings/results more tightly than
+        # runtime accepts; the include= keys are always present and non-None here.
+        res = cast(
+            dict[str, Any],
+            self.collection.query(
+                query_embeddings=qvec,  # ty: ignore[invalid-argument-type]  # list invariance vs Chroma's Sequence param
+                n_results=candidates,
+                where=where,
+                include=["documents", "metadatas", "distances"],
+            ),
         )
         docs = res["documents"][0]
         metas = res["metadatas"][0]
@@ -113,12 +117,12 @@ class Searcher:
                 text=doc,
                 body=doc.split("\n\n", 1)[-1],
             )
-            for doc, m, d in zip(docs, metas, dists)
+            for doc, m, d in zip(docs, metas, dists, strict=True)
         ]
 
         if rerank:
             scores = self.reranker.predict([(query, r.text) for r in results])
-            for r, s in zip(results, scores):
+            for r, s in zip(results, scores, strict=True):
                 r.score = float(s)
             results.sort(key=lambda r: r.score, reverse=True)
 
@@ -126,7 +130,9 @@ class Searcher:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("query")
     p.add_argument("--db-dir", default="rag_db")
     p.add_argument("--collection", default="arxiv_papers")
@@ -153,7 +159,7 @@ def main() -> None:
     )
 
     tag = "vector" if args.no_rerank else "rerank"
-    print(f'\nQ: {args.query}   [{tag}, top {args.k} of {args.candidates} candidates]')
+    print(f"\nQ: {args.query}   [{tag}, top {args.k} of {args.candidates} candidates]")
     for r in results:
         crumb = r.breadcrumb.split(" > ", 1)[-1]
         snippet = textwrap.shorten(r.body.replace("\n", " "), width=200)

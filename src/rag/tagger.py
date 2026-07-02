@@ -27,9 +27,7 @@ def _excerpt(md: str, max_chars: int = 6000) -> str:
             abstract = "\n".join(lines[i + 1 : i + 25])
             break
     title = headings[0][3:].strip() if headings else ""
-    body = f"Title: {title}\n\nAbstract:\n{abstract}\n\nSection headings:\n" + "\n".join(
-        headings
-    )
+    body = f"Title: {title}\n\nAbstract:\n{abstract}\n\nSection headings:\n" + "\n".join(headings)
     return body[:max_chars]
 
 

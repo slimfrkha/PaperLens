@@ -44,3 +44,10 @@ packages = ["src/rag", "src/server"]
 [tool.ruff]
 src = ["src"]
 line-length = 100
+
+[tool.ruff.lint]
+# pycodestyle, pyflakes, isort, pyupgrade, bugbear, simplify
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.format]
+quote-style = "double"
