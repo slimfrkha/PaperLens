@@ -15,15 +15,20 @@ paths:
 collection: arxiv_papers  # Chroma collection name
 
 embedding:
-  model: BAAI/bge-m3      # HF model id, or API model name when type=openai
-  type: hf                # hf | openai
-  max_seq_length: 1024    # cap guards MPS 2**32 tensor limit on Apple Silicon
+  model: BAAI/bge-m3      # HF model id, or API model name for the API types
+  type: hf                # hf | openai | gemini | ollama
+                          #   gemini  -> Google GenAI (set api_key_env: GEMINI_API_KEY)
+                          #   ollama  -> native /api/embed (set api_base: http://localhost:11434)
+                          #   openai  -> any OpenAI-compatible endpoint (set api_base)
+  max_seq_length: 1024    # cap guards MPS 2**32 tensor limit on Apple Silicon (hf only)
   batch_size: 32
-  api_base: null          # OpenAI-compatible base URL (type=openai only)
-  api_key_env: OPENAI_API_KEY
+  api_base: null          # base URL for openai/ollama types
+  api_key_env: OPENAI_API_KEY  # env var holding the key (openai=OPENAI_API_KEY, gemini=GEMINI_API_KEY)
 
 reranker:
-  model: BAAI/bge-reranker-v2-m3
+  model: BAAI/bge-reranker-v2-m3  # cross-encoder model id (hf type)
+  type: hf                # hf  -> local cross-encoder above
+                          # llm -> reuse the chat LLM to score relevance (no extra model/deps)
   enabled: true
 
 llm:

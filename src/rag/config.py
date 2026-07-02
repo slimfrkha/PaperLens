@@ -43,6 +43,7 @@ class EmbeddingCfg(BaseModel):
 
 class RerankerCfg(BaseModel):
     model: str = "BAAI/bge-reranker-v2-m3"
+    type: str = "hf"  # hf (cross-encoder) | llm (reuses the chat LLM)
     enabled: bool = True
 
 

@@ -14,8 +14,10 @@ from sse_starlette.sse import EventSourceResponse
 
 from rag.config import load_config
 from rag.index import open_collection
+from rag.llm import build_llm
 from rag.manifest import Manifest
 from rag.pipeline import pending_papers
+from rag.reranker import build_reranker
 from rag.search import Searcher
 
 from .agent import ChatAgent
@@ -43,7 +45,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
                 db_dir=cfg.paths.rag_db,
                 collection=cfg.collection,
                 embedder_model=cfg.embedding.model,
-                reranker_model=cfg.reranker.model,
+                reranker=build_reranker(cfg.reranker, llm=build_llm(cfg.llm.chat)),
             )
             lazy["agent"] = ChatAgent(cfg, searcher, manifest)
         return lazy["agent"]

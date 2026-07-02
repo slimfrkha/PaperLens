@@ -1,13 +1,15 @@
 """Pluggable embedding backends for indexing.
 
-Two backends, registered under a config ``type`` string via ``@register_embedder``:
+Backends registered under a config ``type`` string via ``@register_embedder``:
 
 * ``hf``     — any sentence-transformers / HuggingFace model, run locally
                (default; uses Apple MPS when available).
 * ``openai`` — any OpenAI-compatible embeddings endpoint (OpenAI itself, or
                a local/other server via ``--api-base``).
+* ``gemini`` — Google GenAI embeddings (asymmetric: document vs query task type).
+* ``ollama`` — Ollama's native ``/api/embed`` endpoint.
 
-Both expose the Chroma ``EmbeddingFunction`` protocol: ``__call__(input) -> list[list[float]]``.
+All expose the Chroma ``EmbeddingFunction`` protocol: ``__call__(input) -> list[list[float]]``.
 Add a backend by dropping a ``@register_embedder("name")`` class here — ``build_embedder``
 discovers it via the registry, no other wiring needed.
 """
@@ -31,7 +33,15 @@ class Embedder(ABC):
         """Stable id Chroma uses to namespace/validate the collection."""
 
     @abstractmethod
-    def __call__(self, input: list[str]) -> list[list[float]]: ...
+    def __call__(self, input: list[str]) -> list[list[float]]:
+        """Embed documents (index-time)."""
+
+    def embed_query(self, input: list[str]) -> list[list[float]]:
+        """Embed search queries. Symmetric models reuse ``__call__``; asymmetric
+        ones (e.g. Gemini/Cohere/Voyage, which want a query-vs-document hint)
+        override this. Kept off the Chroma protocol, so ``Searcher`` calls it
+        only when present."""
+        return self(input)
 
     @classmethod
     @abstractmethod
@@ -161,6 +171,113 @@ class OpenAIEmbedder(Embedder):
         max_seq_length: int,
     ) -> OpenAIEmbedder:
         return cls(model_name, api_base=api_base, api_key_env=api_key_env, batch_size=batch_size)
+
+
+@register_embedder("gemini")
+class GeminiEmbedder(Embedder):
+    """Google GenAI embeddings (e.g. ``text-embedding-004``, ``gemini-embedding-001``).
+
+    Asymmetric: documents are embedded with ``RETRIEVAL_DOCUMENT`` and queries with
+    ``RETRIEVAL_QUERY`` (via :meth:`embed_query`), which the model uses to place a
+    query near the passages that answer it.
+    """
+
+    def __init__(
+        self,
+        model_name: str,
+        api_key_env: str = "GEMINI_API_KEY",
+        batch_size: int = 100,
+    ):
+        from google import genai
+
+        api_key = os.environ.get(api_key_env)
+        if not api_key:
+            raise RuntimeError(
+                f"No API key found in ${api_key_env}. Export it (or add it to .env)."
+            )
+        self.model_name = model_name
+        self.batch_size = batch_size
+        self.client = genai.Client(api_key=api_key)
+
+    def name(self) -> str:
+        return f"gemini:{self.model_name}"
+
+    def _embed(self, input: list[str], task_type: str) -> list[list[float]]:
+        from google.genai import types
+
+        out: list[list[float]] = []
+        for i in range(0, len(input), self.batch_size):
+            batch = input[i : i + self.batch_size]
+            resp = self.client.models.embed_content(
+                model=self.model_name,
+                contents=batch,  # ty: ignore[invalid-argument-type]  # SDK accepts list[str] at runtime; stub union omits it
+                config=types.EmbedContentConfig(task_type=task_type),
+            )
+            out.extend(e.values for e in (resp.embeddings or []) if e.values)
+        return out
+
+    def __call__(self, input: list[str]) -> list[list[float]]:
+        return self._embed(input, "RETRIEVAL_DOCUMENT")
+
+    def embed_query(self, input: list[str]) -> list[list[float]]:
+        return self._embed(input, "RETRIEVAL_QUERY")
+
+    @classmethod
+    def build(
+        cls,
+        model_name: str,
+        *,
+        batch_size: int,
+        api_base: str | None,
+        api_key_env: str,
+        max_seq_length: int,
+    ) -> GeminiEmbedder:
+        return cls(model_name, api_key_env=api_key_env, batch_size=batch_size)
+
+
+@register_embedder("ollama")
+class OllamaEmbedder(Embedder):
+    """Ollama's native ``/api/embed`` endpoint (batched). Needs no API key."""
+
+    def __init__(
+        self,
+        model_name: str,
+        api_base: str | None = None,
+        batch_size: int = 64,
+    ):
+        import httpx
+
+        self.model_name = model_name
+        self.api_base = (api_base or "http://localhost:11434").rstrip("/")
+        self.batch_size = batch_size
+        self.client = httpx.Client(timeout=120)
+
+    def name(self) -> str:
+        return f"ollama:{self.model_name}"
+
+    def __call__(self, input: list[str]) -> list[list[float]]:
+        out: list[list[float]] = []
+        for i in range(0, len(input), self.batch_size):
+            batch = input[i : i + self.batch_size]
+            resp = self.client.post(
+                f"{self.api_base}/api/embed",
+                json={"model": self.model_name, "input": batch},
+            )
+            resp.raise_for_status()
+            out.extend(resp.json()["embeddings"])
+        return out
+
+    @classmethod
+    def build(
+        cls,
+        model_name: str,
+        *,
+        batch_size: int,
+        api_base: str | None,
+        api_key_env: str,
+        max_seq_length: int,
+    ) -> OllamaEmbedder:
+        return cls(model_name, api_base=api_base, batch_size=batch_size)
 
 
 def build_embedder(

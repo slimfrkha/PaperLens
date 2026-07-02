@@ -18,7 +18,9 @@ config.yaml ─┬─> ingestion worker: download → markdown (Docling) → ind
 - **Chunking** is section-aware with hierarchical breadcrumbs rebuilt from the
   paper's section numbering (`src/rag/chunking.py`).
 - **Retrieval** is two-stage: dense `bge-m3` + `bge-reranker-v2-m3` cross-encoder
-  (`src/rag/search.py`).
+  (`src/rag/search.py`). Both stages are config-swappable — the embedder
+  (`embedding.type`: `hf` · `openai` · `gemini` · `ollama`) and the reranker
+  (`reranker.type`: `hf` cross-encoder · `llm`, which reuses the chat model).
 - **Tags** are LLM-generated at ingestion and power a tag filter that restricts
   search to matching papers.
 - **The LLM is an opaque config value** (`provider`, `api_base`, `model`) — point
@@ -106,7 +108,8 @@ src/
   rag/                 # retrieval + ingestion core
     config.py          # typed config loader, root anchoring (+ .env)
     chunking.py        # section-aware chunking + breadcrumbs
-    embedders.py       # pluggable HF / OpenAI embedders
+    embedders.py       # pluggable embedders (hf | openai | gemini | ollama)
+    reranker.py        # pluggable rerankers (hf cross-encoder | llm)
     search.py          # Searcher: retrieval + rerank (+ paper_ids filter)
     index.py           # chunk → embed → upsert (Chroma)
     extract.py         # PDF → markdown (Docling)

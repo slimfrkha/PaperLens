@@ -1,0 +1,86 @@
+"""Embedder registry + the two new API backends (offline: no server/network)."""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+
+from rag.embedders import _EMBEDDERS, build_embedder
+
+
+def test_registry_has_builtin_embedders():
+    assert {"hf", "openai", "gemini", "ollama"} <= set(_EMBEDDERS)
+
+
+def test_build_embedder_unknown_type_raises():
+    with pytest.raises(ValueError, match="Unknown embedder-type"):
+        build_embedder("m", "nope", batch_size=8)
+
+
+# ---- Ollama: native /api/embed, faked httpx client -------------------------
+
+
+class _FakeResp:
+    def __init__(self, n: int):
+        self._n = n
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {"embeddings": [[0.1, 0.2]] * self._n}
+
+
+class _FakeHTTP:
+    def __init__(self):
+        self.calls: list[tuple[str, dict]] = []
+
+    def post(self, url, json):
+        self.calls.append((url, json))
+        return _FakeResp(len(json["input"]))
+
+
+def test_ollama_embedder_batches_and_parses():
+    e = build_embedder("nomic-embed-text", "ollama", batch_size=64, api_base="http://h:11434/")
+    e.client = _FakeHTTP()
+
+    out = e(["x", "y"])
+
+    assert out == [[0.1, 0.2], [0.1, 0.2]]
+    assert e.name() == "ollama:nomic-embed-text"
+    url, payload = e.client.calls[0]
+    assert url == "http://h:11434/api/embed"  # trailing slash stripped
+    assert payload == {"model": "nomic-embed-text", "input": ["x", "y"]}
+
+
+# ---- Gemini: asymmetric document vs query task type ------------------------
+
+
+def test_gemini_embedder_is_asymmetric(monkeypatch):
+    genai = pytest.importorskip("google.genai")
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+
+    seen: list[str] = []
+
+    class FakeModels:
+        def embed_content(self, model, contents, config):
+            seen.append(config.task_type)
+            embs = [SimpleNamespace(values=[1.0, 2.0]) for _ in contents]
+            return SimpleNamespace(embeddings=embs)
+
+    class FakeClient:
+        def __init__(self, api_key=None):
+            self.models = FakeModels()
+
+    monkeypatch.setattr(genai, "Client", FakeClient)
+
+    from rag.embedders import GeminiEmbedder
+
+    e = GeminiEmbedder("text-embedding-004")
+    docs = e(["a", "b"])
+    query = e.embed_query(["c"])
+
+    assert len(docs) == 2 and len(query) == 1
+    assert seen == ["RETRIEVAL_DOCUMENT", "RETRIEVAL_QUERY"]
+    assert e.name() == "gemini:text-embedding-004"

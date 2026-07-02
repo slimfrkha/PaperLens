@@ -8,9 +8,9 @@ Module layering — imports flow one way (top -> bottom); there are no cycles::
 
     config  chunking  embedders  extract  manifest        (leaves: no intra-rag deps)
        |        |          |                    |
-      llm      index(chunking, embedders)     search(embedders)
-       |
-    tagger(llm)          pipeline(extract, index, manifest, tagger)
+      llm      index(chunking, embedders)     reranker(config, llm)
+       |                                        |
+    tagger(llm)   search(embedders, reranker)  pipeline(extract, index, manifest, tagger)
                               |
                          ingest(pipeline, index, manifest, tagger)
 
@@ -21,11 +21,20 @@ from __future__ import annotations
 
 from .chunking import Chunk, chunk_markdown
 from .config import Config, LLMSpec, Paper, load_config
-from .embedders import Embedder, HFEmbedder, OpenAIEmbedder, build_embedder, register_embedder
+from .embedders import (
+    Embedder,
+    GeminiEmbedder,
+    HFEmbedder,
+    OllamaEmbedder,
+    OpenAIEmbedder,
+    build_embedder,
+    register_embedder,
+)
 from .index import index_markdown, open_collection
 from .llm import LLMBackend, build_llm, register_llm
 from .manifest import Manifest
 from .pipeline import build_embedder_from_config, ingest_paper, pending_papers
+from .reranker import Reranker, build_reranker, register_reranker
 from .search import Result, Searcher
 from .tagger import generate_tags
 
@@ -33,17 +42,21 @@ __all__ = [
     "Chunk",
     "Config",
     "Embedder",
+    "GeminiEmbedder",
     "HFEmbedder",
     "LLMBackend",
     "LLMSpec",
     "Manifest",
+    "OllamaEmbedder",
     "OpenAIEmbedder",
     "Paper",
+    "Reranker",
     "Result",
     "Searcher",
     "build_embedder",
     "build_embedder_from_config",
     "build_llm",
+    "build_reranker",
     "chunk_markdown",
     "generate_tags",
     "index_markdown",
@@ -53,4 +66,5 @@ __all__ = [
     "pending_papers",
     "register_embedder",
     "register_llm",
+    "register_reranker",
 ]

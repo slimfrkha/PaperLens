@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from .embedders import HFEmbedder
+from .reranker import CrossEncoderReranker, Reranker
 
 DEFAULT_EMBEDDER = "BAAI/bge-m3"
 DEFAULT_RERANKER = "BAAI/bge-reranker-v2-m3"
@@ -56,6 +57,7 @@ class Searcher:
         reranker_model: str = DEFAULT_RERANKER,
         device: str | None = None,
         embedder=None,
+        reranker: Reranker | None = None,
     ):
         import chromadb
 
@@ -65,14 +67,14 @@ class Searcher:
         self.embedder = embedder or HFEmbedder(embedder_model, device=self.device)
         self.collection = chromadb.PersistentClient(path=db_dir).get_collection(collection)
         self._reranker_model = reranker_model
-        self._reranker = None  # lazy: only load when reranking is actually used
+        # Inject a Reranker (e.g. the config-built llm reranker) or leave None to
+        # lazily build the default hf cross-encoder on first use.
+        self._reranker = reranker
 
     @property
-    def reranker(self):
+    def reranker(self) -> Reranker:
         if self._reranker is None:
-            from sentence_transformers import CrossEncoder
-
-            self._reranker = CrossEncoder(self._reranker_model, device=self.device, max_length=512)
+            self._reranker = CrossEncoderReranker(self._reranker_model, device=self.device)
         return self._reranker
 
     def search(
@@ -93,7 +95,10 @@ class Searcher:
             return []
         where = {"paper_id": {"$in": ids}} if ids is not None else None
 
-        qvec = self.embedder([query])
+        # Asymmetric embedders (e.g. Gemini) embed queries differently from docs;
+        # symmetric ones fall through to __call__.
+        embed_query = getattr(self.embedder, "embed_query", None)
+        qvec = embed_query([query]) if embed_query else self.embedder([query])
         # Chroma's type stubs narrow query_embeddings/results more tightly than
         # runtime accepts; the include= keys are always present and non-None here.
         res = cast(
@@ -124,9 +129,9 @@ class Searcher:
         ]
 
         if rerank:
-            scores = self.reranker.predict([(query, r.text) for r in results])
+            scores = self.reranker.score(query, [r.text for r in results])
             for r, s in zip(results, scores, strict=True):
-                r.score = float(s)
+                r.score = s
             results.sort(key=lambda r: r.score, reverse=True)
 
         return results[:k]
