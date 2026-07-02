@@ -66,6 +66,20 @@ class LLMBackend(ABC):
     ) -> str: ...
 
 
+_BACKENDS: dict[str, type[LLMBackend]] = {}
+
+
+def register_llm(provider: str):
+    """Register an :class:`LLMBackend` subclass under a config ``provider`` string."""
+
+    def deco(cls: type[LLMBackend]) -> type[LLMBackend]:
+        _BACKENDS[provider] = cls
+        return cls
+
+    return deco
+
+
+@register_llm("anthropic")
 class AnthropicBackend(LLMBackend):
     """Anthropic Messages API (tool_use / tool_result blocks, streaming)."""
 
@@ -131,6 +145,7 @@ class AnthropicBackend(LLMBackend):
         return final_text
 
 
+@register_llm("openai")
 class OpenAICompatBackend(LLMBackend):
     """OpenAI Chat Completions wire format.
 
@@ -242,10 +257,12 @@ class OpenAICompatBackend(LLMBackend):
         return final_text
 
 
+@register_llm("vllm")
 class VLLMBackend(OpenAICompatBackend):
     """vLLM's OpenAI-compatible server — same wire format as OpenAI."""
 
 
+@register_llm("sglang")
 class SGLangBackend(OpenAICompatBackend):
     """SGLang's OpenAI-compatible server — same wire format as OpenAI."""
 
@@ -298,6 +315,7 @@ def _gemini_fn(tool: Tool):
     )
 
 
+@register_llm("gemini")
 class GeminiBackend(LLMBackend):
     """Google Gemini via the google-genai SDK.
 
@@ -382,15 +400,6 @@ class GeminiBackend(LLMBackend):
                 )
             )
         return final_text
-
-
-_BACKENDS: dict[str, type[LLMBackend]] = {
-    "anthropic": AnthropicBackend,
-    "openai": OpenAICompatBackend,
-    "vllm": VLLMBackend,
-    "sglang": SGLangBackend,
-    "gemini": GeminiBackend,
-}
 
 
 def build_llm(spec: LLMSpec) -> LLMBackend:
