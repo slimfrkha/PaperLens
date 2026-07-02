@@ -136,3 +136,13 @@ uv run pytest                    # tests
 
 Auto-fix formatting/lint with `uv run ruff format src` and
 `uv run ruff check --fix src`.
+
+Install the pre-commit hooks once per clone so the fast, auto-fixing subset of
+the gate (ruff format + `ruff check --fix`, codespell, whitespace/YAML/TOML
+hygiene) runs on every commit, and commits straight to `main` are blocked:
+
+```bash
+uv run pre-commit install
+```
+
+`ty` and `pytest` stay out of the hooks (CI-only) so commits stay fast.

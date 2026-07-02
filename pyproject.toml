@@ -59,3 +59,8 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.codespell]
+skip = "*.lock,*package-lock.json,.git,.venv,data,web/node_modules,web/dist,.ruff_cache,.pytest_cache"
+# ontext: the `on_text`/`OnText` streaming callback name, not a typo of "context".
+ignore-words-list = "ontext"
