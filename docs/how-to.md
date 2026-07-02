@@ -1,0 +1,185 @@
+# How-to guides
+
+**For:** someone with PaperLens already running who has a specific task. Each recipe is
+self-contained. For the meaning of every key, see [Configuration](configuration.md); for
+why the pieces fit together, see [Architecture](architecture.md).
+
+- [Add papers](#add-papers)
+- [Re-tag papers](#re-tag-papers)
+- [Switch the chat or tagging LLM](#switch-the-chat-or-tagging-llm)
+- [Switch the embedder](#switch-the-embedder)
+- [Use the LLM reranker (no extra model)](#use-the-llm-reranker)
+- [Add a new LLM backend (code)](#add-a-new-llm-backend)
+- [Add a new embedder backend (code)](#add-a-new-embedder-backend)
+
+---
+
+## Add papers
+
+1. Add a line to `papers` in `config.yaml`:
+
+   ```yaml
+   papers:
+     - { name: my-model-report, arxiv_id: "2501.01234" }
+   ```
+
+   `name` becomes the `paper_id` (filename stem, manifest key, search filter). Keep it
+   short and unique. Quote the `arxiv_id`.
+
+2. Ingest it. Either hit **Re-scan** on the Admin page (no restart), or run headless:
+
+   ```bash
+   uv run paperlens-ingest
+   ```
+
+   Only papers not already in the DB are processed.
+
+3. Verify: the paper appears on the **Papers** page with tags, and the Admin chunk count
+   rises. Ask a question the new paper should answer and check the citations point to it.
+
+---
+
+## Re-tag papers
+
+Regenerate tags for already-ingested papers without re-indexing (e.g. after changing the
+tagging model):
+
+```bash
+uv run paperlens-ingest --retag
+```
+
+Verify: the printed tags per paper change, and the **Papers** page / tag filter reflect
+them.
+
+---
+
+## Switch the chat or tagging LLM
+
+Edit `llm.chat` (the agent) or `llm.tagging` (ingestion tags) in `config.yaml`. The chat
+model **must support tool/function calling**.
+
+**A cloud provider (Anthropic):**
+
+```bash
+uv sync --extra anthropic   # installs the anthropic client (lazy extra)
+```
+
+```yaml
+llm:
+  chat:
+    provider: anthropic
+    model: claude-opus-4-8
+    api_key_env: ANTHROPIC_API_KEY
+```
+
+Put the key in `.env`: `ANTHROPIC_API_KEY=sk-...`. Use `uv sync --extra gemini` and
+`provider: gemini` (key `GEMINI_API_KEY`) for Google.
+
+**Any OpenAI-compatible server** (LM Studio, Ollama `/v1`, vLLM, SGLang, llama.cpp):
+
+```yaml
+llm:
+  chat:
+    provider: openai        # or vllm / sglang — all speak the OpenAI wire format
+    model: <model-the-endpoint-serves>
+    api_base: http://127.0.0.1:1234/v1
+    api_key_env: LOCAL_LLM_KEY   # local servers ignore the key
+```
+
+Restart `paperlens-serve`. Verify: ask a question and confirm the agent still searches and
+cites. If it never calls the tool, the served model likely lacks tool-calling support.
+
+---
+
+## Switch the embedder
+
+Set `embedding.type` in `config.yaml` to `hf`, `openai`, `gemini`, or `ollama`, and set
+`model` (plus `api_base`/`api_key_env` for API types). Examples:
+
+```yaml
+embedding:
+  type: ollama
+  model: bge-m3
+  api_base: http://localhost:11434
+```
+
+```yaml
+embedding:
+  type: gemini
+  model: text-embedding-004
+  api_key_env: GEMINI_API_KEY   # uv sync --extra gemini
+```
+
+> **Changing the embedder changes the vectors.** The embedder name is baked into the Chroma
+> collection, so switching means re-indexing. Delete the RAG DB directory (`paths.rag_db`)
+> and re-ingest, or use a fresh `collection` name.
+
+Verify: re-ingest one paper, then search — you should get sensible passages.
+
+---
+
+## Use the LLM reranker
+
+Rerank with the chat model instead of loading the local cross-encoder (no extra model or
+download):
+
+```yaml
+reranker:
+  type: llm
+  enabled: true
+```
+
+The `llm` reranker reuses `llm.chat`. Verify: search still returns results; if the model's
+scoring response can't be parsed, it degrades to the dense-retrieval order rather than
+erroring.
+
+---
+
+## Add a new LLM backend
+
+Backends are discovered through a **registry** — one decorated class, no other wiring.
+
+1. In `src/rag/llm.py`, subclass `LLMBackend` and decorate it:
+
+   ```python
+   @register_llm("myprovider")
+   class MyBackend(LLMBackend):
+       def __init__(self, spec: LLMSpec): ...
+       def complete(self, system: str, user: str, *, max_tokens: int) -> str: ...
+       def run_tools(self, *, system, messages, tools, execute, on_text, on_reasoning): ...
+   ```
+
+   Match the method signatures of the existing backends (`AnthropicBackend`,
+   `OpenAICompatBackend`). If the provider speaks the OpenAI wire format, subclass
+   `OpenAICompatBackend` instead (see `VLLMBackend` / `SGLangBackend`).
+
+2. Set `provider: myprovider` in a `config.yaml` LLM spec. `build_llm` dispatches on it.
+
+3. Verify: add a unit test alongside `tests/unit/test_llm.py` (use the `fake_llm` pattern
+   where possible). Run the [gate](../CONTRIBUTING.md#the-gate).
+
+---
+
+## Add a new embedder backend
+
+Same registry pattern, in `src/rag/embedders.py`:
+
+1. Subclass `Embedder`, decorate it, and implement `build` (constructs from the shared
+   config fields), `name` (namespaces the Chroma collection), and `__call__`:
+
+   ```python
+   @register_embedder("myembedder")
+   class MyEmbedder(Embedder):
+       @classmethod
+       def build(cls, model, *, batch_size, api_base, api_key_env, max_seq_length): ...
+       def name(self) -> str: ...
+       def __call__(self, input: list[str]) -> list[list[float]]: ...
+   ```
+
+   Implement `embed_query` too if queries embed differently from documents (see the Gemini
+   embedder).
+
+2. Set `embedding.type: myembedder`. `build_embedder` dispatches on it.
+
+3. Verify: add a test near `tests/unit/test_embedders.py`; run the gate. Remember a new
+   embedder means a fresh index (see the note above).

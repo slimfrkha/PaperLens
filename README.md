@@ -8,7 +8,7 @@ and watch ingestion progress in an admin panel. Everything is driven by a single
 
 ## How it works
 
-```
+```text
 config.yaml ─┬─> ingestion worker: download → markdown (Docling) → index (Chroma) → LLM tags
              └─> FastAPI backend ── agentic RAG ──> LLM (Claude | any OpenAI-compatible server)
                        │  tool: search_papers → Searcher (bge-m3 + bge-reranker-v2-m3)
@@ -49,44 +49,24 @@ make install
 > `uv run paperlens-serve` / `uv run python -m server` work from a clean checkout.
 > Run project commands with `uv run <cmd>` (or activate `.venv`).
 
-Provide LLM credentials in a `.env` (copy `.env.example`) if using a cloud
-provider — local servers need no key.
+Provide LLM credentials in a `.env` (e.g. `ANTHROPIC_API_KEY=...`) if using a
+cloud provider — local servers need no key.
 
-## Configuration — `config.yaml`
-
-Single source of truth: paths, embedder, reranker, tagging/chat LLMs, server,
-and the **paper list** (arXiv id + name). Add a paper by adding a line and
-hitting *Re-scan* in the admin panel (or restarting). Nothing is hardcoded in
-scripts. The chat model must support tool/function calling (the agent calls a
-`search_papers` tool).
-
-## Running
+## Quickstart
 
 ```bash
-# 1) Start the app — this ALSO auto-starts the ingestion worker.
-#    On first run the DB is empty; the UI says so while papers ingest.
-uv run paperlens-serve     # serves http://127.0.0.1:8000
-                                 # (equivalently: uv run python -m server)
-
-# 2) Frontend (dev, hot reload, proxies /api → backend)
-npm --prefix web run dev         # http://localhost:5173
-
-# For a single-origin production build served by FastAPI:
-npm --prefix web run build       # → web/dist, served at http://127.0.0.1:8000
-
-# ...or run backend + frontend dev server together:
-make dev
+uv run paperlens-serve      # serves http://127.0.0.1:8000, auto-starts ingestion
+npm --prefix web run dev    # UI at http://localhost:5173 (proxies /api → backend)
 ```
 
-Commands are CWD-independent — `config.yaml` is found by searching upward from
-the working directory (override with `--config` or `$PAPERLENS_CONFIG`).
+Open the UI, watch papers ingest on the **Admin** page, then ask a question on
+**Chat**. Full walkthrough with expected output:
+[Getting started](docs/getting-started.md).
 
-Headless ingestion (same pipeline as the worker), without the server:
-
-```bash
-uv run paperlens-ingest           # ingest every config paper not yet in the DB
-uv run paperlens-ingest --retag   # regenerate tags for existing papers (no re-index)
-```
+Everything is driven by `config.yaml` — paths, models, the server, and the paper
+list. The chat model must support tool/function calling (the agent calls a
+`search_papers` tool). Every key, command, and API route:
+[Configuration & commands](docs/configuration.md).
 
 ## Pages
 
@@ -98,54 +78,24 @@ uv run paperlens-ingest --retag   # regenerate tags for existing papers (no re-i
 - **Admin** — paper/chunk counts, tag explorer, pending papers, and a live
   ingestion progress bar.
 
-## Layout
+## Documentation
 
-```
-config.yaml            # all configuration + paper list (project root; anchors relative paths)
-pyproject.toml         # packaging, deps, console scripts
-Makefile               # install / dev / ingest / build
-src/
-  rag/                 # retrieval + ingestion core
-    config.py          # typed config loader, root anchoring (+ .env)
-    chunking.py        # section-aware chunking + breadcrumbs
-    embedders.py       # pluggable embedders (hf | openai | gemini | ollama)
-    reranker.py        # pluggable rerankers (hf cross-encoder | llm)
-    search.py          # Searcher: retrieval + rerank (+ paper_ids filter)
-    index.py           # chunk → embed → upsert (Chroma)
-    extract.py         # PDF → markdown (Docling)
-    tagger.py          # LLM tag generation
-    llm.py             # provider-agnostic LLM client (tool-use loop)
-    manifest.py        # papers.json (paper metadata + tags)
-    pipeline.py        # download → md → index → tag → manifest
-    ingest.py          # headless ingestion CLI (+ --retag)
-  server/              # FastAPI backend + ingestion worker
-    main.py  agent.py  worker.py  chats.py  schemas.py
-web/                   # Vite + React + Mantine frontend
-data/                  # git-ignored runtime: papers/, rag_db/, chat_history/
-docs/                  # notes (e.g. done.md)
-```
+Full docs live in [`docs/`](docs/README.md):
 
-## Development gate
+- [Getting started](docs/getting-started.md) — install and ask your first question.
+- [Configuration & commands](docs/configuration.md) — every `config.yaml` key, command, and API route.
+- [How-to guides](docs/how-to.md) — add papers, swap backends, use a cloud provider.
+- [Architecture](docs/architecture.md) — chunking, two-stage retrieval, the agent loop.
+- [CONTRIBUTING](CONTRIBUTING.md) — dev setup, the gate, conventions.
+- [CONTEXT](CONTEXT.md) — domain glossary.
 
-Run this 4-command gate before considering any change done — it is identical
-locally and in CI:
+## Contributing
 
-```bash
-uv run ruff format --check src   # formatting
-uv run ruff check src            # lint
-uv run ty check src              # type check
-uv run pytest                    # tests
-```
+Dev setup, the annotated project layout, the module layering rule, and the
+4-command gate (`ruff format --check` · `ruff check` · `ty check` · `pytest`)
+live in [CONTRIBUTING.md](CONTRIBUTING.md). New to the codebase? Start with the
+[domain glossary](CONTEXT.md).
 
-Auto-fix formatting/lint with `uv run ruff format src` and
-`uv run ruff check --fix src`.
+## License
 
-Install the pre-commit hooks once per clone so the fast, auto-fixing subset of
-the gate (ruff format + `ruff check --fix`, codespell, whitespace/YAML/TOML
-hygiene) runs on every commit, and commits straight to `main` are blocked:
-
-```bash
-uv run pre-commit install
-```
-
-`ty` and `pytest` stay out of the hooks (CI-only) so commits stay fast.
+See [LICENSE](LICENSE).
