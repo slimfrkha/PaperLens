@@ -54,11 +54,12 @@ Papers in the library: {papers}"""
 
 
 class ChatAgent:
-    def __init__(self, cfg: Config, searcher: Searcher, manifest: Manifest):
+    def __init__(self, cfg: Config, searcher: Searcher, manifest: Manifest, client=None):
         self.cfg = cfg
         self.searcher = searcher
         self.manifest = manifest
-        self.client = build_llm(cfg.llm.chat)
+        # Inject an LLM client to run offline (tests); default uses the configured chat model.
+        self.client = client or build_llm(cfg.llm.chat)
 
     def _system(self, paper_ids: list[str] | None) -> str:
         papers = (

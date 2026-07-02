@@ -55,11 +55,14 @@ class Searcher:
         embedder_model: str = DEFAULT_EMBEDDER,
         reranker_model: str = DEFAULT_RERANKER,
         device: str | None = None,
+        embedder=None,
     ):
         import chromadb
 
         self.device = _pick_device(device)
-        self.embedder = HFEmbedder(embedder_model, device=self.device)
+        # Query embedder: inject one to avoid loading the local model (tests); the
+        # default builds the same HF model used at indexing time.
+        self.embedder = embedder or HFEmbedder(embedder_model, device=self.device)
         self.collection = chromadb.PersistentClient(path=db_dir).get_collection(collection)
         self._reranker_model = reranker_model
         self._reranker = None  # lazy: only load when reranking is actually used

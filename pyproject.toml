@@ -41,6 +41,14 @@ dev = ["ruff", "ty", "pytest", "pytest-cov", "pre-commit"]
 [tool.hatch.build.targets.wheel]
 packages = ["src/rag", "src/server"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--import-mode=importlib"
+
+[tool.coverage.run]
+branch = true
+source = ["rag", "server"]
+
 [tool.ruff]
 src = ["src"]
 line-length = 100
