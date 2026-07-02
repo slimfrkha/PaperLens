@@ -27,19 +27,25 @@ config.yaml ─┬─> ingestion worker: download → markdown (Docling) → ind
 ## Setup
 
 ```bash
-# Python — editable install (puts the `rag` + `server` packages on the path
-# and installs the console scripts). Run inside your venv.
-pip install -e .
+# Python — creates a uv-managed venv and installs the locked deps (puts the
+# `rag` + `server` packages on the path and installs the console scripts).
+uv sync
+
+# Optional cloud LLM backends (only if you use them):
+uv sync --extra anthropic   # anthropic provider
+uv sync --extra gemini      # gemini provider
+uv sync --all-extras        # both
 
 # Frontend deps
 npm --prefix web install
 
-# ...or both at once:
+# ...or Python + frontend at once:
 make install
 ```
 
-> The editable install is required: the packages live under `src/`, so
-> `paperlens-serve` / `python -m server` only work after `pip install -e .`.
+> `uv sync` installs the packages from `src/` and the console scripts, so
+> `uv run paperlens-serve` / `uv run python -m server` work from a clean checkout.
+> Run project commands with `uv run <cmd>` (or activate `.venv`).
 
 Provide LLM credentials in a `.env` (copy `.env.example`) if using a cloud
 provider — local servers need no key.
@@ -57,8 +63,8 @@ scripts. The chat model must support tool/function calling (the agent calls a
 ```bash
 # 1) Start the app — this ALSO auto-starts the ingestion worker.
 #    On first run the DB is empty; the UI says so while papers ingest.
-paperlens-serve            # serves http://127.0.0.1:8000
-                                 # (equivalently: python -m server)
+uv run paperlens-serve     # serves http://127.0.0.1:8000
+                                 # (equivalently: uv run python -m server)
 
 # 2) Frontend (dev, hot reload, proxies /api → backend)
 npm --prefix web run dev         # http://localhost:5173
@@ -76,8 +82,8 @@ the working directory (override with `--config` or `$PAPERLENS_CONFIG`).
 Headless ingestion (same pipeline as the worker), without the server:
 
 ```bash
-paperlens-ingest           # ingest every config paper not yet in the DB
-paperlens-ingest --retag   # regenerate tags for existing papers (no re-index)
+uv run paperlens-ingest           # ingest every config paper not yet in the DB
+uv run paperlens-ingest --retag   # regenerate tags for existing papers (no re-index)
 ```
 
 ## Pages
