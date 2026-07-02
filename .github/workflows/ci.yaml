@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Python gate — the same 4 commands run locally and in pre-commit's fast subset:
+  #   ruff format --check · ruff check · ty check · pytest --cov
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv (with cache)
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # --all-extras installs the optional LLM backends so ty resolves their lazy
+      # imports and the backend tests (anthropic/gemini) actually run.
+      - name: Install
+        run: uv sync --all-extras
+
+      - name: ruff format --check
+        run: uv run ruff format --check
+
+      - name: ruff check
+        run: uv run ruff check
+
+      - name: ty check
+        run: uv run ty check src
+
+      - name: pytest --cov
+        run: uv run pytest --cov=rag --cov=server --cov-branch --cov-report=term-missing
+
+  # Frontend gate. The full gate (lint · typecheck · test · build) lands with Phase 10;
+  # until web/ has those npm scripts, CI runs what exists today: install + build
+  # (build already type-checks via `tsc -p tsconfig.json`). Uncomment the steps below
+  # as Phase 10 adds each script.
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      # TODO(Phase 10): enable once web/ has these npm scripts.
+      # - name: lint
+      #   run: npm run lint
+      # - name: typecheck
+      #   run: npm run typecheck
+      # - name: test
+      #   run: npm run test
+
+      - name: build
+        run: npm run build
