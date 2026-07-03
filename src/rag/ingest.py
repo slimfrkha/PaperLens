@@ -13,14 +13,14 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from .config import parse_config
+from .config import IngestConfig, parse_config
 from .index import open_collection
 from .manifest import Manifest
 from .pipeline import build_embedder_from_config, ingest_paper, pending_papers
 from .tagger import generate_tags
 
 
-def retag(cfg, manifest: Manifest) -> None:
+def retag(cfg: IngestConfig, manifest: Manifest) -> None:
     """Regenerate tags for already-ingested papers (no re-indexing)."""
     for rec in manifest.papers():
         md_path = Path(cfg.paths.markdown_dir) / f"{rec['paper_id']}.md"
@@ -28,7 +28,7 @@ def retag(cfg, manifest: Manifest) -> None:
             continue
         tags = generate_tags(
             md_path.read_text(),
-            cfg.llm.tagging,
+            cfg.tagging,
             existing_tags=[t["tag"] for t in manifest.all_tags()],
         )
         rec["tags"] = tags
@@ -41,7 +41,7 @@ def main() -> None:
     argv = [a for a in sys.argv[1:] if a != "--retag"]
     do_retag = "--retag" in sys.argv[1:]
 
-    cfg = parse_config(argv)
+    cfg = parse_config(argv).for_ingest()
     manifest = Manifest(cfg.paths.rag_db)
 
     if do_retag:

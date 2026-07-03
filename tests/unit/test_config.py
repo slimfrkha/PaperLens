@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import dataclasses
 import textwrap
 
 import pytest
 
-from rag.config import CONFIG_ENV_VAR, load_config, parse_config
+from rag.config import CONFIG_ENV_VAR, IngestConfig, load_config, parse_config
 
 _YAML = textwrap.dedent(
     """
@@ -100,3 +101,26 @@ def test_legacy_provider_key_rejected(tmp_path):
     p.write_text("llm:\n  chat:\n    provider: openai\n")
     with pytest.raises(Exception, match="not valid"):
         load_config(str(p))
+
+
+def test_for_ingest_exposes_only_ingestion_fields(tmp_path):
+    # The projection's surface locks out serve-only config (server/reranker/chat/ingestion).
+    names = {f.name for f in dataclasses.fields(IngestConfig)}
+    assert names == {"paths", "collection", "embedding", "tagging", "papers"}
+
+
+def test_for_ingest_is_a_shallow_view_of_config(tmp_path):
+    cfg = load_config(str(_write_config(tmp_path)))
+    icfg = cfg.for_ingest()
+    # Same objects, not copies: a genuine view over the parent Config.
+    assert icfg.paths is cfg.paths
+    assert icfg.embedding is cfg.embedding
+    assert icfg.papers is cfg.papers
+    assert icfg.tagging is cfg.llm.tagging  # flattened from llm.tagging
+    assert icfg.collection == cfg.collection
+
+
+def test_for_ingest_result_is_frozen(tmp_path):
+    icfg = load_config(str(_write_config(tmp_path))).for_ingest()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        icfg.collection = "mutated"  # ty: ignore[invalid-assignment]  # asserting frozen at runtime

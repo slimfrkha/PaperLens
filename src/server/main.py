@@ -30,7 +30,8 @@ def create_app(cfg: Config) -> FastAPI:
     web_dist = Path(cfg.paths.web_dist)
     manifest = Manifest(cfg.paths.rag_db)
     chats = ChatStore(cfg.paths.chat_history)
-    worker = IngestionWorker(cfg, manifest)
+    icfg = cfg.for_ingest()  # ingestion-only view for the worker + pending-paper checks
+    worker = IngestionWorker(icfg, manifest)
     # Ensure the collection exists so the chat Searcher can open it even when the
     # DB is still empty (ingestion creates it too, but chat may be hit first).
     open_collection(cfg.paths.rag_db, cfg.collection)
@@ -90,7 +91,7 @@ def create_app(cfg: Config) -> FastAPI:
                 "n_chunks": sum(p.get("n_chunks", 0) for p in papers),
             },
             "tags": manifest.all_tags(),
-            "pending": [p.name for p in pending_papers(cfg, manifest)],
+            "pending": [p.name for p in pending_papers(icfg, manifest)],
             "ingestion": worker.snapshot(),
         }
 

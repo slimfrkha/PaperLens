@@ -84,6 +84,12 @@ config  chunking  embedders  extract  manifest  →  llm  index  reranker
 `server` **composes** `rag` behind the HTTP API; `rag` **never** imports `server`. Don't
 add an import that violates this.
 
+The ingestion core (`pipeline`, `ingest`, the server's `worker`) is typed to `IngestConfig`
+— a frozen projection of `Config` (`Config.for_ingest()`) exposing only ingestion's fields
+(`paths`, `collection`, `embedding`, `tagging`, `papers`). Serve uses the full `Config`;
+there is deliberately **no** `ServeConfig` (the server hosts the worker, so it reads every
+field). Don't widen `IngestConfig` or add a `ServeConfig` for symmetry.
+
 ## 💡 Key design facts / gotchas
 
 - **MPS tensor cap.** `bge-m3` defaults to an 8192-token sequence length, which overflows

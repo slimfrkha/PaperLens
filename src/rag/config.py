@@ -188,6 +188,24 @@ class Paper:
     arxiv_id: str = ""
 
 
+@dataclass(frozen=True)
+class IngestConfig:
+    """Narrow, read-only view of Config with only the fields ingestion consumes.
+
+    Built via ``Config.for_ingest()``; never decoded from YAML directly. Frozen
+    because it is a snapshot: it aliases Config's sub-objects (paths, embedding,
+    papers) by reference, so treating it as an independently-mutable config would
+    be a bug — writes wouldn't propagate. There is deliberately no ServeConfig:
+    serve uses the full Config because ``create_app`` hosts the ingestion worker,
+    which needs every field ingestion needs (see ``Config.for_ingest``)."""
+
+    paths: Paths
+    collection: str
+    embedding: EmbeddingCfg
+    tagging: LLMSpec  # flattened from Config.llm.tagging
+    papers: list[Paper]
+
+
 @dataclass
 class Config:
     paths: Paths = field(default_factory=Paths)
@@ -204,6 +222,19 @@ class Config:
     # Resolved project root (directory of the loaded config.yaml). Set by the
     # loader, not read from YAML; init=False keeps it off the CLI and decode input.
     root: Path = field(default_factory=Path.cwd, init=False)
+
+    def for_ingest(self) -> IngestConfig:
+        """Project this Config to the ingestion-only view (CLI + in-process worker).
+
+        Serve keeps using the full Config directly — there is no ServeConfig, since
+        the server hosts the ingestion worker and thus reads every field."""
+        return IngestConfig(
+            paths=self.paths,
+            collection=self.collection,
+            embedding=self.embedding,
+            tagging=self.llm.tagging,
+            papers=self.papers,
+        )
 
 
 def _find_config(path: str | None) -> Path:

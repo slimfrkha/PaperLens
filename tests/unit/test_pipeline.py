@@ -14,7 +14,7 @@ def test_pending_papers_excludes_already_ingested(tmp_path, make_config):
     manifest = Manifest(cfg.paths.rag_db)
     manifest.upsert({"paper_id": "a", "tags": [], "n_chunks": 1})
 
-    pending = pending_papers(cfg, manifest)
+    pending = pending_papers(cfg.for_ingest(), manifest)
     assert [p.name for p in pending] == ["b"]
 
 

@@ -11,14 +11,14 @@ import threading
 import traceback
 from typing import Any
 
-from rag.config import Config
+from rag.config import IngestConfig
 from rag.index import open_collection
 from rag.manifest import Manifest
 from rag.pipeline import build_embedder_from_config, ingest_paper, pending_papers
 
 
 class IngestionWorker:
-    def __init__(self, cfg: Config, manifest: Manifest):
+    def __init__(self, cfg: IngestConfig, manifest: Manifest):
         self.cfg = cfg
         self.manifest = manifest
         self._lock = threading.Lock()

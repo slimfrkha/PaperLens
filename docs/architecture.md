@@ -122,6 +122,14 @@ The config itself is loaded by draccus (dataclass decoding) with OmegaConf `${..
 interpolation layered in; `parse_config` adds per-field CLI overrides that feed
 interpolation. See [Configuration](configuration.md).
 
+The full `Config` is the single decode target, but the ingestion core (`pipeline`, `ingest`,
+the server's `worker`) is typed to `IngestConfig` — a frozen, read-only *projection* of
+`Config` (`Config.for_ingest()`) exposing only the fields ingestion consumes (`paths`,
+`collection`, `embedding`, `tagging`, `papers`). It cannot express `server` / `reranker` /
+`llm.chat`, so the ingest/serve boundary is enforced by the type checker. There is
+deliberately **no** `ServeConfig`: serve uses the full `Config`, because `create_app` hosts
+the ingestion worker and therefore reads every field.
+
 ## 🧱 Layering: `server` composes `rag`
 
 The Python packages import in one direction only — no cycles:

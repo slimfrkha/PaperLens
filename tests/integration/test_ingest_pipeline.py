@@ -44,7 +44,7 @@ def test_ingest_paper_populates_db_and_manifest(make_config, fake_embedder, monk
     stages: list[str] = []
     record = pipeline.ingest_paper(
         Paper(name="deepseek-v3", arxiv_id="2412.19437"),
-        cfg,
+        cfg.for_ingest(),
         fake_embedder,
         collection,
         manifest,
@@ -75,7 +75,7 @@ def test_ingest_survives_tagging_failure(make_config, fake_embedder, monkeypatch
     monkeypatch.setattr(pipeline, "generate_tags", _boom)
 
     record = pipeline.ingest_paper(
-        Paper(name="p", arxiv_id="1"), cfg, fake_embedder, collection, manifest
+        Paper(name="p", arxiv_id="1"), cfg.for_ingest(), fake_embedder, collection, manifest
     )
     # Tagging degrades to empty tags; the rest of the record still lands.
     assert record["tags"] == []

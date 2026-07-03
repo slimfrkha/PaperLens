@@ -14,7 +14,7 @@ from pathlib import Path
 
 import httpx
 
-from .config import Config, Paper
+from .config import IngestConfig, Paper
 from .extract import pdf_to_markdown
 from .index import index_markdown
 from .manifest import Manifest
@@ -26,14 +26,14 @@ ARXIV_PDF = "https://arxiv.org/pdf/{id}"
 OnStage = Callable[[str, float], None]
 
 
-def build_embedder_from_config(cfg: Config):
+def build_embedder_from_config(cfg: IngestConfig):
     """Construct the embedder described by config.embedding (reused across papers)."""
     from .embedders import build_embedder
 
     return build_embedder(cfg.embedding)
 
 
-def pending_papers(cfg: Config, manifest: Manifest) -> list[Paper]:
+def pending_papers(cfg: IngestConfig, manifest: Manifest) -> list[Paper]:
     """Config papers not yet in the manifest."""
     return [p for p in cfg.papers if not manifest.is_ingested(p.name)]
 
@@ -61,7 +61,7 @@ def _title(md: str) -> str:
 
 def ingest_paper(
     paper: Paper,
-    cfg: Config,
+    cfg: IngestConfig,
     embedder,
     collection,
     manifest: Manifest,
@@ -94,9 +94,7 @@ def ingest_paper(
 
     stage("tag", 0.85)
     try:
-        tags = generate_tags(
-            md, cfg.llm.tagging, existing_tags=[t["tag"] for t in manifest.all_tags()]
-        )
+        tags = generate_tags(md, cfg.tagging, existing_tags=[t["tag"] for t in manifest.all_tags()])
     except Exception as e:  # tagging needs an API key; degrade gracefully
         print(f"  [warn] tag generation failed for {paper.name}: {e}")
         tags = []
