@@ -1,3 +1,18 @@
+/* Scheme-aware semantic tokens — light mode reads the gray ramp, dark mode reads
+   the dark ramp, so every palette looks right in both without hard-coded colors. */
+:root {
+  --pl-surface: var(--mantine-color-gray-1);
+  --pl-surface-2: var(--mantine-color-gray-2);
+  --pl-border: var(--mantine-color-gray-2);
+  --pl-border-strong: var(--mantine-color-gray-3);
+}
+[data-mantine-color-scheme="dark"] {
+  --pl-surface: var(--mantine-color-dark-6);
+  --pl-surface-2: var(--mantine-color-dark-5);
+  --pl-border: var(--mantine-color-dark-4);
+  --pl-border-strong: var(--mantine-color-dark-4);
+}
+
 html,
 body,
 #root {
@@ -5,30 +20,197 @@ body,
   margin: 0;
 }
 
-/* Cited-passage highlight (CSS Custom Highlight API). */
-::highlight(citation) {
-  background-color: rgba(255, 241, 158, 0.18); /* very light, subtle yellow */
-  color: inherit;
+body {
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "cv05" 1, "ss01" 1; /* Inter: refined a, single-story details */
 }
 
+/* Unobtrusive scrollbars that track the active scheme. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--pl-border-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--pl-border-strong);
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--mantine-color-dimmed);
+  background-clip: padding-box;
+}
+
+/* Universal, consistent focus ring for custom interactive elements (a11y). */
+:focus-visible {
+  outline: 2px solid var(--mantine-color-accent-filled);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Cited-passage highlight — amber "highlighter on paper", tuned per scheme. */
+::highlight(citation) {
+  background-color: rgba(240, 190, 70, 0.28);
+  color: inherit;
+}
+[data-mantine-color-scheme="dark"] ::highlight(citation) {
+  background-color: rgba(240, 190, 70, 0.32);
+}
+
+/* Serif reading surface for actual paper content — journal-like, capped measure. */
+.reading {
+  font-family: "Newsreader", Georgia, "Times New Roman", serif;
+  font-optical-sizing: auto;
+  font-size: 1.14rem;
+  line-height: 1.72;
+  max-width: 68ch;
+}
+.reading h1,
+.reading h2,
+.reading h3 {
+  font-family: "Newsreader", Georgia, serif;
+  line-height: 1.25;
+  margin-top: 1.9rem;
+  margin-bottom: 0.6rem;
+}
+.reading p {
+  margin: 0 0 1.05rem;
+}
+
+/* Shared markdown chrome (chat answers + paper viewer). */
+.markdown-body {
+  overflow-wrap: anywhere;
+}
+.markdown-body :first-child {
+  margin-top: 0;
+}
 .markdown-body table {
   border-collapse: collapse;
-  margin: 0.75rem 0;
+  margin: 0.9rem 0;
   display: block;
   overflow-x: auto;
+  font-size: 0.9em;
 }
 .markdown-body th,
 .markdown-body td {
-  border: 1px solid var(--mantine-color-gray-4);
-  padding: 4px 8px;
-  font-size: 0.85rem;
+  border: 1px solid var(--pl-border-strong);
+  padding: 6px 10px;
+  text-align: left;
+}
+.markdown-body th {
+  background: var(--pl-surface);
+  font-weight: 600;
 }
 .markdown-body pre {
-  background: var(--mantine-color-gray-1);
-  padding: 0.75rem;
-  border-radius: 6px;
+  background: var(--pl-surface);
+  border: 1px solid var(--pl-border);
+  padding: 0.85rem 1rem;
+  border-radius: 10px;
   overflow-x: auto;
+  font-size: 0.85em;
+  line-height: 1.55;
+}
+.markdown-body code {
+  font-size: 0.88em;
+}
+.markdown-body :not(pre) > code {
+  background: var(--pl-surface-2);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+.markdown-body blockquote {
+  margin: 0.9rem 0;
+  padding-left: 1rem;
+  border-left: 3px solid var(--pl-border-strong);
+  color: var(--mantine-color-dimmed);
 }
 .markdown-body img {
   max-width: 100%;
+}
+.markdown-body a {
+  color: var(--mantine-color-accent-light-color);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-thickness: 1px;
+}
+
+/* Citation footnote marker — a tinted accent chip so it reads as clickable even
+   when the accent hue sits close to the body text color. */
+.cite {
+  display: inline-block;
+  padding: 0 5px;
+  margin: 0 1px;
+  border-radius: 5px;
+  font-size: 0.74em;
+  font-weight: 600;
+  line-height: 1.45;
+  vertical-align: 1px;
+  cursor: pointer;
+  color: var(--mantine-color-accent-light-color);
+  background: var(--mantine-color-accent-light);
+  text-decoration: none;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+.cite:hover {
+  background: var(--mantine-color-accent-filled);
+  color: var(--mantine-color-white);
+}
+/* Dark: a light-green fill (low accent index) with dark teal text, not the dark fill. */
+[data-mantine-color-scheme="dark"] .cite {
+  background: var(--mantine-color-accent-2);
+  color: var(--mantine-color-accent-9);
+}
+[data-mantine-color-scheme="dark"] .cite:hover {
+  background: var(--mantine-color-accent-1);
+  color: var(--mantine-color-accent-9);
+}
+
+/* Tabular figures for stats that update in place (no jitter). */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+/* Composer: a single surface that lifts into focus. */
+.composer {
+  border: 1px solid var(--pl-border-strong);
+  border-radius: 14px;
+  background: var(--mantine-color-body);
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+.composer:focus-within {
+  border-color: var(--mantine-color-accent-filled);
+  box-shadow: 0 0 0 3px var(--mantine-color-accent-light);
+}
+
+/* Paper cards + sidebar rows lift/tint on hover. */
+.paper-card {
+  transition: transform 130ms ease, box-shadow 130ms ease, border-color 130ms ease;
+}
+.paper-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--mantine-shadow-md);
+  border-color: var(--pl-border-strong);
+}
+.chat-row {
+  transition: background-color 120ms ease;
+}
+.chat-row:hover {
+  background: var(--pl-surface-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }

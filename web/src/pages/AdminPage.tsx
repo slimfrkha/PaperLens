@@ -4,14 +4,16 @@ import {
   Badge,
   Button,
   Card,
-  Container,
+  Center,
   Group,
+  Loader,
   Progress,
   SimpleGrid,
   Stack,
   Text,
   Title,
 } from "@mantine/core";
+import { IconRescan } from "../components/Icons";
 import { getStatus, rescan, type AdminStatus } from "../api";
 
 export default function AdminPage() {
@@ -26,9 +28,9 @@ export default function AdminPage() {
 
   if (!status)
     return (
-      <Container>
-        <Text>Loading…</Text>
-      </Container>
+      <Center mih="60vh">
+        <Loader color="accent" />
+      </Center>
     );
 
   const ing = status.ingestion;
@@ -37,57 +39,41 @@ export default function AdminPage() {
     : 0;
 
   return (
-    <Container size="lg">
-      <Group justify="space-between" mb="md">
-        <Title order={3}>Admin</Title>
-        <Button variant="light" onClick={() => rescan()}>
+    <Stack gap="lg">
+      <Group justify="space-between">
+        <Title order={2}>Admin</Title>
+        <Button
+          variant="default"
+          leftSection={<IconRescan size={16} />}
+          onClick={() => rescan()}
+        >
           Re-scan config
         </Button>
       </Group>
 
-      <SimpleGrid cols={{ base: 1, sm: 3 }} mb="md">
-        <Card withBorder>
-          <Text size="xs" c="dimmed">
-            Papers
-          </Text>
-          <Text fz={28} fw={700}>
-            {status.db.n_papers}
-          </Text>
-        </Card>
-        <Card withBorder>
-          <Text size="xs" c="dimmed">
-            Chunks
-          </Text>
-          <Text fz={28} fw={700}>
-            {status.db.n_chunks}
-          </Text>
-        </Card>
-        <Card withBorder>
-          <Text size="xs" c="dimmed">
-            Pending
-          </Text>
-          <Text fz={28} fw={700}>
-            {status.pending.length}
-          </Text>
-        </Card>
+      <SimpleGrid cols={{ base: 1, sm: 3 }} spacing="md">
+        <Stat label="Papers" value={status.db.n_papers} />
+        <Stat label="Chunks" value={status.db.n_chunks} />
+        <Stat label="Pending" value={status.pending.length} />
       </SimpleGrid>
 
-      <Card withBorder mb="md">
+      <Card withBorder radius="md">
         <Group justify="space-between">
           <Text fw={600}>Ingestion</Text>
           <Badge
-            color={ing.state === "running" ? "blue" : ing.state === "error" ? "red" : "gray"}
+            variant="light"
+            color={ing.state === "running" ? "accent" : ing.state === "error" ? "red" : "gray"}
           >
             {ing.state}
           </Badge>
         </Group>
         {ing.state === "running" && (
-          <Stack gap={4} mt="sm">
-            <Text size="sm">
+          <Stack gap={6} mt="sm">
+            <Text size="sm" className="tnum">
               {ing.current ? `${ing.current.name} — ${ing.current.stage}` : "starting…"} (
               {ing.done}/{ing.total})
             </Text>
-            <Progress value={pct} animated />
+            <Progress value={pct} color="accent" animated radius="xl" />
           </Stack>
         )}
         {status.pending.length > 0 && (
@@ -96,7 +82,7 @@ export default function AdminPage() {
           </Text>
         )}
         {ing.errors.length > 0 && (
-          <Alert color="red" mt="sm" title="Errors">
+          <Alert color="red" variant="light" mt="sm" title="Errors" radius="md">
             {ing.errors.map((e, i) => (
               <Text key={i} size="xs">
                 {e.name}: {e.error}
@@ -106,18 +92,31 @@ export default function AdminPage() {
         )}
       </Card>
 
-      <Card withBorder>
+      <Card withBorder radius="md">
         <Text fw={600} mb="sm">
           Tags ({status.tags.length})
         </Text>
         <Group gap={6}>
           {status.tags.map((t) => (
-            <Badge key={t.tag} variant="light">
+            <Badge key={t.tag} variant="light" color="gray" radius="sm" fw={500}>
               {t.tag} · {t.count}
             </Badge>
           ))}
         </Group>
       </Card>
-    </Container>
+    </Stack>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: number }) {
+  return (
+    <Card withBorder radius="md">
+      <Text size="xs" c="dimmed" tt="uppercase" style={{ letterSpacing: "0.05em" }}>
+        {label}
+      </Text>
+      <Text fz={32} fw={600} className="tnum" mt={4} ff="'Newsreader', Georgia, serif">
+        {value}
+      </Text>
+    </Card>
   );
 }

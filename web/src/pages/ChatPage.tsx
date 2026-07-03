@@ -3,18 +3,17 @@ import {
   ActionIcon,
   Alert,
   Box,
-  Button,
-  Flex,
   Group,
   Loader,
   MultiSelect,
-  Paper,
   Stack,
   Text,
   Textarea,
+  Title,
   Tooltip,
 } from "@mantine/core";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { IconSend, IconSidebar } from "../components/Icons";
 import {
   chat,
   createChat,
@@ -139,8 +138,42 @@ export default function ChatPage() {
     if (id === chatId) navigate("/");
   }
 
+  const composer = (
+    <Box className="composer" p={6}>
+      <Group align="flex-end" gap={6} wrap="nowrap">
+        <Textarea
+          flex={1}
+          variant="unstyled"
+          autosize
+          minRows={1}
+          maxRows={8}
+          value={input}
+          placeholder="Ask about a paper or a concept…"
+          styles={{ input: { paddingInline: 10, fontSize: "0.95rem" } }}
+          onChange={(e) => setInput(e.currentTarget.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              send();
+            }
+          }}
+        />
+        <ActionIcon
+          size={38}
+          radius="md"
+          onClick={() => send()}
+          loading={busy}
+          disabled={!input.trim()}
+          aria-label="Send"
+        >
+          <IconSend size={18} />
+        </ActionIcon>
+      </Group>
+    </Box>
+  );
+
   return (
-    <Flex gap="md" align="stretch">
+    <Group align="stretch" gap="lg" wrap="nowrap" style={{ minHeight: "calc(100vh - 60px - 3rem)" }}>
       {sidebarOpen && (
         <ChatSidebar
           sessions={sessions}
@@ -150,87 +183,91 @@ export default function ChatPage() {
           onDelete={onDelete}
         />
       )}
-      <Box style={{ flex: 1, minWidth: 0 }}>
-        <Stack>
-          <Group gap="xs">
-            <Tooltip label={sidebarOpen ? "Hide chats" : "Show chats"}>
-              <ActionIcon variant="subtle" onClick={() => setSidebarOpen((o) => !o)}>
-                ☰
-              </ActionIcon>
-            </Tooltip>
-            <Button size="xs" variant="light" onClick={() => navigate("/")}>
-              + New chat
-            </Button>
-          </Group>
-
-          {empty && (
-            <Alert color="yellow" title="The library is empty">
-              No papers indexed yet — ingestion may still be running. Check the{" "}
-              <Link to="/admin">Admin</Link> page.
-            </Alert>
-          )}
-
+      <Stack style={{ flex: 1, minWidth: 0 }} gap="md">
+        <Group gap="xs" justify="space-between">
+          <Tooltip label={sidebarOpen ? "Hide chats" : "Show chats"}>
+            <ActionIcon variant="subtle" color="gray" onClick={() => setSidebarOpen((o) => !o)}>
+              <IconSidebar size={18} />
+            </ActionIcon>
+          </Tooltip>
           <MultiSelect
-            label="Restrict search to tags (optional)"
             data={tagOptions}
             value={tags}
             onChange={setTags}
-            placeholder="All papers"
+            placeholder={tags.length ? "" : "All papers"}
             searchable
             clearable
+            size="xs"
+            variant="filled"
+            style={{ maxWidth: 320, flex: "0 1 320px" }}
+            aria-label="Restrict search to tags"
           />
+        </Group>
 
-          <Stack gap="lg">
-            {turns.map((t, i) => (
-              <Paper
-                key={i}
-                p="md"
-                withBorder
-                radius="md"
-                bg={t.role === "user" ? "var(--mantine-color-blue-light)" : undefined}
-              >
-                <Text size="xs" c="dimmed" mb={4}>
-                  {t.role === "user" ? "You" : "Assistant"}
-                </Text>
-                {t.role === "user" ? (
-                  <Text style={{ whiteSpace: "pre-wrap" }}>{t.content}</Text>
-                ) : (
-                  <>
-                    {t.trace && <TraceBox entries={t.trace} streaming={t.streaming} />}
-                    {t.content ? (
-                      <Answer text={t.content} citations={t.citations ?? []} />
-                    ) : t.streaming ? (
-                      <Loader size="sm" />
-                    ) : null}
-                  </>
-                )}
-              </Paper>
-            ))}
+        {empty && (
+          <Alert color="yellow" variant="light" title="The library is empty" radius="md">
+            No papers indexed yet — ingestion may still be running. Check the{" "}
+            <Link to="/admin">Admin</Link> page.
+          </Alert>
+        )}
+
+        {turns.length === 0 ? (
+          <EmptyHero />
+        ) : (
+          <Stack gap="xl" style={{ flex: 1 }}>
+            {turns.map((t, i) =>
+              t.role === "user" ? (
+                <Group key={i} justify="flex-end">
+                  <Box
+                    px="md"
+                    py="xs"
+                    style={{
+                      maxWidth: "82%",
+                      background: "var(--pl-surface-2)",
+                      border: "1px solid var(--pl-border)",
+                      borderRadius: 14,
+                      borderBottomRightRadius: 4,
+                    }}
+                  >
+                    <Text style={{ whiteSpace: "pre-wrap" }}>{t.content}</Text>
+                  </Box>
+                </Group>
+              ) : (
+                <Box key={i}>
+                  {t.trace && <TraceBox entries={t.trace} streaming={t.streaming} />}
+                  {t.content ? (
+                    <Answer text={t.content} citations={t.citations ?? []} />
+                  ) : t.streaming ? (
+                    <Group gap="xs">
+                      <Loader size="sm" type="dots" color="accent" />
+                      <Text size="sm" c="dimmed">
+                        Thinking…
+                      </Text>
+                    </Group>
+                  ) : null}
+                </Box>
+              )
+            )}
             <div ref={bottomRef} />
           </Stack>
+        )}
 
-          <Group align="flex-end">
-            <Textarea
-              flex={1}
-              autosize
-              minRows={1}
-              maxRows={6}
-              value={input}
-              placeholder="Ask about a paper or a concept…"
-              onChange={(e) => setInput(e.currentTarget.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  send();
-                }
-              }}
-            />
-            <Button onClick={send} loading={busy}>
-              Send
-            </Button>
-          </Group>
-        </Stack>
-      </Box>
-    </Flex>
+        <Box style={{ position: "sticky", bottom: 0, paddingBottom: 4 }}>{composer}</Box>
+      </Stack>
+    </Group>
+  );
+}
+
+function EmptyHero() {
+  return (
+    <Stack align="center" justify="center" gap={6} style={{ flex: 1, textAlign: "center" }} py="xl">
+      <Title order={1} fw={500} style={{ letterSpacing: "-0.02em" }}>
+        What do you want to understand?
+      </Title>
+      <Text c="dimmed" maw={520}>
+        Ask across the indexed arXiv papers. Answers cite the exact passage — click any{" "}
+        <span className="cite">n</span> to open its source.
+      </Text>
+    </Stack>
   );
 }
