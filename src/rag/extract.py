@@ -2,7 +2,7 @@
 
 Single implementation of the Docling conversion (OCR disabled — arXiv PDFs have
 a real text layer, and the OCR model download is both slow and version-fragile).
-Used by the ingestion pipeline; `download_extract.sh` now delegates here.
+Used by the ingestion pipeline (`paperlens-ingest` / the background worker).
 """
 
 from __future__ import annotations

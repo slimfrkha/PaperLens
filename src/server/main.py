@@ -191,10 +191,16 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
 
 def main() -> None:
+    import argparse
+
     import uvicorn
 
-    cfg = load_config()
-    uvicorn.run(create_app(), host=cfg.server.host, port=cfg.server.port)
+    p = argparse.ArgumentParser(description="Serve the PaperLens API.")
+    p.add_argument("--config", default=None)
+    args = p.parse_args()
+
+    cfg = load_config(args.config)
+    uvicorn.run(create_app(args.config), host=cfg.server.host, port=cfg.server.port)
 
 
 if __name__ == "__main__":

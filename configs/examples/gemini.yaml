@@ -1,0 +1,43 @@
+# Google Gemini for both embeddings and the LLMs.
+# Needs:  uv sync --extra gemini   and   GEMINI_API_KEY in .env
+
+paths:
+  rag_db: data/rag_db
+  pdf_dir: data/papers/pdf
+  markdown_dir: data/papers/text
+  chat_history: data/chat_history
+  web_dist: web/dist
+
+collection: arxiv_papers
+
+embedding:
+  model: gemini-embedding-001
+  type: gemini
+  batch_size: 32
+  api_key_env: GEMINI_API_KEY
+
+reranker:
+  type: llm            # reuse the chat LLM to score relevance (no extra model/deps)
+  enabled: true
+
+llm:
+  tagging:
+    provider: gemini
+    model: gemini-2.5-flash
+    api_key_env: GEMINI_API_KEY
+  chat:
+    provider: gemini
+    model: gemini-2.5-pro
+    api_key_env: GEMINI_API_KEY
+
+ingestion:
+  auto_start: true
+  concurrency: 1
+
+server:
+  host: 127.0.0.1
+  port: 8000
+
+papers:
+  - { name: deepseek-v3, arxiv_id: "2412.19437" }
+  - { name: kimi-k2,     arxiv_id: "2507.20534" }

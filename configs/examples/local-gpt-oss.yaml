@@ -1,0 +1,48 @@
+# Fully local: HF embedder + reranker, an OpenAI-compatible local server for the LLMs.
+# Works with LM Studio, vLLM, sglang, llama.cpp --server, Ollama's /v1, etc.
+# Set `api_base` to your server; local servers ignore the key (any env var name is fine).
+
+paths:
+  rag_db: data/rag_db
+  pdf_dir: data/papers/pdf
+  markdown_dir: data/papers/text
+  chat_history: data/chat_history
+  web_dist: web/dist
+
+collection: arxiv_papers
+
+embedding:
+  model: BAAI/bge-m3
+  type: hf
+  max_seq_length: 1024   # guards the MPS 2**32 per-tensor limit on Apple Silicon
+  batch_size: 32
+
+reranker:
+  model: BAAI/bge-reranker-v2-m3
+  type: hf
+  enabled: true
+
+llm:
+  tagging:
+    provider: openai
+    model: openai/gpt-oss-20b        # whatever the endpoint serves
+    api_base: http://127.0.0.1:1234/v1
+    api_key_env: LOCAL_LLM_KEY
+  chat:
+    provider: openai
+    model: openai/gpt-oss-20b        # must support tool/function calling
+    api_base: http://127.0.0.1:1234/v1
+    api_key_env: LOCAL_LLM_KEY
+
+ingestion:
+  auto_start: true
+  concurrency: 1
+
+server:
+  host: 127.0.0.1
+  port: 8000
+
+# Replace with the papers you want ingested (name doubles as the paper_id).
+papers:
+  - { name: deepseek-v3, arxiv_id: "2412.19437" }
+  - { name: kimi-k2,     arxiv_id: "2507.20534" }

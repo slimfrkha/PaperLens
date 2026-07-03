@@ -56,17 +56,21 @@ make install
 ## 🚀 Quickstart
 
 ```bash
-uv run paperlens-serve      # serves http://127.0.0.1:8000, auto-starts ingestion
+make serve                  # serves http://127.0.0.1:8000, auto-starts ingestion
 npm --prefix web run dev    # UI at http://localhost:5173 (proxies /api → backend)
 ```
+
+`make serve` runs `paperlens-serve --config configs/recent-oss-agentic-models.yaml` (the
+default config); override with `make serve CONFIG=configs/examples/anthropic.yaml`, or call
+`uv run paperlens-serve --config <path>` directly.
 
 Open the UI, watch papers ingest on the **Admin** page, then ask a question on
 **Chat**. Full walkthrough with expected output:
 [Getting started](docs/getting-started.md). 🎓
 
-Everything is driven by `config.yaml` — paths, models, the server, and the paper
-list. The chat model must support tool/function calling (the agent calls a
-`search_papers` tool). Every key, command, and API route:
+Everything is driven by one YAML config (under `configs/`) — paths, models, the
+server, and the paper list. The chat model must support tool/function calling (the
+agent calls a `search_papers` tool). Every key, command, and API route:
 [Configuration & commands](docs/configuration.md).
 
 ## 🖥️ Pages

@@ -1,0 +1,44 @@
+# Cloud LLMs via Anthropic (Claude), local HF embedder + reranker.
+# Needs:  uv sync --extra anthropic   and   ANTHROPIC_API_KEY in .env
+
+paths:
+  rag_db: data/rag_db
+  pdf_dir: data/papers/pdf
+  markdown_dir: data/papers/text
+  chat_history: data/chat_history
+  web_dist: web/dist
+
+collection: arxiv_papers
+
+embedding:
+  model: BAAI/bge-m3
+  type: hf
+  max_seq_length: 1024
+  batch_size: 32
+
+reranker:
+  model: BAAI/bge-reranker-v2-m3
+  type: hf
+  enabled: true
+
+llm:
+  tagging:
+    provider: anthropic
+    model: claude-haiku-4-5-20251001   # cheap + fast for tagging
+    api_key_env: ANTHROPIC_API_KEY
+  chat:
+    provider: anthropic
+    model: claude-opus-4-8
+    api_key_env: ANTHROPIC_API_KEY
+
+ingestion:
+  auto_start: true
+  concurrency: 1
+
+server:
+  host: 127.0.0.1
+  port: 8000
+
+papers:
+  - { name: deepseek-v3, arxiv_id: "2412.19437" }
+  - { name: kimi-k2,     arxiv_id: "2507.20534" }

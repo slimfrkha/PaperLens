@@ -1,7 +1,7 @@
 # CLAUDE.md — PaperLens operational map
 
-Local, config-driven **agentic RAG** over arXiv model technical reports. `config.yaml` is
-the single source of truth; two flows hang off it — **ingestion** (arXiv PDF → Docling
+Local, config-driven **agentic RAG** over arXiv model technical reports. A single YAML
+config under `configs/` is the source of truth; two flows hang off it — **ingestion** (arXiv PDF → Docling
 markdown → chunk → embed → Chroma index → LLM tags → manifest) and **retrieval** (a
 FastAPI backend whose `ChatAgent` runs a ReAct loop with one `search_papers` tool over a
 two-stage `Searcher`). A Vite + React frontend streams the answer and its
@@ -42,7 +42,8 @@ Cloud LLM backends are lazy extras: `uv sync --extra anthropic` / `--extra gemin
 ## 🧱 Layout
 
 ```text
-config.yaml            # single source of truth (paths, models, server, paper list)
+configs/               # run configs (data, not code); default: recent-oss-agentic-models.yaml
+  examples/            # copy-me templates + reference.yaml (every key annotated)
 src/
   rag/                 # config-driven core: ingestion + two-stage retrieval
     config.py          # typed config loader, project-root anchoring (+ .env)

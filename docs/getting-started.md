@@ -12,9 +12,9 @@ see [Configuration & commands](configuration.md).
 - 🐍 **Python 3.14+** (the project pins it in `.python-version`).
 - 📦 **[uv](https://docs.astral.sh/uv/)** — manages the virtualenv, dependencies, and scripts.
 - 🟢 **Node.js** and **npm** — for the frontend.
-- 🤖 An **LLM endpoint**. The shipped `config.yaml` points at a local OpenAI-compatible
-  server (LM Studio at `http://127.0.0.1:1234/v1`). A cloud provider works too — see
-  [step 3](#3-point-it-at-an-llm).
+- 🤖 An **LLM endpoint**. The default config (`configs/recent-oss-agentic-models.yaml`)
+  points at a local OpenAI-compatible server (LM Studio at `http://127.0.0.1:1234/v1`). A
+  cloud provider works too — see [step 3](#3-point-it-at-an-llm).
 
 ## 1. Install
 
@@ -37,9 +37,10 @@ serving.
 
 ## 2. Look at the configuration
 
-Open `config.yaml` in the project root. It is the single source of truth for paths,
-models, the server, and the **paper list**. You don't need to change anything yet — the
-defaults ingest a set of arXiv model reports.
+Open `configs/recent-oss-agentic-models.yaml` — the default run config. A config file is
+the single source of truth for paths, models, the server, and the **paper list**. You
+don't need to change anything yet — it ingests a set of recent OSS model reports. For every
+key and its options, see [`configs/examples/reference.yaml`](../configs/examples/reference.yaml).
 
 ## 3. Point it at an LLM
 
@@ -55,12 +56,15 @@ tool). Pick one:
 ## 4. Start the app
 
 ```bash
-uv run paperlens-serve
+uv run paperlens-serve --config configs/recent-oss-agentic-models.yaml
 ```
 
 This serves `http://127.0.0.1:8000` **and** auto-starts the ingestion worker, which begins
-downloading and indexing the papers from `config.yaml`. On first run the database is empty,
+downloading and indexing the papers from the config. On first run the database is empty,
 so the UI says so while papers ingest.
+
+> 💡 `make serve` runs exactly this; it defaults `CONFIG` to the same file. Override with
+> `make serve CONFIG=configs/examples/anthropic.yaml`.
 
 ✅ You should see startup logs and, as papers process, ingestion progress.
 
@@ -94,8 +98,8 @@ on the **Papers** page with the cited passage highlighted.
 
 ## 🎉 What you just did
 
-You installed with uv, configured one `config.yaml`, ran the server (which ingested
-papers), and got a grounded, cited answer from the agent.
+You installed with uv, picked one config, ran the server (which ingested papers), and got
+a grounded, cited answer from the agent.
 
 ## 👉 Where next
 

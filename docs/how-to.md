@@ -16,7 +16,7 @@
 
 ## Add papers
 
-1. Add a line to `papers` in `config.yaml`:
+1. Add a line to `papers` in your config (e.g. `configs/recent-oss-agentic-models.yaml`):
 
    ```yaml
    papers:
@@ -55,7 +55,7 @@ them.
 
 ## Switch the chat or tagging LLM
 
-Edit `llm.chat` (the agent) or `llm.tagging` (ingestion tags) in `config.yaml`. The chat
+Edit `llm.chat` (the agent) or `llm.tagging` (ingestion tags) in your config. The chat
 model **must support tool/function calling**.
 
 ☁️ **A cloud provider (Anthropic):**
@@ -93,7 +93,7 @@ cites. If it never calls the tool, the served model likely lacks tool-calling su
 
 ## Switch the embedder
 
-Set `embedding.type` in `config.yaml` to `hf`, `openai`, `gemini`, or `ollama`, and set
+Set `embedding.type` in your config to `hf`, `openai`, `gemini`, or `ollama`, and set
 `model` (plus `api_base`/`api_key_env` for API types). Examples:
 
 ```yaml
@@ -153,7 +153,7 @@ Backends are discovered through a **registry** 🗂️ — one decorated class, 
    `OpenAICompatBackend`). If the provider speaks the OpenAI wire format, subclass
    `OpenAICompatBackend` instead (see `VLLMBackend` / `SGLangBackend`).
 
-2. Set `provider: myprovider` in a `config.yaml` LLM spec. `build_llm` dispatches on it.
+2. Set `provider: myprovider` in a config LLM spec. `build_llm` dispatches on it.
 
 3. ✅ Verify: add a unit test alongside `tests/unit/test_llm.py` (use the `fake_llm` pattern
    where possible). Run the [gate](../CONTRIBUTING.md).

@@ -1,0 +1,78 @@
+# PaperLens configuration reference — every key, its default, and every accepted value.
+#
+# This file is documentation, not a run config: it lists all options with their defaults
+# so you can see what's tunable at a glance. To actually run, copy one of the focused
+# templates in this directory (local-gpt-oss / anthropic / gemini / ollama) and edit it,
+# or start from here and delete what you don't need.
+#
+# Every value shown is the built-in default from src/rag/config.py unless noted. All
+# relative paths are anchored to this file's directory (the project root). Full prose
+# reference: docs/configuration.md.
+
+# --- Filesystem paths (relative -> anchored to this file's dir; absolute -> used as-is) ---
+paths:
+  rag_db: data/rag_db              # Chroma persistent dir + the papers.json manifest
+  pdf_dir: data/papers/pdf         # downloaded PDFs (<paper_id>.pdf)
+  markdown_dir: data/papers/text   # Docling-extracted markdown (<paper_id>.md)
+  chat_history: data/chat_history  # per-session chat JSON files
+  web_dist: web/dist               # built frontend SPA served by the backend
+
+collection: arxiv_papers           # Chroma collection name for all chunks
+
+# --- Embedder: turns chunks (and queries) into vectors ---
+embedding:
+  type: hf                # hf | openai | gemini | ollama
+  model: BAAI/bge-m3      # HF model id, or the API model name for API types
+  max_seq_length: 1024    # hf only; token cap guarding the MPS 2**32 tensor limit on Apple Silicon
+  batch_size: 32          # embedding batch size
+  api_base: null          # base URL for openai (any OpenAI-compatible endpoint) / ollama (http://localhost:11434)
+  api_key_env: OPENAI_API_KEY  # env var holding the key (openai=OPENAI_API_KEY, gemini=GEMINI_API_KEY)
+
+# --- Reranker: second retrieval stage, scores recalled chunks ---
+reranker:
+  type: hf                # hf (local cross-encoder) | llm (reuses the chat LLM, no extra model/deps)
+  model: BAAI/bge-reranker-v2-m3  # cross-encoder model id (hf type only)
+  enabled: true           # turn the whole rerank stage on/off
+
+# --- LLMs: two specs sharing one schema (LLMSpec) ---
+#   tagging -> labels papers at ingestion (cheap + fast is fine)
+#   chat    -> powers the agentic-RAG loop; MUST support tool/function calling
+# Per-spec keys (all optional; defaults shown):
+#   provider     anthropic | openai | vllm | sglang | gemini
+#                (vllm/sglang/openai all speak the OpenAI wire format — set api_base)
+#   model        model id the provider/endpoint serves
+#   api_base     endpoint URL for OpenAI-compatible providers (null for anthropic/gemini)
+#   api_key_env  env var holding the key (local servers ignore it)
+#   max_tokens   2048
+#   temperature  0.0
+llm:
+  tagging:
+    provider: anthropic
+    model: claude-haiku-4-5-20251001
+    api_base: null
+    api_key_env: ANTHROPIC_API_KEY
+    max_tokens: 2048
+    temperature: 0.0
+  chat:
+    provider: anthropic
+    model: claude-opus-4-8
+    api_base: null
+    api_key_env: ANTHROPIC_API_KEY
+    max_tokens: 2048
+    temperature: 0.0
+
+# --- Ingestion worker ---
+ingestion:
+  auto_start: true        # start the background ingestion worker when the app launches
+  concurrency: 1          # papers ingested in parallel
+
+# --- HTTP server ---
+server:
+  host: 127.0.0.1
+  port: 8000
+
+# --- The paper list. Anything already in the DB is skipped. ---
+#   name      human name AND the paper_id (filename stem, manifest key, search filter)
+#   arxiv_id  arXiv id used to download the PDF (quote it)
+papers: []
+  # - { name: deepseek-v3, arxiv_id: "2412.19437" }

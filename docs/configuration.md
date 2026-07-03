@@ -4,20 +4,31 @@
 > variable, or an API route. Neutral lookup — for step-by-step tasks see
 > [How-to guides](how-to.md).
 
-📌 Every default below is the value in the code (`src/rag/config.py`), which the shipped
-`config.yaml` may override.
+📌 Every default below is the value in the code (`src/rag/config.py`), which the config you
+run may override. [`configs/examples/reference.yaml`](../configs/examples/reference.yaml) is
+the annotated master listing every key, default, and accepted value.
 
 ## 🔍 How the config is found
 
-`config.yaml` is the single source of truth. It is located in this order:
+A config file is the single source of truth. It is located in this order:
 
-1. An explicit `--config <path>` (on `paperlens-ingest`).
+1. An explicit `--config <path>` (on `paperlens-serve` and `paperlens-ingest`).
 2. The `PAPERLENS_CONFIG` environment variable.
-3. An upward search for `config.yaml` from the current directory.
+3. An upward search for a file literally named `config.yaml` from the current directory.
 
-The directory containing the resolved `config.yaml` is the **project root**. Every relative
+Configs live under [`configs/`](../configs/); the default run config is
+`configs/recent-oss-agentic-models.yaml` (there is no `config.yaml` at the repo root, so a
+bare command with no `--config`/`PAPERLENS_CONFIG` falls back to the code defaults). The
+`make` targets pass it for you and take `CONFIG=` to override.
+
+The directory containing the resolved config file is the **project root**. Every relative
 path in the file is anchored to it, so commands work from any working directory. Absolute
 paths are used as-is.
+
+Copy-me templates for common setups (local gpt-oss, Anthropic, Gemini, Ollama) live in
+[`configs/examples/`](../configs/examples/README.md), alongside the annotated
+[`reference.yaml`](../configs/examples/reference.yaml) — copy one into `configs/` and point
+`--config` / `PAPERLENS_CONFIG` / `make … CONFIG=` at it.
 
 ## 📝 `config.yaml` reference
 
@@ -119,17 +130,20 @@ Console scripts (from `pyproject.toml`); each also runs as `python -m <module>`.
 | `uv run paperlens-serve` | `python -m server` | Serve the API on `server.host:server.port`; auto-starts the worker if `ingestion.auto_start`. |
 | `uv run paperlens-ingest` | `python -m rag.ingest` | Ingest every configured paper not yet in the DB (headless, same pipeline as the worker). |
 | `uv run paperlens-ingest --retag` | — | Regenerate tags for already-ingested papers (no re-index). |
-| `uv run paperlens-ingest --config <path>` | — | Use a specific `config.yaml`. |
+| `uv run paperlens-{serve,ingest} --config <path>` | — | Use a specific config file. |
 
 ### 🎁 Make targets
 
 | Target | Runs |
 |---|---|
 | `make install` | `uv sync` + `npm --prefix web install`. |
-| `make serve` | `uv run paperlens-serve`. |
+| `make serve` | `uv run paperlens-serve --config $(CONFIG)`. |
 | `make dev` | Backend + frontend dev server together. |
-| `make ingest` | `uv run paperlens-ingest`. |
+| `make ingest` | `uv run paperlens-ingest --config $(CONFIG)`. |
 | `make build` | Production frontend build → `web/dist`. |
+
+`serve`/`dev`/`ingest` default `CONFIG` to `configs/recent-oss-agentic-models.yaml`;
+override per run, e.g. `make serve CONFIG=configs/examples/anthropic.yaml`.
 
 ### 🖼️ Frontend
 

@@ -38,7 +38,8 @@ fast — you still run the full gate yourself before pushing.
 ## 🧱 Project layout
 
 ```text
-config.yaml            # single source of truth (paths, models, server, paper list)
+configs/               # run configs (data, not code); default: recent-oss-agentic-models.yaml
+  examples/            # copy-me templates + reference.yaml (every key annotated)
 src/
   rag/                 # config-driven core: ingestion + two-stage retrieval
     config.py          # typed config loader, root anchoring (+ .env)

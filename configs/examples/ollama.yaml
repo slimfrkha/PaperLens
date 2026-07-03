@@ -1,0 +1,46 @@
+# Fully local via Ollama: native /api/embed for embeddings, /v1 (OpenAI-compatible)
+# for the LLMs. Needs `ollama serve` running with the models pulled.
+# The chat model must support tool/function calling.
+
+paths:
+  rag_db: data/rag_db
+  pdf_dir: data/papers/pdf
+  markdown_dir: data/papers/text
+  chat_history: data/chat_history
+  web_dist: web/dist
+
+collection: arxiv_papers
+
+embedding:
+  model: bge-m3
+  type: ollama
+  batch_size: 32
+  api_base: http://localhost:11434
+
+reranker:
+  type: llm            # cross-encoder reranking isn't served by Ollama; reuse the chat LLM
+  enabled: true
+
+llm:
+  tagging:
+    provider: openai   # Ollama's OpenAI-compatible endpoint
+    model: llama3.1:8b
+    api_base: http://localhost:11434/v1
+    api_key_env: LOCAL_LLM_KEY
+  chat:
+    provider: openai
+    model: llama3.1:8b
+    api_base: http://localhost:11434/v1
+    api_key_env: LOCAL_LLM_KEY
+
+ingestion:
+  auto_start: true
+  concurrency: 1
+
+server:
+  host: 127.0.0.1
+  port: 8000
+
+papers:
+  - { name: deepseek-v3, arxiv_id: "2412.19437" }
+  - { name: kimi-k2,     arxiv_id: "2507.20534" }
