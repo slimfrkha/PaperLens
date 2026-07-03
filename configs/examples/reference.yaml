@@ -5,9 +5,11 @@
 # templates in this directory (local-gpt-oss / anthropic / gemini / ollama) and edit it,
 # or start from here and delete what you don't need.
 #
-# Every value shown is the built-in default from src/rag/config.py unless noted. All
-# relative paths are anchored to this file's directory (the project root). Full prose
-# reference: docs/configuration.md.
+# Every value shown is the built-in default from src/rag/config.py unless noted. The one
+# exception is `paths` (below): the values shown are the recommended collection-namespaced
+# layout, NOT the dataclass defaults — those are flat (e.g. `data/rag_db`). All relative
+# paths are anchored to this file's directory (the project root). Full prose reference:
+# docs/configuration.md.
 #
 # The `embedding`, `reranker`, and `llm.*` sections are tagged unions: a `type` string
 # selects the variant, and only that variant's keys are valid (an unknown key or an
@@ -20,7 +22,9 @@ data_path: data                    # base dir for all runtime data (referenced a
 collection: arxiv_papers           # Chroma collection name; also namespaces the data paths
 
 # --- Filesystem paths (relative -> anchored to this file's dir; absolute -> used as-is) ---
-# ${data_path}/${collection} keeps each collection's data isolated; edit freely.
+# Setting the ${data_path}/${collection} prefix below is what keeps each collection's data
+# isolated — it is NOT automatic. Omit a path and you get the flat dataclass default for it
+# (e.g. `data/rag_db`, un-namespaced), not a derived one. Edit freely.
 paths:
   rag_db: ${data_path}/${collection}/rag_db             # Chroma persistent dir + papers.json manifest
   pdf_dir: ${data_path}/${collection}/papers/pdf        # downloaded PDFs (<paper_id>.pdf)
@@ -72,7 +76,6 @@ llm:
 # --- Ingestion worker ---
 ingestion:
   auto_start: true        # start the background ingestion worker when the app launches
-  concurrency: 1          # papers ingested in parallel
 
 # --- HTTP server ---
 server:

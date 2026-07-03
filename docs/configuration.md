@@ -70,6 +70,12 @@ The shipped configs build `paths` from these via interpolation, e.g.
 `rag_db: ${data_path}/${collection}/rag_db`, so each collection's data stays isolated and
 overriding `--collection` / `--data_path` moves every path at once.
 
+`collection` is the most coupled field in the config — it does **triple duty**: it names the
+Chroma collection, it namespaces the data paths (via the interpolation above), and — combined
+with the embedder's `name()` — it forms the on-disk index identity. Changing it silently
+re-points all three, i.e. it starts a fresh, empty dataset rather than renaming the existing
+one. (Changing the embedder alone likewise invalidates the index; see the embedder note.)
+
 `papers` entries:
 
 | Field | Type | Description |
@@ -124,7 +130,6 @@ local OpenAI-compatible server.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `auto_start` | bool | `true` | Start the ingestion worker when the app launches. |
-| `concurrency` | int | `1` | Papers ingested in parallel. |
 
 ### 🌐 `server`
 

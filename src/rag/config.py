@@ -173,7 +173,6 @@ class LLMCfg:
 @dataclass
 class IngestionCfg:
     auto_start: bool = True
-    concurrency: int = 1
 
 
 @dataclass
