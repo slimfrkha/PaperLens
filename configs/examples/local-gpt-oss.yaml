@@ -2,14 +2,15 @@
 # Works with LM Studio, vLLM, sglang, llama.cpp --server, Ollama's /v1, etc.
 # Set `api_base` to your server; local servers ignore the key (any env var name is fine).
 
-paths:
-  rag_db: data/rag_db
-  pdf_dir: data/papers/pdf
-  markdown_dir: data/papers/text
-  chat_history: data/chat_history
-  web_dist: web/dist
-
+data_path: data
 collection: arxiv_papers
+
+paths:
+  rag_db: ${data_path}/${collection}/rag_db
+  pdf_dir: ${data_path}/${collection}/papers/pdf
+  markdown_dir: ${data_path}/${collection}/papers/text
+  chat_history: ${data_path}/${collection}/chat_history
+  web_dist: web/dist
 
 embedding:
   model: BAAI/bge-m3
@@ -24,15 +25,15 @@ reranker:
 
 llm:
   tagging:
-    provider: openai
+    type: openai
     model: openai/gpt-oss-20b        # whatever the endpoint serves
     api_base: http://127.0.0.1:1234/v1
     api_key_env: LOCAL_LLM_KEY
   chat:
-    provider: openai
-    model: openai/gpt-oss-20b        # must support tool/function calling
-    api_base: http://127.0.0.1:1234/v1
-    api_key_env: LOCAL_LLM_KEY
+    type: openai
+    model: ${llm.tagging.model}       # must support tool/function calling
+    api_base: ${llm.tagging.api_base}
+    api_key_env: ${llm.tagging.api_key_env}
 
 ingestion:
   auto_start: true

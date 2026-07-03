@@ -6,16 +6,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from rag.embedders import _EMBEDDERS, build_embedder
+from rag.config import EmbeddingCfg, OllamaEmbeddingCfg
+from rag.embedders import build_embedder
 
 
-def test_registry_has_builtin_embedders():
-    assert {"hf", "openai", "gemini", "ollama"} <= set(_EMBEDDERS)
-
-
-def test_build_embedder_unknown_type_raises():
-    with pytest.raises(ValueError, match="Unknown embedder-type"):
-        build_embedder("m", "nope", batch_size=8)
+def test_build_embedder_unknown_variant_raises():
+    # The base EmbeddingCfg is not a registered variant.
+    with pytest.raises(ValueError, match="Unknown embedding config"):
+        build_embedder(EmbeddingCfg())
 
 
 # ---- Ollama: native /api/embed, faked httpx client -------------------------
@@ -42,7 +40,9 @@ class _FakeHTTP:
 
 
 def test_ollama_embedder_batches_and_parses():
-    e = build_embedder("nomic-embed-text", "ollama", batch_size=64, api_base="http://h:11434/")
+    e = build_embedder(
+        OllamaEmbeddingCfg(model="nomic-embed-text", batch_size=64, api_base="http://h:11434/")
+    )
     e.client = _FakeHTTP()
 
     out = e(["x", "y"])

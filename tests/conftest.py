@@ -18,7 +18,16 @@ import hashlib
 
 import pytest
 
-from rag.config import Config, EmbeddingCfg, LLMCfg, LLMSpec, Paths, RerankerCfg
+from rag.config import (
+    AnthropicSpec,
+    Config,
+    HFEmbeddingCfg,
+    HFRerankerCfg,
+    LLMCfg,
+    LLMSpec,
+    OpenAISpec,
+    Paths,
+)
 from rag.index import open_collection
 from rag.llm import LLMBackend
 
@@ -66,7 +75,7 @@ class FakeLLM(LLMBackend):
         tool_calls: list[tuple[str, dict]] | None = None,
         reasoning: str | None = None,
     ) -> None:
-        super().__init__(spec or LLMSpec())
+        super().__init__(spec or AnthropicSpec())
         self.answer = answer
         self.tool_calls = tool_calls or []
         self.reasoning = reasoning
@@ -107,11 +116,11 @@ def make_config(tmp_path):
         cfg = Config(
             paths=paths,
             collection="test_papers",
-            embedding=EmbeddingCfg(),
-            reranker=RerankerCfg(enabled=False),
+            embedding=HFEmbeddingCfg(),
+            reranker=HFRerankerCfg(enabled=False),
             llm=LLMCfg(
-                tagging=LLMSpec(provider="openai", api_base="http://x"),
-                chat=LLMSpec(provider="openai", api_base="http://x"),
+                tagging=OpenAISpec(api_base="http://x"),
+                chat=OpenAISpec(api_base="http://x"),
             ),
         )
         for key, value in overrides.items():

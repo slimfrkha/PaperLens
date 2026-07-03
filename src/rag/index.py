@@ -27,6 +27,7 @@ import os
 import time
 
 from .chunking import Chunk, chunk_markdown
+from .config import HFEmbeddingCfg, OpenAIEmbeddingCfg
 from .embedders import build_embedder
 
 # Best quality-per-speed local default: BGE-M3 is battle-tested with
@@ -123,14 +124,20 @@ def build(args) -> None:
     print(f"  total: {len(chunks)} chunks")
 
     print(f"== Loading embedder [{args.embedder_type}] {args.embedder} ==")
-    embedder = build_embedder(
-        args.embedder,
-        args.embedder_type,
-        batch_size=args.batch_size,
-        api_base=args.api_base,
-        api_key_env=args.api_key_env,
-        max_seq_length=args.max_seq_length,
-    )
+    if args.embedder_type == "openai":
+        ecfg = OpenAIEmbeddingCfg(
+            model=args.embedder,
+            batch_size=args.batch_size,
+            api_base=args.api_base or "",
+            api_key_env=args.api_key_env,
+        )
+    else:
+        ecfg = HFEmbeddingCfg(
+            model=args.embedder,
+            batch_size=args.batch_size,
+            max_seq_length=args.max_seq_length,
+        )
+    embedder = build_embedder(ecfg)
 
     if args.reset:
         print(f"  reset: dropping existing collection {args.collection!r}")

@@ -52,9 +52,9 @@ def test_delete_and_list_all_sorted_by_updated(tmp_path):
 
 
 def test_generate_name_falls_back_when_llm_errors(monkeypatch):
-    from rag.config import LLMSpec
+    from rag.config import AnthropicSpec
 
     # No api_base + no key -> build_llm(...).complete raises -> graceful fallback.
-    spec = LLMSpec(provider="anthropic", api_key_env="DEFINITELY_UNSET_KEY_XYZ")
+    spec = AnthropicSpec(api_key_env="DEFINITELY_UNSET_KEY_XYZ")
     monkeypatch.delenv("DEFINITELY_UNSET_KEY_XYZ", raising=False)
     assert generate_name("How does MLA work?", spec) == "New chat"

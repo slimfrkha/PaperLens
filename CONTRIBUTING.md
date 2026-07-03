@@ -93,8 +93,8 @@ import that violates this.
 ## ➕ How to add X
 
 Adding a paper, an LLM backend, or an embedder is a documented recipe — see
-[docs/how-to.md](docs/how-to.md). Backends use the **registry** pattern: one
-`@register_*`-decorated class, no other wiring.
+[docs/how-to.md](docs/how-to.md). Backends use the **ChoiceRegistry** pattern: one
+`@Base.register_subclass("name")` config-variant dataclass plus a `build_*` match arm.
 
 ## 🧪 Test conventions
 

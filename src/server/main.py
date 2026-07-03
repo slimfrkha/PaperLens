@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from sse_starlette.sse import EventSourceResponse
 
-from rag.config import load_config
+from rag.config import Config, parse_config
 from rag.index import open_collection
 from rag.llm import build_llm
 from rag.manifest import Manifest
@@ -26,8 +26,7 @@ from .schemas import ChatRequest
 from .worker import IngestionWorker
 
 
-def create_app(config_path: str | None = None) -> FastAPI:
-    cfg = load_config(config_path)
+def create_app(cfg: Config) -> FastAPI:
     web_dist = Path(cfg.paths.web_dist)
     manifest = Manifest(cfg.paths.rag_db)
     chats = ChatStore(cfg.paths.chat_history)
@@ -191,16 +190,10 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
 
 def main() -> None:
-    import argparse
-
     import uvicorn
 
-    p = argparse.ArgumentParser(description="Serve the PaperLens API.")
-    p.add_argument("--config", default=None)
-    args = p.parse_args()
-
-    cfg = load_config(args.config)
-    uvicorn.run(create_app(args.config), host=cfg.server.host, port=cfg.server.port)
+    cfg = parse_config()  # config file + draccus per-field CLI overrides (--server.port=...)
+    uvicorn.run(create_app(cfg), host=cfg.server.host, port=cfg.server.port)
 
 
 if __name__ == "__main__":

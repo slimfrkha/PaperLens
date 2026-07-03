@@ -2,14 +2,15 @@
 # for the LLMs. Needs `ollama serve` running with the models pulled.
 # The chat model must support tool/function calling.
 
-paths:
-  rag_db: data/rag_db
-  pdf_dir: data/papers/pdf
-  markdown_dir: data/papers/text
-  chat_history: data/chat_history
-  web_dist: web/dist
-
+data_path: data
 collection: arxiv_papers
+
+paths:
+  rag_db: ${data_path}/${collection}/rag_db
+  pdf_dir: ${data_path}/${collection}/papers/pdf
+  markdown_dir: ${data_path}/${collection}/papers/text
+  chat_history: ${data_path}/${collection}/chat_history
+  web_dist: web/dist
 
 embedding:
   model: bge-m3
@@ -23,15 +24,15 @@ reranker:
 
 llm:
   tagging:
-    provider: openai   # Ollama's OpenAI-compatible endpoint
+    type: openai   # Ollama's OpenAI-compatible endpoint
     model: llama3.1:8b
     api_base: http://localhost:11434/v1
     api_key_env: LOCAL_LLM_KEY
   chat:
-    provider: openai
-    model: llama3.1:8b
-    api_base: http://localhost:11434/v1
-    api_key_env: LOCAL_LLM_KEY
+    type: openai
+    model: ${llm.tagging.model}
+    api_base: ${llm.tagging.api_base}
+    api_key_env: ${llm.tagging.api_key_env}
 
 ingestion:
   auto_start: true

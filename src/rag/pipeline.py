@@ -30,15 +30,7 @@ def build_embedder_from_config(cfg: Config):
     """Construct the embedder described by config.embedding (reused across papers)."""
     from .embedders import build_embedder
 
-    e = cfg.embedding
-    return build_embedder(
-        e.model,
-        e.type,
-        batch_size=e.batch_size,
-        api_base=e.api_base,
-        api_key_env=e.api_key_env,
-        max_seq_length=e.max_seq_length,
-    )
+    return build_embedder(cfg.embedding)
 
 
 def pending_papers(cfg: Config, manifest: Manifest) -> list[Paper]:

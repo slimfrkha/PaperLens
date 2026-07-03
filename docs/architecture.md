@@ -107,22 +107,28 @@ Why a tool instead of always retrieving:
   `r2`, …); the agent must cite the refs it received, and the frontend turns each into a
   clickable **citation** that opens the paper at that passage.
 
-## 🗂️ Swappable backends: the registry pattern
+## 🗂️ Swappable backends: the ChoiceRegistry pattern
 
-Embedders, rerankers, and LLM backends are all selected by a config string and built
-through a decorator **registry** (`_EMBEDDERS`, `_RERANKERS`, `_BACKENDS`). Adding a
-backend is one `@register_*("name")`-decorated class — no factory edits, no `if/elif`
-chains. `build_embedder` / `build_reranker` / `build_llm` just look the string up. See
+Embedders, rerankers, and LLM backends are selected by a config `type` string and modelled
+as `draccus.ChoiceRegistry` tagged unions (`EmbeddingCfg`, `RerankerCfg`, `LLMSpec` in
+`config.py`): the `type` decodes straight to a variant dataclass carrying only that
+backend's fields. Adding a backend is one `@Base.register_subclass("name")` dataclass plus a
+`match` arm in `build_embedder` / `build_reranker` / `build_llm` — no `if/elif` on strings,
+and an unknown `type` or stray field fails loudly at load. See
 [How-to: add a backend](how-to.md#add-a-new-llm-backend). This is what lets "the LLM is an
 opaque config value" hold true across Anthropic, OpenAI-compatible servers, and Gemini.
+
+The config itself is loaded by draccus (dataclass decoding) with OmegaConf `${...}`
+interpolation layered in; `parse_config` adds per-field CLI overrides that feed
+interpolation. See [Configuration](configuration.md).
 
 ## 🧱 Layering: `server` composes `rag`
 
 The Python packages import in one direction only — no cycles:
 
 ```text
-config  chunking  embedders  extract  manifest      (leaves: no intra-rag deps)
-  llm   index   reranker
+config  chunking  extract  manifest      (leaves: no intra-rag deps)
+  embedders(config)   llm(config)   index   reranker
   tagger   search   pipeline
   ingest
 ```

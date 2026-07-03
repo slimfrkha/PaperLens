@@ -95,16 +95,20 @@ add an import that violates this.
   lazily — an OpenAI-compatible or cloud setup never pays for local model downloads.
 - **Config anchoring.** Every relative path in `config.yaml` resolves against the config
   file's directory (the **project root**), so every entry point is CWD-independent.
-  Located by `--config` → `PAPERLENS_CONFIG` → upward search from CWD.
+  Located by `--config_path` → `PAPERLENS_CONFIG` → upward search from CWD. Config is
+  dataclasses decoded by `draccus` with OmegaConf `${...}` interpolation; `parse_config`
+  adds per-field CLI overrides (`--server.port=…`) that feed interpolation.
 - **SSE streaming.** `/api/chat` streams tokens and trace steps over Server-Sent Events;
   the agent runs in a thread executor and pushes events onto an asyncio queue. The UI
   renders the answer and the Thought → Action → Observation trace as they happen.
 - **Embedder identity is baked into the index.** The embedder's `name()` namespaces the
   Chroma collection. Changing the embedder means re-indexing (delete `paths.rag_db` and
   re-ingest, or use a fresh `collection` name).
-- **Registry pattern.** Embedders, rerankers, and LLM backends are selected by a config
-  string and built through decorator registries (`@register_embedder/reranker/llm`).
-  Adding a backend is one decorated class — no factory edits, no `if/elif`.
+- **ChoiceRegistry pattern.** Embedders, rerankers, and LLM backends are selected by a
+  config `type` string and modelled as `draccus.ChoiceRegistry` variant dataclasses
+  (`EmbeddingCfg`/`RerankerCfg`/`LLMSpec` in `config.py`). Adding a backend is one
+  `@Base.register_subclass("name")` dataclass + a `build_*` match arm — no `if/elif`; an
+  unknown `type` or stray field fails loudly at load.
 
 ## ✍️ Conventions
 

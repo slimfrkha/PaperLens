@@ -12,12 +12,12 @@ template below to actually run.
 cp configs/examples/anthropic.yaml configs/my-setup.yaml   # then edit `papers:`
 ```
 
-Point any command at a config with `--config` (or the `PAPERLENS_CONFIG` env var); the
+Point any command at a config with `--config_path` (or the `PAPERLENS_CONFIG` env var); the
 `make` targets take `CONFIG=`:
 
 ```bash
-uv run paperlens-serve  --config configs/my-setup.yaml
-uv run paperlens-ingest --config configs/my-setup.yaml
+uv run paperlens-serve  --config_path configs/my-setup.yaml
+uv run paperlens-ingest --config_path configs/my-setup.yaml
 make serve CONFIG=configs/my-setup.yaml
 # or:  export PAPERLENS_CONFIG=configs/my-setup.yaml
 ```

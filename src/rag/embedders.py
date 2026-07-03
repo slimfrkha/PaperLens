@@ -1,17 +1,18 @@
 """Pluggable embedding backends for indexing.
 
-Backends registered under a config ``type`` string via ``@register_embedder``:
+One backend per config ``embedding.type`` variant (see ``EmbeddingCfg`` in
+``config.py``):
 
 * ``hf``     — any sentence-transformers / HuggingFace model, run locally
                (default; uses Apple MPS when available).
 * ``openai`` — any OpenAI-compatible embeddings endpoint (OpenAI itself, or
-               a local/other server via ``--api-base``).
+               a local/other server via ``api_base``).
 * ``gemini`` — Google GenAI embeddings (asymmetric: document vs query task type).
 * ``ollama`` — Ollama's native ``/api/embed`` endpoint.
 
 All expose the Chroma ``EmbeddingFunction`` protocol: ``__call__(input) -> list[list[float]]``.
-Add a backend by dropping a ``@register_embedder("name")`` class here — ``build_embedder``
-discovers it via the registry, no other wiring needed.
+Add a backend by registering an ``EmbeddingCfg`` variant in ``config.py`` and adding
+a match arm to ``build_embedder`` below.
 """
 
 from __future__ import annotations
@@ -19,13 +20,20 @@ from __future__ import annotations
 import os
 from abc import ABC, abstractmethod
 
+from .config import (
+    EmbeddingCfg,
+    GeminiEmbeddingCfg,
+    HFEmbeddingCfg,
+    OllamaEmbeddingCfg,
+    OpenAIEmbeddingCfg,
+)
+
 
 class Embedder(ABC):
     """Chroma-compatible embedding function.
 
-    Concrete embedders register under a config ``type`` string and expose a
-    uniform ``build`` classmethod so ``build_embedder`` can construct any of
-    them from the same config fields (ignoring the ones a given backend doesn't use).
+    ``build_embedder`` constructs the right concrete embedder from the matching
+    ``EmbeddingCfg`` variant.
     """
 
     @abstractmethod
@@ -43,34 +51,7 @@ class Embedder(ABC):
         only when present."""
         return self(input)
 
-    @classmethod
-    @abstractmethod
-    def build(
-        cls,
-        model_name: str,
-        *,
-        batch_size: int,
-        api_base: str | None,
-        api_key_env: str,
-        max_seq_length: int,
-    ) -> Embedder:
-        """Construct from the shared config fields."""
 
-
-_EMBEDDERS: dict[str, type[Embedder]] = {}
-
-
-def register_embedder(name: str):
-    """Register an :class:`Embedder` subclass under a config ``type`` string."""
-
-    def deco(cls: type[Embedder]) -> type[Embedder]:
-        _EMBEDDERS[name] = cls
-        return cls
-
-    return deco
-
-
-@register_embedder("hf")
 class HFEmbedder(Embedder):
     """Local sentence-transformers embedder."""
 
@@ -113,20 +94,7 @@ class HFEmbedder(Embedder):
         )
         return vecs.tolist()
 
-    @classmethod
-    def build(
-        cls,
-        model_name: str,
-        *,
-        batch_size: int,
-        api_base: str | None,
-        api_key_env: str,
-        max_seq_length: int,
-    ) -> HFEmbedder:
-        return cls(model_name, batch_size=batch_size, max_seq_length=max_seq_length)
 
-
-@register_embedder("openai")
 class OpenAIEmbedder(Embedder):
     """OpenAI-compatible API embedder (OpenAI, or any compatible base_url)."""
 
@@ -160,20 +128,7 @@ class OpenAIEmbedder(Embedder):
             out.extend(d.embedding for d in resp.data)
         return out
 
-    @classmethod
-    def build(
-        cls,
-        model_name: str,
-        *,
-        batch_size: int,
-        api_base: str | None,
-        api_key_env: str,
-        max_seq_length: int,
-    ) -> OpenAIEmbedder:
-        return cls(model_name, api_base=api_base, api_key_env=api_key_env, batch_size=batch_size)
 
-
-@register_embedder("gemini")
 class GeminiEmbedder(Embedder):
     """Google GenAI embeddings (e.g. ``text-embedding-004``, ``gemini-embedding-001``).
 
@@ -222,20 +177,7 @@ class GeminiEmbedder(Embedder):
     def embed_query(self, input: list[str]) -> list[list[float]]:
         return self._embed(input, "RETRIEVAL_QUERY")
 
-    @classmethod
-    def build(
-        cls,
-        model_name: str,
-        *,
-        batch_size: int,
-        api_base: str | None,
-        api_key_env: str,
-        max_seq_length: int,
-    ) -> GeminiEmbedder:
-        return cls(model_name, api_key_env=api_key_env, batch_size=batch_size)
 
-
-@register_embedder("ollama")
 class OllamaEmbedder(Embedder):
     """Ollama's native ``/api/embed`` endpoint (batched). Needs no API key."""
 
@@ -267,39 +209,26 @@ class OllamaEmbedder(Embedder):
             out.extend(resp.json()["embeddings"])
         return out
 
-    @classmethod
-    def build(
-        cls,
-        model_name: str,
-        *,
-        batch_size: int,
-        api_base: str | None,
-        api_key_env: str,
-        max_seq_length: int,
-    ) -> OllamaEmbedder:
-        return cls(model_name, api_base=api_base, batch_size=batch_size)
 
-
-def build_embedder(
-    embedder: str,
-    embedder_type: str,
-    *,
-    batch_size: int,
-    api_base: str | None = None,
-    api_key_env: str = "OPENAI_API_KEY",
-    max_seq_length: int = 1024,
-) -> Embedder:
-    """Factory used by the CLI/config: dispatch to the registered embedder type."""
-    try:
-        cls = _EMBEDDERS[embedder_type]
-    except KeyError:
-        raise ValueError(
-            f"Unknown embedder-type: {embedder_type!r} (expected one of {sorted(_EMBEDDERS)})"
-        ) from None
-    return cls.build(
-        embedder,
-        batch_size=batch_size,
-        api_base=api_base,
-        api_key_env=api_key_env,
-        max_seq_length=max_seq_length,
-    )
+def build_embedder(cfg: EmbeddingCfg) -> Embedder:
+    """Construct the embedder described by ``config.embedding`` (its variant)."""
+    match cfg:
+        case HFEmbeddingCfg():
+            return HFEmbedder(
+                cfg.model, batch_size=cfg.batch_size, max_seq_length=cfg.max_seq_length
+            )
+        case OpenAIEmbeddingCfg():
+            return OpenAIEmbedder(
+                cfg.model,
+                api_base=cfg.api_base or None,
+                api_key_env=cfg.api_key_env,
+                batch_size=cfg.batch_size,
+            )
+        case GeminiEmbeddingCfg():
+            return GeminiEmbedder(cfg.model, api_key_env=cfg.api_key_env, batch_size=cfg.batch_size)
+        case OllamaEmbeddingCfg():
+            return OllamaEmbedder(
+                cfg.model, api_base=cfg.api_base or None, batch_size=cfg.batch_size
+            )
+        case _:
+            raise ValueError(f"Unknown embedding config: {type(cfg).__name__}")

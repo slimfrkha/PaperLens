@@ -1,14 +1,15 @@
 # Google Gemini for both embeddings and the LLMs.
 # Needs:  uv sync --extra gemini   and   GEMINI_API_KEY in .env
 
-paths:
-  rag_db: data/rag_db
-  pdf_dir: data/papers/pdf
-  markdown_dir: data/papers/text
-  chat_history: data/chat_history
-  web_dist: web/dist
-
+data_path: data
 collection: arxiv_papers
+
+paths:
+  rag_db: ${data_path}/${collection}/rag_db
+  pdf_dir: ${data_path}/${collection}/papers/pdf
+  markdown_dir: ${data_path}/${collection}/papers/text
+  chat_history: ${data_path}/${collection}/chat_history
+  web_dist: web/dist
 
 embedding:
   model: gemini-embedding-001
@@ -22,13 +23,13 @@ reranker:
 
 llm:
   tagging:
-    provider: gemini
+    type: gemini
     model: gemini-2.5-flash
     api_key_env: GEMINI_API_KEY
   chat:
-    provider: gemini
+    type: gemini
     model: gemini-2.5-pro
-    api_key_env: GEMINI_API_KEY
+    api_key_env: ${llm.tagging.api_key_env}
 
 ingestion:
   auto_start: true

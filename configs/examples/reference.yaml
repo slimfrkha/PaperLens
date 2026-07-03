@@ -8,55 +8,63 @@
 # Every value shown is the built-in default from src/rag/config.py unless noted. All
 # relative paths are anchored to this file's directory (the project root). Full prose
 # reference: docs/configuration.md.
+#
+# The `embedding`, `reranker`, and `llm.*` sections are tagged unions: a `type` string
+# selects the variant, and only that variant's keys are valid (an unknown key or an
+# unknown `type` fails loudly at load — no silent defaulting). Values support OmegaConf
+# `${...}` interpolation (e.g. `${server.port}`, `${oc.env:HOME}`), resolved at load
+# time; CLI overrides on paperlens-serve/-ingest (e.g. `--server.port=9000`) feed it too.
+
+# --- Data root + collection (the paths below interpolate these) ---
+data_path: data                    # base dir for all runtime data (referenced as ${data_path})
+collection: arxiv_papers           # Chroma collection name; also namespaces the data paths
 
 # --- Filesystem paths (relative -> anchored to this file's dir; absolute -> used as-is) ---
+# ${data_path}/${collection} keeps each collection's data isolated; edit freely.
 paths:
-  rag_db: data/rag_db              # Chroma persistent dir + the papers.json manifest
-  pdf_dir: data/papers/pdf         # downloaded PDFs (<paper_id>.pdf)
-  markdown_dir: data/papers/text   # Docling-extracted markdown (<paper_id>.md)
-  chat_history: data/chat_history  # per-session chat JSON files
-  web_dist: web/dist               # built frontend SPA served by the backend
-
-collection: arxiv_papers           # Chroma collection name for all chunks
+  rag_db: ${data_path}/${collection}/rag_db             # Chroma persistent dir + papers.json manifest
+  pdf_dir: ${data_path}/${collection}/papers/pdf        # downloaded PDFs (<paper_id>.pdf)
+  markdown_dir: ${data_path}/${collection}/papers/text  # Docling-extracted markdown (<paper_id>.md)
+  chat_history: ${data_path}/${collection}/chat_history # per-session chat JSON files
+  web_dist: web/dist                                     # built frontend SPA served by the backend
 
 # --- Embedder: turns chunks (and queries) into vectors ---
+# `type` selects the variant; keys below are per-type (common: model, batch_size):
+#   hf      model, batch_size, max_seq_length            (local; default)
+#   openai  model, batch_size, api_base, api_key_env     (any OpenAI-compatible endpoint)
+#   gemini  model, batch_size, api_key_env               (GEMINI_API_KEY)
+#   ollama  model, batch_size, api_base                  (native /api/embed)
 embedding:
   type: hf                # hf | openai | gemini | ollama
-  model: BAAI/bge-m3      # HF model id, or the API model name for API types
-  max_seq_length: 1024    # hf only; token cap guarding the MPS 2**32 tensor limit on Apple Silicon
+  model: BAAI/bge-m3      # HF model id (or the API model name for api types)
   batch_size: 32          # embedding batch size
-  api_base: null          # base URL for openai (any OpenAI-compatible endpoint) / ollama (http://localhost:11434)
-  api_key_env: OPENAI_API_KEY  # env var holding the key (openai=OPENAI_API_KEY, gemini=GEMINI_API_KEY)
+  max_seq_length: 1024    # hf only; token cap guarding the MPS 2**32 tensor limit on Apple Silicon
 
 # --- Reranker: second retrieval stage, scores recalled chunks ---
+#   hf    model, enabled   (local cross-encoder)
+#   llm   enabled          (reuses the chat LLM — no extra model/deps)
 reranker:
-  type: hf                # hf (local cross-encoder) | llm (reuses the chat LLM, no extra model/deps)
+  type: hf                # hf | llm
   model: BAAI/bge-reranker-v2-m3  # cross-encoder model id (hf type only)
   enabled: true           # turn the whole rerank stage on/off
 
-# --- LLMs: two specs sharing one schema (LLMSpec) ---
+# --- LLMs: two specs (tagging + chat), each a tagged union on `type` ---
 #   tagging -> labels papers at ingestion (cheap + fast is fine)
 #   chat    -> powers the agentic-RAG loop; MUST support tool/function calling
-# Per-spec keys (all optional; defaults shown):
-#   provider     anthropic | openai | vllm | sglang | gemini
-#                (vllm/sglang/openai all speak the OpenAI wire format — set api_base)
-#   model        model id the provider/endpoint serves
-#   api_base     endpoint URL for OpenAI-compatible providers (null for anthropic/gemini)
-#   api_key_env  env var holding the key (local servers ignore it)
-#   max_tokens   2048
-#   temperature  0.0
+# `type` selects the provider variant; keys are per-type:
+#   common (all)                model, api_key_env, max_tokens (2048), temperature (0.0)
+#   anthropic | gemini          (no api_base; api_key_env defaults ANTHROPIC_/GEMINI_API_KEY)
+#   openai | vllm | sglang      + api_base  (OpenAI wire format; local servers ignore the key)
 llm:
   tagging:
-    provider: anthropic
+    type: anthropic
     model: claude-haiku-4-5-20251001
-    api_base: null
     api_key_env: ANTHROPIC_API_KEY
     max_tokens: 2048
     temperature: 0.0
   chat:
-    provider: anthropic
+    type: anthropic
     model: claude-opus-4-8
-    api_base: null
     api_key_env: ANTHROPIC_API_KEY
     max_tokens: 2048
     temperature: 0.0

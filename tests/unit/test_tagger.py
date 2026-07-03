@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from rag import tagger
-from rag.config import LLMSpec
+from rag.config import AnthropicSpec
 from rag.tagger import _excerpt, _normalize, _parse, generate_tags
 
 
@@ -34,6 +34,6 @@ def test_generate_tags_uses_llm_and_normalizes(monkeypatch):
             return '["Multi-Head Latent Attention", "MLA", "mla"]'
 
     monkeypatch.setattr(tagger, "build_llm", lambda spec: _Fake())
-    tags = generate_tags("## Paper\n\n## Abstract\nx", LLMSpec(), max_tags=5)
+    tags = generate_tags("## Paper\n\n## Abstract\nx", AnthropicSpec(), max_tags=5)
     # kebab-cased + de-duplicated ("MLA"/"mla" collapse).
     assert tags == ["multi-head-latent-attention", "mla"]

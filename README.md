@@ -60,9 +60,9 @@ make serve                  # serves http://127.0.0.1:8000, auto-starts ingestio
 npm --prefix web run dev    # UI at http://localhost:5173 (proxies /api → backend)
 ```
 
-`make serve` runs `paperlens-serve --config configs/recent-oss-agentic-models.yaml` (the
+`make serve` runs `paperlens-serve --config_path configs/recent-oss-agentic-models.yaml` (the
 default config); override with `make serve CONFIG=configs/examples/anthropic.yaml`, or call
-`uv run paperlens-serve --config <path>` directly.
+`uv run paperlens-serve --config_path <path>` directly.
 
 Open the UI, watch papers ingest on the **Admin** page, then ask a question on
 **Chat**. Full walkthrough with expected output:

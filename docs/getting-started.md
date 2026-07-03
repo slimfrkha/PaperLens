@@ -56,7 +56,7 @@ tool). Pick one:
 ## 4. Start the app
 
 ```bash
-uv run paperlens-serve --config configs/recent-oss-agentic-models.yaml
+uv run paperlens-serve --config_path configs/recent-oss-agentic-models.yaml
 ```
 
 This serves `http://127.0.0.1:8000` **and** auto-starts the ingestion worker, which begins

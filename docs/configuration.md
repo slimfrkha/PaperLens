@@ -12,23 +12,39 @@ the annotated master listing every key, default, and accepted value.
 
 A config file is the single source of truth. It is located in this order:
 
-1. An explicit `--config <path>` (on `paperlens-serve` and `paperlens-ingest`).
+1. An explicit `--config_path <path>` (on `paperlens-serve` and `paperlens-ingest`).
 2. The `PAPERLENS_CONFIG` environment variable.
 3. An upward search for a file literally named `config.yaml` from the current directory.
 
 Configs live under [`configs/`](../configs/); the default run config is
 `configs/recent-oss-agentic-models.yaml` (there is no `config.yaml` at the repo root, so a
-bare command with no `--config`/`PAPERLENS_CONFIG` falls back to the code defaults). The
+bare command with no `--config_path`/`PAPERLENS_CONFIG` falls back to the code defaults). The
 `make` targets pass it for you and take `CONFIG=` to override.
 
 The directory containing the resolved config file is the **project root**. Every relative
 path in the file is anchored to it, so commands work from any working directory. Absolute
 paths are used as-is.
 
+### 🔧 Interpolation & CLI overrides
+
+Values support OmegaConf `${...}` interpolation — reference another key (`${server.port}`)
+or an env var (`${oc.env:HOME}`); resolved at load time. Configs are trusted, user-authored
+input, so env interpolation is a convenience, not a new trust boundary.
+
+`paperlens-serve` / `paperlens-ingest` also take **per-field CLI overrides** on top of the
+file (`--server.port=9000`, `--llm.chat.model=…`, `--help` to list them all). Overrides are
+merged *before* interpolation resolves, so `${...}` sees them too. `paperlens-ingest` also
+takes the non-config flag `--retag`.
+
+> **Migration (from the pydantic config):** the LLM selector key `provider` was renamed to
+> `type` (uniform with `embedding.type` / `reranker.type`), and the config-file CLI flag
+> `--config` became `--config_path`. Both old spellings now fail loudly rather than silently
+> defaulting.
+
 Copy-me templates for common setups (local gpt-oss, Anthropic, Gemini, Ollama) live in
 [`configs/examples/`](../configs/examples/README.md), alongside the annotated
 [`reference.yaml`](../configs/examples/reference.yaml) — copy one into `configs/` and point
-`--config` / `PAPERLENS_CONFIG` / `make … CONFIG=` at it.
+`--config_path` / `PAPERLENS_CONFIG` / `make … CONFIG=` at it.
 
 ## 📝 `config.yaml` reference
 
@@ -47,7 +63,12 @@ Copy-me templates for common setups (local gpt-oss, Anthropic, Gemini, Ollama) l
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `collection` | string | `arxiv_papers` | Chroma collection name for all chunks. |
+| `data_path` | string | `data` | Base dir for runtime data; interpolation handle for `paths` (`${data_path}`). |
 | `papers` | list | `[]` | The paper list; each entry is `{ name, arxiv_id }`. |
+
+The shipped configs build `paths` from these via interpolation, e.g.
+`rag_db: ${data_path}/${collection}/rag_db`, so each collection's data stays isolated and
+overriding `--collection` / `--data_path` moves every path at once.
 
 `papers` entries:
 
@@ -60,12 +81,12 @@ Copy-me templates for common setups (local gpt-oss, Anthropic, Gemini, Ollama) l
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `type` | string | `hf` | Backend: `hf` · `openai` · `gemini` · `ollama`. |
-| `model` | string | `BAAI/bge-m3` | HF model id, or the API model name for API types. |
-| `max_seq_length` | int | `1024` | Token cap for `hf`. Guards the MPS `2**32` per-tensor limit on Apple Silicon. |
-| `batch_size` | int | `32` | Embedding batch size. |
-| `api_base` | string \| null | `null` | Base URL for `openai`/`ollama` types. |
-| `api_key_env` | string | `OPENAI_API_KEY` | Env var holding the key (`gemini` → `GEMINI_API_KEY`). |
+| `type` | string | `hf` | Backend variant: `hf` · `openai` · `gemini` · `ollama`. Selects which keys below apply. |
+| `model` | string | `BAAI/bge-m3` | HF model id, or the API model name for API types (common to all). |
+| `batch_size` | int | `32` | Embedding batch size (common to all). |
+| `max_seq_length` | int | `1024` | **`hf` only.** Token cap guarding the MPS `2**32` per-tensor limit on Apple Silicon. |
+| `api_base` | string | `""` | **`openai`/`ollama` only.** Base URL (`""` → provider default). |
+| `api_key_env` | string | per type | **`openai` (`OPENAI_API_KEY`) / `gemini` (`GEMINI_API_KEY`) only.** Env var holding the key. |
 
 ### 🎯 `reranker`
 
@@ -80,16 +101,19 @@ Copy-me templates for common setups (local gpt-oss, Anthropic, Gemini, Ollama) l
 Two LLM specs share one schema. `llm.tagging` labels papers at ingestion (cheap/fast is
 fine); `llm.chat` powers the agent and **must support tool/function calling**.
 
-Each spec (`LLMSpec`):
+Each spec is a tagged union on `type` (the `LLMSpec` variants):
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `provider` | string | `anthropic` | `anthropic` · `openai` · `vllm` · `sglang` · `gemini`. `vllm`/`sglang`/`openai` all speak the OpenAI wire format. |
+| `type` | string | `anthropic` | `anthropic` · `openai` · `vllm` · `sglang` · `gemini`. `vllm`/`sglang`/`openai` all speak the OpenAI wire format. |
 | `model` | string | `claude-opus-4-8` | Model id the provider/endpoint serves. |
-| `api_base` | string \| null | `null` | Endpoint URL for OpenAI-compatible providers. |
-| `api_key_env` | string | `ANTHROPIC_API_KEY` | Env var holding the API key. Local servers ignore it. |
+| `api_base` | string | `""` | **`openai`/`vllm`/`sglang` only.** Endpoint URL (`""` → OpenAI). Not a valid key for `anthropic`/`gemini`. |
+| `api_key_env` | string | `ANTHROPIC_API_KEY` | Env var holding the API key (`OPENAI_API_KEY`/`GEMINI_API_KEY` per type). Local servers ignore it. |
 | `max_tokens` | int | `2048` | Max output tokens. |
 | `temperature` | float | `0.0` | Sampling temperature. |
+
+`type` selects the variant; only that variant's keys are valid — an unknown key (e.g. the
+old `provider`, or `api_base` on `anthropic`) or an unknown `type` **fails loudly at load**.
 
 Defaults differ by spec: `llm.tagging` defaults to model `claude-haiku-4-5-20251001`;
 `llm.chat` defaults to `claude-opus-4-8`. The **shipped `config.yaml`** overrides both to a
@@ -130,16 +154,16 @@ Console scripts (from `pyproject.toml`); each also runs as `python -m <module>`.
 | `uv run paperlens-serve` | `python -m server` | Serve the API on `server.host:server.port`; auto-starts the worker if `ingestion.auto_start`. |
 | `uv run paperlens-ingest` | `python -m rag.ingest` | Ingest every configured paper not yet in the DB (headless, same pipeline as the worker). |
 | `uv run paperlens-ingest --retag` | — | Regenerate tags for already-ingested papers (no re-index). |
-| `uv run paperlens-{serve,ingest} --config <path>` | — | Use a specific config file. |
+| `uv run paperlens-{serve,ingest} --config_path <path>` | — | Use a specific config file. |
 
 ### 🎁 Make targets
 
 | Target | Runs |
 |---|---|
 | `make install` | `uv sync` + `npm --prefix web install`. |
-| `make serve` | `uv run paperlens-serve --config $(CONFIG)`. |
+| `make serve` | `uv run paperlens-serve --config_path $(CONFIG)`. |
 | `make dev` | Backend + frontend dev server together. |
-| `make ingest` | `uv run paperlens-ingest --config $(CONFIG)`. |
+| `make ingest` | `uv run paperlens-ingest --config_path $(CONFIG)`. |
 | `make build` | Production frontend build → `web/dist`. |
 
 `serve`/`dev`/`ingest` default `CONFIG` to `configs/recent-oss-agentic-models.yaml`;

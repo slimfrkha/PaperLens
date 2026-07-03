@@ -152,23 +152,26 @@ Computed by diffing the config paper list against the manifest.
 
 ### 🗂️ Registry
 
-The decorator-based lookup that maps a config `type`/`provider` string to a backend class,
-so adding a backend is one decorated class with no other wiring. Three of them:
-`@register_embedder`, `@register_reranker`, `@register_llm`.
+The `draccus.ChoiceRegistry` config bases whose `type` string selects a variant
+subclass carrying only that backend's fields, so adding a backend is one
+`@Base.register_subclass("name")` dataclass plus a `build_*` match arm. Three of them:
+`EmbeddingCfg`, `RerankerCfg`, `LLMSpec` (all in `src/rag/config.py`).
 
-- Code: `_EMBEDDERS` / `_RERANKERS` (`src/rag/embedders.py`, `reranker.py`),
-  `_BACKENDS` (`src/rag/llm.py`).
-- `_Avoid_:` factory map, plugin table, dispatch dict. Not to be confused with the
-  **manifest**.
+- Code: the `ChoiceRegistry` bases + variants in `src/rag/config.py`; the `build_embedder`
+  / `build_reranker` / `build_llm` match dispatch in `embedders.py` / `reranker.py` / `llm.py`.
+- `_Avoid_:` factory map, plugin table, dispatch dict, decorator registry (the old
+  `@register_*` decorators are gone). Not to be confused with the **manifest**.
 
 ### 🔌 LLM backend
 
-A provider adapter behind a uniform interface, selected by `provider`
+A provider adapter behind a uniform interface, selected by the LLM spec's `type`
 (`anthropic` · `openai` · `vllm` · `sglang` · `gemini`) and built by `build_llm`. Powers
 chat, tagging, and the `llm` reranker.
 
-- Code: `LLMBackend` ABC + `build_llm` in `src/rag/llm.py`.
-- `_Avoid_:` model, client, provider (say "backend"; "provider" is the config *string*).
+- Code: `LLMBackend` ABC + `build_llm` in `src/rag/llm.py`; the `LLMSpec` variants in
+  `src/rag/config.py`.
+- `_Avoid_:` model, client, provider (say "backend"; the config *string* that selects it
+  is `type`, not `provider` — that key was renamed).
 
 ### ✅ The gate
 
@@ -182,7 +185,7 @@ The four commands that define "done", identical locally and in CI:
 
 `config.yaml` is the single source of truth. Its directory is the **project root**, and
 every relative path in it is anchored there, so commands work from any working directory.
-Located by: explicit `--config` → `PAPERLENS_CONFIG` env → upward search from the CWD.
+Located by: explicit `--config_path` → `PAPERLENS_CONFIG` env → upward search from the CWD.
 
 - Code: `load_config` in `src/rag/config.py`.
 - `_Avoid_:` settings, config dir, working dir (the root is the config file's directory,

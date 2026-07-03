@@ -23,6 +23,8 @@ dependencies = [
     "httpx>=0.27",          # PDF downloads
     "pyyaml>=6.0",          # config.yaml
     "python-dotenv>=1.0",   # load .env (API keys)
+    "draccus>=0.11,<0.12",  # dataclass config + CLI (parse/decode/ChoiceRegistry); pinned: parse_config subclasses ArgumentParser._postprocessing
+    "omegaconf>=2.3",       # ${...} interpolation in config.yaml
 ]
 
 [project.optional-dependencies]

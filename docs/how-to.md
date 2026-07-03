@@ -67,20 +67,20 @@ uv sync --extra anthropic   # installs the anthropic client (lazy extra)
 ```yaml
 llm:
   chat:
-    provider: anthropic
+    type: anthropic
     model: claude-opus-4-8
     api_key_env: ANTHROPIC_API_KEY
 ```
 
 Put the key in `.env`: `ANTHROPIC_API_KEY=sk-...`. Use `uv sync --extra gemini` and
-`provider: gemini` (key `GEMINI_API_KEY`) for Google.
+`type: gemini` (key `GEMINI_API_KEY`) for Google.
 
 🏠 **Any OpenAI-compatible server** (LM Studio, Ollama `/v1`, vLLM, SGLang, llama.cpp):
 
 ```yaml
 llm:
   chat:
-    provider: openai        # or vllm / sglang — all speak the OpenAI wire format
+    type: openai            # or vllm / sglang — all speak the OpenAI wire format
     model: <model-the-endpoint-serves>
     api_base: http://127.0.0.1:1234/v1
     api_key_env: LOCAL_LLM_KEY   # local servers ignore the key
@@ -137,49 +137,69 @@ erroring.
 
 ## Add a new LLM backend
 
-Backends are discovered through a **registry** 🗂️ — one decorated class, no other wiring.
+Backends are selected through a `draccus.ChoiceRegistry` 🗂️ — one config variant + one
+concrete backend + one `match` arm.
 
-1. In `src/rag/llm.py`, subclass `LLMBackend` and decorate it:
+1. In `src/rag/config.py`, register an `LLMSpec` variant carrying that provider's fields:
 
    ```python
-   @register_llm("myprovider")
+   @LLMSpec.register_subclass("myprovider")
+   @dataclass
+   class MySpec(LLMSpec):
+       api_base: str = ""          # only the keys this provider needs
+   ```
+
+2. In `src/rag/llm.py`, subclass `LLMBackend` and add a `build_llm` arm:
+
+   ```python
    class MyBackend(LLMBackend):
        def __init__(self, spec: LLMSpec): ...
        def complete(self, system: str, user: str, *, max_tokens: int) -> str: ...
        def run_tools(self, *, system, messages, tools, execute, on_text, on_reasoning): ...
+
+   # in build_llm(spec):
+   #     case MySpec(): return MyBackend(spec)
    ```
 
    Match the method signatures of the existing backends (`AnthropicBackend`,
    `OpenAICompatBackend`). If the provider speaks the OpenAI wire format, subclass
-   `OpenAICompatBackend` instead (see `VLLMBackend` / `SGLangBackend`).
+   `OpenAISpec` / `OpenAICompatBackend` instead (see `VLLMSpec` / `VLLMBackend`).
 
-2. Set `provider: myprovider` in a config LLM spec. `build_llm` dispatches on it.
+3. Set `type: myprovider` in a config LLM spec. `build_llm` dispatches on the variant.
 
-3. ✅ Verify: add a unit test alongside `tests/unit/test_llm.py` (use the `fake_llm` pattern
+4. ✅ Verify: add a unit test alongside `tests/unit/test_llm.py` (use the `fake_llm` pattern
    where possible). Run the [gate](../CONTRIBUTING.md).
 
 ---
 
 ## Add a new embedder backend
 
-Same registry pattern, in `src/rag/embedders.py`:
+Same ChoiceRegistry pattern across `config.py` + `embedders.py`:
 
-1. Subclass `Embedder`, decorate it, and implement `build` (constructs from the shared
-   config fields), `name` (namespaces the Chroma collection), and `__call__`:
+1. In `src/rag/config.py`, register an `EmbeddingCfg` variant with the fields it needs:
 
    ```python
-   @register_embedder("myembedder")
+   @EmbeddingCfg.register_subclass("myembedder")
+   @dataclass
+   class MyEmbeddingCfg(EmbeddingCfg):
+       api_base: str = ""
+   ```
+
+2. In `src/rag/embedders.py`, subclass `Embedder` and add a `build_embedder` arm:
+
+   ```python
    class MyEmbedder(Embedder):
-       @classmethod
-       def build(cls, model, *, batch_size, api_base, api_key_env, max_seq_length): ...
-       def name(self) -> str: ...
+       def name(self) -> str: ...                       # namespaces the Chroma collection
        def __call__(self, input: list[str]) -> list[list[float]]: ...
+
+   # in build_embedder(cfg):
+   #     case MyEmbeddingCfg(): return MyEmbedder(cfg.model, batch_size=cfg.batch_size)
    ```
 
    Implement `embed_query` too if queries embed differently from documents (see the Gemini
    embedder).
 
-2. Set `embedding.type: myembedder`. `build_embedder` dispatches on it.
+3. Set `embedding.type: myembedder`. `build_embedder` dispatches on the variant.
 
-3. ✅ Verify: add a test near `tests/unit/test_embedders.py`; run the gate. Remember a new
+4. ✅ Verify: add a test near `tests/unit/test_embedders.py`; run the gate. Remember a new
    embedder means a fresh index (see the note above).

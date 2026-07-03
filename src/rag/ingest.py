@@ -1,18 +1,19 @@
 """Headless ingestion CLI: run every pending paper through the pipeline.
 
-    python -m rag.ingest              # ingest papers in config.yaml not yet in the DB
-    python -m rag.ingest --config other.yaml
-    python -m rag.ingest --retag      # regenerate tags for already-ingested papers
+    python -m rag.ingest                          # ingest papers not yet in the DB
+    python -m rag.ingest --config_path other.yaml
+    python -m rag.ingest --retag                  # regenerate tags for ingested papers
 
-Same code path the app's background worker uses.
+Accepts draccus per-field overrides too (e.g. ``--llm.tagging.model=...``). Same
+code path the app's background worker uses.
 """
 
 from __future__ import annotations
 
-import argparse
+import sys
 from pathlib import Path
 
-from .config import load_config
+from .config import parse_config
 from .index import open_collection
 from .manifest import Manifest
 from .pipeline import build_embedder_from_config, ingest_paper, pending_papers
@@ -36,19 +37,14 @@ def retag(cfg, manifest: Manifest) -> None:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--config", default=None)
-    p.add_argument(
-        "--retag",
-        action="store_true",
-        help="regenerate tags for already-ingested papers, then exit",
-    )
-    args = p.parse_args()
+    # --retag is a CLI action, not a config field; pull it out before draccus parses.
+    argv = [a for a in sys.argv[1:] if a != "--retag"]
+    do_retag = "--retag" in sys.argv[1:]
 
-    cfg = load_config(args.config)
+    cfg = parse_config(argv)
     manifest = Manifest(cfg.paths.rag_db)
 
-    if args.retag:
+    if do_retag:
         print("== Regenerating tags ==")
         retag(cfg, manifest)
         return

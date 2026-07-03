@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import textwrap
 
-from rag.config import CONFIG_ENV_VAR, load_config
+import pytest
+
+from rag.config import CONFIG_ENV_VAR, load_config, parse_config
 
 _YAML = textwrap.dedent(
     """
@@ -55,3 +57,46 @@ def test_env_var_override(tmp_path, monkeypatch):
     monkeypatch.setenv(CONFIG_ENV_VAR, str(cfg_path))
     cfg = load_config()  # no explicit path -> reads the env var
     assert cfg.collection == "my_papers"
+
+
+def test_choice_registry_selects_variant(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "embedding:\n  type: openai\n  api_base: http://x/v1\n"
+        "llm:\n  chat:\n    type: openai\n    api_base: http://x/v1\n"
+    )
+    cfg = load_config(str(p))
+    assert type(cfg.embedding).__name__ == "OpenAIEmbeddingCfg"
+    assert type(cfg.llm.chat).__name__ == "OpenAISpec"
+    assert cfg.llm.chat.api_base == "http://x/v1"
+
+
+def test_interpolation_resolves_from_file(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text("collection: papers_${server.port}\nserver:\n  port: 9000\n")
+    assert load_config(str(p)).collection == "papers_9000"
+
+
+def test_cli_override_feeds_interpolation(tmp_path):
+    # Regression guard for the parse_config _postprocessing seam: a CLI override
+    # must flow into a ${...} that references it. Pinned to draccus internals.
+    p = tmp_path / "config.yaml"
+    p.write_text("collection: papers_${server.port}\nserver:\n  port: 9000\n")
+    cfg = parse_config(["--config_path", str(p), "--server.port=1234"])
+    assert cfg.server.port == 1234
+    assert cfg.collection == "papers_1234"
+
+
+def test_unknown_key_rejected(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text("collectionn: typo\n")  # misspelled key -> loud failure
+    with pytest.raises(Exception, match="not valid"):
+        load_config(str(p))
+
+
+def test_legacy_provider_key_rejected(tmp_path):
+    # `provider` was renamed to `type`; the old key must fail loudly, not default.
+    p = tmp_path / "config.yaml"
+    p.write_text("llm:\n  chat:\n    provider: openai\n")
+    with pytest.raises(Exception, match="not valid"):
+        load_config(str(p))

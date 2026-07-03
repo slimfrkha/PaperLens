@@ -3,10 +3,10 @@
 One neutral tool schema (`{name, description, input_schema}`) drives every backend.
 There are only two real wire formats among the supported providers:
 
-* Anthropic Messages API              -> AnthropicBackend        (provider: anthropic)
-* OpenAI Chat Completions API         -> OpenAICompatBackend     (provider: openai)
+* Anthropic Messages API              -> AnthropicBackend        (type: anthropic)
+* OpenAI Chat Completions API         -> OpenAICompatBackend     (type: openai)
     ...which vLLM and SGLang also speak, so they are thin subclasses:
-      VLLMBackend  (provider: vllm)   /  SGLangBackend (provider: sglang)
+      VLLMBackend  (type: vllm)   /  SGLangBackend (type: sglang)
     The same class also covers LM Studio, Ollama's /v1, llama.cpp, Azure, etc.
 
 Use `build_llm(spec)` to get the right backend for a config `LLMSpec`.
@@ -20,15 +20,12 @@ import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 
-from .config import LLMSpec
+from .config import AnthropicSpec, GeminiSpec, LLMSpec, OpenAISpec, SGLangSpec, VLLMSpec
 
 # A tool the model may call. `input_schema` is a JSON Schema object.
 Tool = dict  # {"name": str, "description": str, "input_schema": dict}
 ToolExecutor = Callable[[str, dict], str]  # (name, args) -> result text
 OnText = Callable[[str], None]  # streamed text / reasoning deltas
-
-# Providers that speak the OpenAI Chat Completions wire format.
-OPENAI_COMPATIBLE = {"openai", "vllm", "sglang"}
 
 
 def _api_key(spec: LLMSpec) -> str:
@@ -36,10 +33,11 @@ def _api_key(spec: LLMSpec) -> str:
     if key:
         return key
     # Local OpenAI-compatible servers (vLLM, SGLang, LM Studio, Ollama) ignore it.
-    if spec.provider in OPENAI_COMPATIBLE and spec.api_base:
+    if isinstance(spec, OpenAISpec) and spec.api_base:
         return "local-no-key"
     raise RuntimeError(
-        f"No API key in ${spec.api_key_env} for provider {spec.provider!r}. "
+        f"No API key in ${spec.api_key_env} for provider "
+        f"{LLMSpec.get_choice_name(type(spec))!r}. "
         f"Export it (or add it to .env), or point config.llm at a local server."
     )
 
@@ -66,20 +64,6 @@ class LLMBackend(ABC):
     ) -> str: ...
 
 
-_BACKENDS: dict[str, type[LLMBackend]] = {}
-
-
-def register_llm(provider: str):
-    """Register an :class:`LLMBackend` subclass under a config ``provider`` string."""
-
-    def deco(cls: type[LLMBackend]) -> type[LLMBackend]:
-        _BACKENDS[provider] = cls
-        return cls
-
-    return deco
-
-
-@register_llm("anthropic")
 class AnthropicBackend(LLMBackend):
     """Anthropic Messages API (tool_use / tool_result blocks, streaming)."""
 
@@ -145,7 +129,6 @@ class AnthropicBackend(LLMBackend):
         return final_text
 
 
-@register_llm("openai")
 class OpenAICompatBackend(LLMBackend):
     """OpenAI Chat Completions wire format.
 
@@ -154,10 +137,12 @@ class OpenAICompatBackend(LLMBackend):
     at the server; local servers need no real key.
     """
 
+    spec: OpenAISpec  # always built from an OpenAISpec variant (api_base, ...)
+
     def _client(self):
         from openai import OpenAI
 
-        return OpenAI(api_key=_api_key(self.spec), base_url=self.spec.api_base)
+        return OpenAI(api_key=_api_key(self.spec), base_url=self.spec.api_base or None)
 
     def complete(self, system, user, max_tokens=None):
         resp = self._client().chat.completions.create(
@@ -257,12 +242,10 @@ class OpenAICompatBackend(LLMBackend):
         return final_text
 
 
-@register_llm("vllm")
 class VLLMBackend(OpenAICompatBackend):
     """vLLM's OpenAI-compatible server — same wire format as OpenAI."""
 
 
-@register_llm("sglang")
 class SGLangBackend(OpenAICompatBackend):
     """SGLang's OpenAI-compatible server — same wire format as OpenAI."""
 
@@ -315,7 +298,6 @@ def _gemini_fn(tool: Tool):
     )
 
 
-@register_llm("gemini")
 class GeminiBackend(LLMBackend):
     """Google Gemini via the google-genai SDK.
 
@@ -403,13 +385,20 @@ class GeminiBackend(LLMBackend):
 
 
 def build_llm(spec: LLMSpec) -> LLMBackend:
-    """Instantiate the backend for a config LLMSpec."""
-    try:
-        return _BACKENDS[spec.provider](spec)
-    except KeyError as err:
-        raise ValueError(
-            f"Unknown LLM provider {spec.provider!r}; expected one of {sorted(_BACKENDS)}"
-        ) from err
+    """Instantiate the backend for a config LLMSpec variant."""
+    match spec:
+        case AnthropicSpec():
+            return AnthropicBackend(spec)
+        case VLLMSpec():  # before OpenAISpec: vllm/sglang subclass it
+            return VLLMBackend(spec)
+        case SGLangSpec():
+            return SGLangBackend(spec)
+        case OpenAISpec():
+            return OpenAICompatBackend(spec)
+        case GeminiSpec():
+            return GeminiBackend(spec)
+        case _:
+            raise ValueError(f"Unknown LLM spec: {type(spec).__name__}")
 
 
 def _selftest() -> None:
@@ -417,7 +406,8 @@ def _selftest() -> None:
     from .config import load_config
 
     spec = load_config().llm.chat
-    print(f"provider={spec.provider} model={spec.model} api_base={spec.api_base}")
+    provider = LLMSpec.get_choice_name(type(spec))
+    print(f"provider={provider} model={spec.model} api_base={getattr(spec, 'api_base', None)}")
     llm = build_llm(spec)
     tools = [
         {

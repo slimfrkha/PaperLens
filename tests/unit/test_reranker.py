@@ -4,34 +4,30 @@ from __future__ import annotations
 
 import pytest
 
-from rag.config import RerankerCfg
+from rag.config import HFRerankerCfg, LLMRerankerCfg, RerankerCfg
 from rag.reranker import (
-    _RERANKERS,
     CrossEncoderReranker,
     LLMReranker,
     build_reranker,
 )
 
 
-def test_registry_has_builtin_rerankers():
-    assert {"hf", "llm"} <= set(_RERANKERS)
-
-
-def test_build_reranker_unknown_type_raises():
-    with pytest.raises(ValueError, match="Unknown reranker type"):
-        build_reranker(RerankerCfg(type="nope"))
+def test_build_reranker_unknown_variant_raises():
+    # The base RerankerCfg is not a registered variant.
+    with pytest.raises(ValueError, match="Unknown reranker config"):
+        build_reranker(RerankerCfg())
 
 
 def test_build_reranker_hf_is_lazy(make_config):
-    r = build_reranker(RerankerCfg())  # type defaults to "hf"
+    r = build_reranker(HFRerankerCfg())
     assert isinstance(r, CrossEncoderReranker)
     assert r._model is None  # model not loaded until first score()
 
 
 def test_build_reranker_llm_requires_llm(fake_llm):
     with pytest.raises(ValueError, match="needs an LLM"):
-        build_reranker(RerankerCfg(type="llm"))  # no llm passed
-    r = build_reranker(RerankerCfg(type="llm"), llm=fake_llm())
+        build_reranker(LLMRerankerCfg())  # no llm passed
+    r = build_reranker(LLMRerankerCfg(), llm=fake_llm())
     assert isinstance(r, LLMReranker)
 
 

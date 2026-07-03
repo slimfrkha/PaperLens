@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from rag.config import LLMSpec
+from rag.config import AnthropicSpec, GeminiSpec, LLMSpec, OpenAISpec, SGLangSpec, VLLMSpec
 from rag.llm import (
     AnthropicBackend,
     GeminiBackend,
@@ -19,42 +19,41 @@ from rag.llm import (
 
 
 @pytest.mark.parametrize(
-    "provider,cls",
+    "spec,cls",
     [
-        ("openai", OpenAICompatBackend),
-        ("vllm", VLLMBackend),
-        ("sglang", SGLangBackend),
-        ("anthropic", AnthropicBackend),
-        ("gemini", GeminiBackend),
+        (OpenAISpec(api_base="http://x"), OpenAICompatBackend),
+        (VLLMSpec(api_base="http://x"), VLLMBackend),
+        (SGLangSpec(api_base="http://x"), SGLangBackend),
+        (AnthropicSpec(), AnthropicBackend),
+        (GeminiSpec(), GeminiBackend),
     ],
 )
-def test_build_llm_dispatch(provider, cls):
-    assert isinstance(build_llm(LLMSpec(provider=provider)), cls)
+def test_build_llm_dispatch(spec, cls):
+    assert isinstance(build_llm(spec), cls)
 
 
-def test_build_llm_unknown_provider_raises():
-    with pytest.raises(ValueError, match="Unknown LLM provider"):
-        build_llm(LLMSpec(provider="nope"))
+def test_build_llm_unknown_spec_raises():
+    # The base LLMSpec is not a registered provider variant.
+    with pytest.raises(ValueError, match="Unknown LLM spec"):
+        build_llm(LLMSpec())
 
 
 def test_api_key_local_openai_needs_no_key(monkeypatch):
     monkeypatch.delenv("LOCAL_LLM_KEY", raising=False)
-    spec = LLMSpec(
-        provider="openai", api_base="http://localhost:1234/v1", api_key_env="LOCAL_LLM_KEY"
-    )
+    spec = OpenAISpec(api_base="http://localhost:1234/v1", api_key_env="LOCAL_LLM_KEY")
     assert _api_key(spec) == "local-no-key"
 
 
 def test_api_key_missing_key_raises_for_cloud(monkeypatch):
     monkeypatch.delenv("SOME_KEY", raising=False)
-    spec = LLMSpec(provider="anthropic", api_key_env="SOME_KEY")
+    spec = AnthropicSpec(api_key_env="SOME_KEY")
     with pytest.raises(RuntimeError, match="No API key"):
         _api_key(spec)
 
 
 def test_api_key_reads_env(monkeypatch):
     monkeypatch.setenv("MY_KEY", "secret")
-    assert _api_key(LLMSpec(api_key_env="MY_KEY")) == "secret"
+    assert _api_key(AnthropicSpec(api_key_env="MY_KEY")) == "secret"
 
 
 # ---- OpenAI tool-use loop against a fake streaming client -------------------
@@ -91,7 +90,7 @@ class _FakeClient:
 
 
 def test_openai_run_tools_executes_then_answers(monkeypatch):
-    backend = OpenAICompatBackend(LLMSpec(provider="openai", api_base="http://x"))
+    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
     monkeypatch.setattr(backend, "_client", lambda: _FakeClient())
 
     executed = []
@@ -118,7 +117,7 @@ def test_anthropic_client_built_lazily(monkeypatch):
     # Only runs when the optional `anthropic` extra is installed.
     pytest.importorskip("anthropic")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-    client = AnthropicBackend(LLMSpec(provider="anthropic"))._client()
+    client = AnthropicBackend(AnthropicSpec())._client()
     assert client is not None
 
 
@@ -126,5 +125,5 @@ def test_gemini_client_built_lazily(monkeypatch):
     # Only runs when the optional `gemini` extra is installed.
     pytest.importorskip("google.genai")
     monkeypatch.setenv("GEMINI_API_KEY", "k")
-    client = GeminiBackend(LLMSpec(provider="gemini", api_key_env="GEMINI_API_KEY"))._client()
+    client = GeminiBackend(GeminiSpec())._client()
     assert client is not None
