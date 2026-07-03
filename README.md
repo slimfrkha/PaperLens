@@ -10,7 +10,7 @@ by a single `config.yaml`. ⚙️
 ## 🛠️ How it works
 
 ```text
-config.yaml ─┬─> ingestion worker: download → markdown (Docling) → index (Chroma) → LLM tags
+config.yaml ─┬─> ingestion worker: download → markdown (Docling) → index (Chroma) ‖ LLM tags
              └─> FastAPI backend ── agentic RAG ──> LLM (Claude | any OpenAI-compatible server)
                        │  tool: search_papers → Searcher (bge-m3 + bge-reranker-v2-m3)
                        └─> React + Vite + Mantine UI: Chat · Papers · Admin

@@ -1,7 +1,9 @@
-"""End-to-end ingestion pipeline: download -> markdown -> index -> tag -> manifest.
+"""End-to-end ingestion pipeline: download -> markdown -> (index || tag) -> manifest.
 
-Idempotent per stage (existing PDF/markdown are reused). Shared by the headless
-CLI (`rag.ingest`) and the in-process worker (`server.worker`).
+Indexing and tagging are independent given the markdown (tags live in the
+manifest, not in chunk metadata), so they run concurrently and meet at the
+manifest write. Idempotent per stage (existing PDF/markdown are reused). Shared
+by the headless CLI (`rag.ingest`) and the in-process worker (`server.worker`).
 """
 
 from __future__ import annotations
@@ -10,6 +12,7 @@ import os
 import re
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
@@ -87,17 +90,27 @@ def ingest_paper(
         Path(md_path).parent.mkdir(parents=True, exist_ok=True)
         Path(md_path).write_text(md)
 
-    stage("index", 0.5)
-    n_chunks = index_markdown(
-        collection, embedder, md_path, paper.name, batch_size=cfg.embedding.batch_size
-    )
+    # Index (embedder, compute-bound) and tag (LLM, I/O-bound) are independent
+    # given the markdown, so overlap them. The executor context joins the tag
+    # thread even if indexing raises, so a failed index still propagates and
+    # leaves the paper pending (no manifest write); a failed tag degrades to [].
+    def _tags() -> list[str]:
+        try:
+            return generate_tags(
+                md, cfg.tagging, existing_tags=[t["tag"] for t in manifest.all_tags()]
+            )
+        except Exception as e:  # tagging needs an API key; degrade gracefully
+            print(f"  [warn] tag generation failed for {paper.name}: {e}")
+            return []
 
+    stage("index", 0.5)
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        tags_future = ex.submit(_tags)
+        n_chunks = index_markdown(
+            collection, embedder, md_path, paper.name, batch_size=cfg.embedding.batch_size
+        )
+        tags = tags_future.result()
     stage("tag", 0.85)
-    try:
-        tags = generate_tags(md, cfg.tagging, existing_tags=[t["tag"] for t in manifest.all_tags()])
-    except Exception as e:  # tagging needs an API key; degrade gracefully
-        print(f"  [warn] tag generation failed for {paper.name}: {e}")
-        tags = []
 
     record = {
         "paper_id": paper.name,

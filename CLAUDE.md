@@ -96,9 +96,12 @@ field). Don't widen `IngestConfig` or add a `ServeConfig` for symmetry.
   Metal's `2**32`-byte per-tensor limit on Apple Silicon at a normal batch size.
   `embedding.max_seq_length` (default 1024, `hf` only) caps it; chunks stay well under.
   Don't raise it blindly on Apple Silicon.
-- **Lazy heavy models.** The cross-encoder and embedder load on first use; the `ChatAgent`
-  is built lazily on the first `/api/chat`. Cloud clients are optional extras imported
-  lazily — an OpenAI-compatible or cloud setup never pays for local model downloads.
+- **Lazy heavy models, warmed at startup.** The cross-encoder and embedder load on first
+  use and the `ChatAgent` is built once (lazily, under a lock), but the server warms them in
+  a background thread at startup (`warm_models` in `main.py`, a tiny dummy search) so the
+  first `/api/chat` skips the 20-30s load while startup stays instant. Cloud clients are
+  optional extras imported lazily — an OpenAI-compatible or cloud setup never pays for local
+  model downloads.
 - **Config anchoring.** Every relative path in `config.yaml` resolves against the config
   file's directory (the **project root**), so every entry point is CWD-independent.
   Located by `--config_path` → `PAPERLENS_CONFIG` → upward search from CWD. Config is

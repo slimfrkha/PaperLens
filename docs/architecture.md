@@ -14,15 +14,27 @@ flowchart LR
   cfg[config.yaml] --> ing
   cfg --> srv
   subgraph ing[Ingestion — write path]
-    dl[download] --> ex[extract: Docling] --> ck[chunk] --> ix[(index: Chroma)] --> tg[tag: LLM] --> mf[(manifest)]
+    dl[download] --> ex[extract: Docling]
+    ex --> ck[chunk] --> ix[(index: Chroma)] --> mf[(manifest)]
+    ex --> tg[tag: LLM] --> mf
   end
   subgraph srv[Retrieval — read path]
-    agent[ChatAgent] -->|search_papers| searcher[Searcher]
-    searcher --> ix
-    searcher --> rr[Reranker]
-    agent --> llm[LLM backend]
+    q([user question]) -->|1 · ask| agent
+    agent[ChatAgent · ReAct loop] <-->|2 · reason · decide| llm[LLM backend]
+    agent -->|3 · search_papers| searcher[Searcher]
+    searcher -->|4 · dense recall → candidates| ix
+    searcher -->|5 · rerank → top-k| rr[Reranker]
+    searcher -.->|6 · passages| agent
+    agent -.->|7 · answer + citations · SSE| ui([web UI])
   end
 ```
+
+Reading the read path: a **question** enters the **ChatAgent**, which loops with the **LLM
+backend** (each turn a **Thought**) and, when it needs evidence, calls its one tool
+`search_papers` (an **Action**). The **Searcher** runs two stages — dense **recall** of
+`candidates` from the index, then **rerank** to the top `k` — and returns the **passages**
+(the **Observation**). The agent threads them into a streamed answer with `[rN]`
+**citations** over SSE. Solid arrows are calls; dotted arrows are what comes back.
 
 **Ingestion** fills the index; **retrieval** reads it. They share only the on-disk index
 and manifest, so you can re-ingest without touching the server and vice versa.
@@ -38,6 +50,11 @@ One function, `ingest_paper` (`src/rag/pipeline.py`), runs each paper through na
 4. **Index**: embed each chunk and upsert into the Chroma **collection**.
 5. **Tag**: an LLM generates topic tags (degrades gracefully to no tags if it fails).
 6. **Manifest**: write the paper record to `papers.json`.
+
+Steps 4 (index) and 5 (tag) run **concurrently** — tags live in the manifest, not in
+chunk metadata, so neither needs the other's output; they meet at the manifest write. The
+compute-bound embedder and the I/O-bound LLM call overlap for free. (This is also why
+`--retag` can regenerate tags without re-indexing.)
 
 ### ✂️ Section-aware chunking
 
@@ -151,9 +168,11 @@ is documented in `src/rag/__init__.py`. Keeping it acyclic is a maintained invar
 - **MPS tensor cap.** `bge-m3` defaults to an 8192-token sequence length, which overflows
   Metal's `2**32`-byte per-tensor limit on Apple Silicon at a normal batch size.
   `embedding.max_seq_length` (default 1024) caps it; chunks stay well under that.
-- **Lazy heavy models.** The cross-encoder and embedder load on first use, and cloud
-  clients are optional extras imported lazily — so an OpenAI-compatible or cloud setup
-  never pays for local model downloads it won't use.
+- **Lazy heavy models, warmed at startup.** The cross-encoder and embedder are built once
+  on first use, but the server also warms them in a background thread at startup (a tiny
+  dummy search) so the first `/api/chat` doesn't pay the 20-30s load; startup itself stays
+  instant. Cloud clients are optional extras imported lazily — so an OpenAI-compatible or
+  cloud setup never pays for local model downloads it won't use.
 - **Config anchoring.** All relative paths resolve against the `config.yaml` directory, so
   every entry point is CWD-independent.
 - **SSE streaming.** `/api/chat` streams tokens and trace steps over Server-Sent Events, so

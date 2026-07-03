@@ -80,3 +80,28 @@ def test_ingest_survives_tagging_failure(make_config, fake_embedder, monkeypatch
     # Tagging degrades to empty tags; the rest of the record still lands.
     assert record["tags"] == []
     assert record["n_chunks"] > 0
+
+
+def test_ingest_propagates_index_failure(make_config, fake_embedder, monkeypatch):
+    """An indexing failure must surface (not be swallowed by the tag thread) and
+    leave the paper pending — no manifest write."""
+    import pytest
+
+    cfg = make_config()
+    manifest = Manifest(cfg.paths.rag_db)
+    collection = open_collection(cfg.paths.rag_db, cfg.collection)
+
+    monkeypatch.setattr(pipeline, "_download", _fake_download)
+    monkeypatch.setattr(pipeline, "pdf_to_markdown", lambda path: _MARKDOWN)
+    monkeypatch.setattr(pipeline, "generate_tags", lambda md, spec, existing_tags: ["moe"])
+
+    def _boom(*a, **k):
+        raise RuntimeError("index blew up")
+
+    monkeypatch.setattr(pipeline, "index_markdown", _boom)
+
+    with pytest.raises(RuntimeError, match="index blew up"):
+        pipeline.ingest_paper(
+            Paper(name="p", arxiv_id="1"), cfg.for_ingest(), fake_embedder, collection, manifest
+        )
+    assert not manifest.is_ingested("p")

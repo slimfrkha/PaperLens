@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -36,24 +37,42 @@ def create_app(cfg: Config) -> FastAPI:
     # DB is still empty (ingestion creates it too, but chat may be hit first).
     open_collection(cfg.paths.rag_db, cfg.collection)
 
-    # Chat models (embedder + reranker + LLM) are heavy — build lazily on first use.
+    # Chat models (embedder + reranker + LLM) are heavy — build once on first use.
+    # The lock keeps the build single-shot when the startup warmer (below) and an
+    # early /api/chat race for it.
     lazy: dict = {"agent": None}
+    lazy_lock = threading.Lock()
 
     def get_agent() -> ChatAgent:
         if lazy["agent"] is None:
-            searcher = Searcher(
-                db_dir=cfg.paths.rag_db,
-                collection=cfg.collection,
-                embedder_model=cfg.embedding.model,
-                reranker=build_reranker(cfg.reranker, llm=build_llm(cfg.llm.chat)),
-            )
-            lazy["agent"] = ChatAgent(cfg, searcher, manifest)
+            with lazy_lock:
+                if lazy["agent"] is None:
+                    searcher = Searcher(
+                        db_dir=cfg.paths.rag_db,
+                        collection=cfg.collection,
+                        embedder_model=cfg.embedding.model,
+                        reranker=build_reranker(cfg.reranker, llm=build_llm(cfg.llm.chat)),
+                    )
+                    lazy["agent"] = ChatAgent(cfg, searcher, manifest)
         return lazy["agent"]
+
+    def warm_models() -> None:
+        """Preload the chat models so the first /api/chat isn't a 20-30s wait.
+        Building the Searcher loads the embedder eagerly; a tiny dummy search also
+        exercises the rerank path to load the cross-encoder. Failures are non-fatal
+        — the next /api/chat rebuilds and surfaces any real error."""
+        try:
+            get_agent().searcher.search("warm up", k=1, candidates=1)
+        except Exception as e:
+            print(f"[warn] model warmup skipped: {e}")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if cfg.ingestion.auto_start:
             worker.trigger()
+        # Warm the chat models in the background: startup stays instant (the SPA,
+        # papers, and admin are served immediately) while the models load.
+        threading.Thread(target=warm_models, name="warm-models", daemon=True).start()
         yield
 
     app = FastAPI(title="PaperLens", lifespan=lifespan)
