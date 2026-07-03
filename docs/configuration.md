@@ -1,13 +1,13 @@
-# Configuration & commands reference
+# ⚙️ Configuration & commands reference
 
-**For:** anyone who needs to look up a `config.yaml` key, a command, an environment
-variable, or an API route. Neutral lookup — for step-by-step tasks see
-[How-to guides](how-to.md).
+> 👤 **For:** anyone who needs to look up a `config.yaml` key, a command, an environment
+> variable, or an API route. Neutral lookup — for step-by-step tasks see
+> [How-to guides](how-to.md).
 
-Every default below is the value in the code (`src/rag/config.py`), which the shipped
+📌 Every default below is the value in the code (`src/rag/config.py`), which the shipped
 `config.yaml` may override.
 
-## How the config is found
+## 🔍 How the config is found
 
 `config.yaml` is the single source of truth. It is located in this order:
 
@@ -19,9 +19,9 @@ The directory containing the resolved `config.yaml` is the **project root**. Eve
 path in the file is anchored to it, so commands work from any working directory. Absolute
 paths are used as-is.
 
-## `config.yaml` reference
+## 📝 `config.yaml` reference
 
-### `paths`
+### 📁 `paths`
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -31,7 +31,7 @@ paths are used as-is.
 | `chat_history` | path | `data/chat_history` | Per-session chat JSON files. |
 | `web_dist` | path | `web/dist` | Built frontend SPA served by the backend. |
 
-### top level
+### 🔝 top level
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -45,7 +45,7 @@ paths are used as-is.
 | `name` | string | Human name **and** the `paper_id` (filename stem, manifest key, search filter). |
 | `arxiv_id` | string | arXiv id used to download the PDF. Quote it (e.g. `"2412.19437"`). |
 
-### `embedding`
+### 🧬 `embedding`
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -56,7 +56,7 @@ paths are used as-is.
 | `api_base` | string \| null | `null` | Base URL for `openai`/`ollama` types. |
 | `api_key_env` | string | `OPENAI_API_KEY` | Env var holding the key (`gemini` → `GEMINI_API_KEY`). |
 
-### `reranker`
+### 🎯 `reranker`
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -64,7 +64,7 @@ paths are used as-is.
 | `model` | string | `BAAI/bge-reranker-v2-m3` | Cross-encoder model id (`hf` type). |
 | `enabled` | bool | `true` | Turn the whole rerank stage on/off. |
 
-### `llm`
+### 🤖 `llm`
 
 Two LLM specs share one schema. `llm.tagging` labels papers at ingestion (cheap/fast is
 fine); `llm.chat` powers the agent and **must support tool/function calling**.
@@ -84,21 +84,21 @@ Defaults differ by spec: `llm.tagging` defaults to model `claude-haiku-4-5-20251
 `llm.chat` defaults to `claude-opus-4-8`. The **shipped `config.yaml`** overrides both to a
 local OpenAI-compatible server.
 
-### `ingestion`
+### 📥 `ingestion`
 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `auto_start` | bool | `true` | Start the ingestion worker when the app launches. |
 | `concurrency` | int | `1` | Papers ingested in parallel. |
 
-### `server`
+### 🌐 `server`
 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `host` | string | `127.0.0.1` | Bind host. |
 | `port` | int | `8000` | Bind port. |
 
-## Environment variables
+## 🔑 Environment variables
 
 Loaded from a local `.env` (via `python-dotenv`) or the shell.
 
@@ -110,7 +110,7 @@ Loaded from a local `.env` (via `python-dotenv`) or the shell.
 | `OPENAI_API_KEY` | Default key env for the `openai` embedder. |
 | *(custom)* | Whatever you set a spec's `api_key_env` to (e.g. `LOCAL_LLM_KEY`). |
 
-## Commands
+## 💻 Commands
 
 Console scripts (from `pyproject.toml`); each also runs as `python -m <module>`.
 
@@ -121,7 +121,7 @@ Console scripts (from `pyproject.toml`); each also runs as `python -m <module>`.
 | `uv run paperlens-ingest --retag` | — | Regenerate tags for already-ingested papers (no re-index). |
 | `uv run paperlens-ingest --config <path>` | — | Use a specific `config.yaml`. |
 
-### Make targets
+### 🎁 Make targets
 
 | Target | Runs |
 |---|---|
@@ -131,14 +131,14 @@ Console scripts (from `pyproject.toml`); each also runs as `python -m <module>`.
 | `make ingest` | `uv run paperlens-ingest`. |
 | `make build` | Production frontend build → `web/dist`. |
 
-### Frontend
+### 🖼️ Frontend
 
 | Command | What it does |
 |---|---|
 | `npm --prefix web run dev` | Dev server on `:5173`, proxies `/api` → backend. |
 | `npm --prefix web run build` | Type-check + build to `web/dist` (served by the backend). |
 
-## HTTP API
+## 🔌 HTTP API
 
 Served under `/api`; any other path falls through to the SPA.
 

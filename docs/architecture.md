@@ -1,10 +1,10 @@
-# Architecture
+# 🏛️ Architecture
 
-**For:** anyone who wants to understand *why* PaperLens is built the way it is — the RAG
-design, not the API surface. For keys and commands see [Configuration](configuration.md);
-for the vocabulary see [CONTEXT](../CONTEXT.md).
+> 👤 **For:** anyone who wants to understand *why* PaperLens is built the way it is — the RAG
+> design, not the API surface. For keys and commands see [Configuration](configuration.md);
+> for the vocabulary see [CONTEXT](../CONTEXT.md).
 
-## Two flows, one index
+## 🔀 Two flows, one index
 
 Everything hangs off `config.yaml` and splits into two flows that meet at the vector index
 (Chroma):
@@ -27,7 +27,7 @@ flowchart LR
 **Ingestion** fills the index; **retrieval** reads it. They share only the on-disk index
 and manifest, so you can re-ingest without touching the server and vice versa.
 
-## Ingestion: from arXiv to searchable chunks
+## 📥 Ingestion: from arXiv to searchable chunks
 
 One function, `ingest_paper` (`src/rag/pipeline.py`), runs each paper through named
 **stages**; both the headless CLI and the background **worker** call it.
@@ -39,7 +39,7 @@ One function, `ingest_paper` (`src/rag/pipeline.py`), runs each paper through na
 5. **Tag**: an LLM generates topic tags (degrades gracefully to no tags if it fails).
 6. **Manifest**: write the paper record to `papers.json`.
 
-### Section-aware chunking
+### ✂️ Section-aware chunking
 
 The interesting design choice is chunking (`src/rag/chunking.py`). Docling flattens every
 heading to `##`, discarding the visual hierarchy — but the section **numbering** in the
@@ -55,7 +55,7 @@ heading text (`2`, `2.1`, `2.1.1`) still encodes it. So PaperLens:
 A `Chunk` therefore stores both `text` (breadcrumb + body, what gets embedded) and `body`
 (shown to the reader). This is why citations can name the exact section.
 
-## Retrieval: two stages
+## 🎯 Retrieval: two stages
 
 `Searcher.search` (`src/rag/search.py`) is deliberately two-stage:
 
@@ -72,7 +72,7 @@ reranker can even be the chat LLM (`reranker.type: llm`), scoring passages 0–1
 batched call — and if its response can't be parsed it falls back to the dense order rather
 than injecting noise. A `paper`/`paper_ids` filter (used by the tag filter) scopes recall.
 
-## The agent: retrieval as a tool
+## 🤖 The agent: retrieval as a tool
 
 Chat is **agentic RAG** (`src/server/agent.py`): a ReAct loop over the model's native tool
 calling, not a fixed retrieve-then-generate chain. The agent has exactly one tool,
@@ -107,7 +107,7 @@ Why a tool instead of always retrieving:
   `r2`, …); the agent must cite the refs it received, and the frontend turns each into a
   clickable **citation** that opens the paper at that passage.
 
-## Swappable backends: the registry pattern
+## 🗂️ Swappable backends: the registry pattern
 
 Embedders, rerankers, and LLM backends are all selected by a config string and built
 through a decorator **registry** (`_EMBEDDERS`, `_RERANKERS`, `_BACKENDS`). Adding a
@@ -116,7 +116,7 @@ chains. `build_embedder` / `build_reranker` / `build_llm` just look the string u
 [How-to: add a backend](how-to.md#add-a-new-llm-backend). This is what lets "the LLM is an
 opaque config value" hold true across Anthropic, OpenAI-compatible servers, and Gemini.
 
-## Layering: `server` composes `rag`
+## 🧱 Layering: `server` composes `rag`
 
 The Python packages import in one direction only — no cycles:
 
@@ -130,9 +130,9 @@ config  chunking  embedders  extract  manifest      (leaves: no intra-rag deps)
 `rag` is the config-driven core (ingestion + retrieval). `server` composes it behind a
 FastAPI app and the in-process ingestion worker, and **never** the reverse. The full graph
 is documented in `src/rag/__init__.py`. Keeping it acyclic is a maintained invariant — see
-[CONTRIBUTING](../CONTRIBUTING.md#architecture-you-must-preserve).
+[CONTRIBUTING](../CONTRIBUTING.md).
 
-## Notable design facts
+## 💡 Notable design facts
 
 - **MPS tensor cap.** `bge-m3` defaults to an 8192-token sequence length, which overflows
   Metal's `2**32`-byte per-tensor limit on Apple Silicon at a normal batch size.

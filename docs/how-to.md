@@ -1,16 +1,16 @@
-# How-to guides
+# 🧩 How-to guides
 
-**For:** someone with PaperLens already running who has a specific task. Each recipe is
-self-contained. For the meaning of every key, see [Configuration](configuration.md); for
-why the pieces fit together, see [Architecture](architecture.md).
+> 👤 **For:** someone with PaperLens already running who has a specific task. Each recipe is
+> self-contained. For the meaning of every key, see [Configuration](configuration.md); for
+> why the pieces fit together, see [Architecture](architecture.md).
 
-- [Add papers](#add-papers)
-- [Re-tag papers](#re-tag-papers)
-- [Switch the chat or tagging LLM](#switch-the-chat-or-tagging-llm)
-- [Switch the embedder](#switch-the-embedder)
-- [Use the LLM reranker (no extra model)](#use-the-llm-reranker)
-- [Add a new LLM backend (code)](#add-a-new-llm-backend)
-- [Add a new embedder backend (code)](#add-a-new-embedder-backend)
+- 📄 [Add papers](#add-papers)
+- 🏷️ [Re-tag papers](#re-tag-papers)
+- 🤖 [Switch the chat or tagging LLM](#switch-the-chat-or-tagging-llm)
+- 🧬 [Switch the embedder](#switch-the-embedder)
+- 🎯 [Use the LLM reranker (no extra model)](#use-the-llm-reranker)
+- 🔌 [Add a new LLM backend (code)](#add-a-new-llm-backend)
+- ➕ [Add a new embedder backend (code)](#add-a-new-embedder-backend)
 
 ---
 
@@ -34,7 +34,7 @@ why the pieces fit together, see [Architecture](architecture.md).
 
    Only papers not already in the DB are processed.
 
-3. Verify: the paper appears on the **Papers** page with tags, and the Admin chunk count
+3. ✅ Verify: the paper appears on the **Papers** page with tags, and the Admin chunk count
    rises. Ask a question the new paper should answer and check the citations point to it.
 
 ---
@@ -48,7 +48,7 @@ tagging model):
 uv run paperlens-ingest --retag
 ```
 
-Verify: the printed tags per paper change, and the **Papers** page / tag filter reflect
+✅ Verify: the printed tags per paper change, and the **Papers** page / tag filter reflect
 them.
 
 ---
@@ -58,7 +58,7 @@ them.
 Edit `llm.chat` (the agent) or `llm.tagging` (ingestion tags) in `config.yaml`. The chat
 model **must support tool/function calling**.
 
-**A cloud provider (Anthropic):**
+☁️ **A cloud provider (Anthropic):**
 
 ```bash
 uv sync --extra anthropic   # installs the anthropic client (lazy extra)
@@ -75,7 +75,7 @@ llm:
 Put the key in `.env`: `ANTHROPIC_API_KEY=sk-...`. Use `uv sync --extra gemini` and
 `provider: gemini` (key `GEMINI_API_KEY`) for Google.
 
-**Any OpenAI-compatible server** (LM Studio, Ollama `/v1`, vLLM, SGLang, llama.cpp):
+🏠 **Any OpenAI-compatible server** (LM Studio, Ollama `/v1`, vLLM, SGLang, llama.cpp):
 
 ```yaml
 llm:
@@ -86,7 +86,7 @@ llm:
     api_key_env: LOCAL_LLM_KEY   # local servers ignore the key
 ```
 
-Restart `paperlens-serve`. Verify: ask a question and confirm the agent still searches and
+Restart `paperlens-serve`. ✅ Verify: ask a question and confirm the agent still searches and
 cites. If it never calls the tool, the served model likely lacks tool-calling support.
 
 ---
@@ -110,11 +110,11 @@ embedding:
   api_key_env: GEMINI_API_KEY   # uv sync --extra gemini
 ```
 
-> **Changing the embedder changes the vectors.** The embedder name is baked into the Chroma
+> ⚠️ **Changing the embedder changes the vectors.** The embedder name is baked into the Chroma
 > collection, so switching means re-indexing. Delete the RAG DB directory (`paths.rag_db`)
 > and re-ingest, or use a fresh `collection` name.
 
-Verify: re-ingest one paper, then search — you should get sensible passages.
+✅ Verify: re-ingest one paper, then search — you should get sensible passages.
 
 ---
 
@@ -129,7 +129,7 @@ reranker:
   enabled: true
 ```
 
-The `llm` reranker reuses `llm.chat`. Verify: search still returns results; if the model's
+The `llm` reranker reuses `llm.chat`. ✅ Verify: search still returns results; if the model's
 scoring response can't be parsed, it degrades to the dense-retrieval order rather than
 erroring.
 
@@ -137,7 +137,7 @@ erroring.
 
 ## Add a new LLM backend
 
-Backends are discovered through a **registry** — one decorated class, no other wiring.
+Backends are discovered through a **registry** 🗂️ — one decorated class, no other wiring.
 
 1. In `src/rag/llm.py`, subclass `LLMBackend` and decorate it:
 
@@ -155,8 +155,8 @@ Backends are discovered through a **registry** — one decorated class, no other
 
 2. Set `provider: myprovider` in a `config.yaml` LLM spec. `build_llm` dispatches on it.
 
-3. Verify: add a unit test alongside `tests/unit/test_llm.py` (use the `fake_llm` pattern
-   where possible). Run the [gate](../CONTRIBUTING.md#the-gate).
+3. ✅ Verify: add a unit test alongside `tests/unit/test_llm.py` (use the `fake_llm` pattern
+   where possible). Run the [gate](../CONTRIBUTING.md).
 
 ---
 
@@ -181,5 +181,5 @@ Same registry pattern, in `src/rag/embedders.py`:
 
 2. Set `embedding.type: myembedder`. `build_embedder` dispatches on it.
 
-3. Verify: add a test near `tests/unit/test_embedders.py`; run the gate. Remember a new
+3. ✅ Verify: add a test near `tests/unit/test_embedders.py`; run the gate. Remember a new
    embedder means a fresh index (see the note above).
