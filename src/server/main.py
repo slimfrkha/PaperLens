@@ -157,7 +157,7 @@ def create_app(cfg: Config) -> FastAPI:
                 text, citations = agent.run(
                     [m.model_dump() for m in req.messages],
                     req.tags,
-                    req.paper,
+                    req.papers,
                     on_text=lambda t: emit("token", t),
                     on_trace=on_trace,
                 )

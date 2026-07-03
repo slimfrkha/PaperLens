@@ -94,14 +94,14 @@ export interface ChatHandlers {
 export async function chat(
   messages: ChatMessage[],
   tags: string[],
-  paper: string | null,
+  papers: string[],
   chatId: string | null,
   h: ChatHandlers
 ): Promise<void> {
   const resp = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, tags, paper, chat_id: chatId }),
+    body: JSON.stringify({ messages, tags, papers, chat_id: chatId }),
   });
   if (!resp.body) throw new Error("no response body");
 

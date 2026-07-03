@@ -13,5 +13,5 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     tags: list[str] = []
-    paper: str | None = None
+    papers: list[str] = []  # restrict search to these paper_ids (empty = all)
     chat_id: str | None = None

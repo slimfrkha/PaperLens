@@ -49,6 +49,8 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [tags, setTags] = useState<string[]>([]);
   const [tagOptions, setTagOptions] = useState<string[]>([]);
+  const [papers, setPapers] = useState<string[]>([]);
+  const [paperOptions, setPaperOptions] = useState<{ value: string; label: string }[]>([]);
   const [busy, setBusy] = useState(false);
   const [empty, setEmpty] = useState(false);
   const loadedId = useRef<string | null>(null); // which chat's turns are in state
@@ -58,7 +60,10 @@ export default function ChatPage() {
 
   useEffect(() => {
     getTags().then((t: TagCount[]) => setTagOptions(t.map((x) => x.tag)));
-    getPapers().then((p) => setEmpty(p.length === 0));
+    getPapers().then((p) => {
+      setEmpty(p.length === 0);
+      setPaperOptions(p.map((x) => ({ value: x.paper_id, label: x.title })));
+    });
     refreshSessions();
   }, []);
 
@@ -66,6 +71,8 @@ export default function ChatPage() {
   useEffect(() => {
     if (!chatId) {
       setTurns([]);
+      setTags([]);
+      setPapers([]);
       loadedId.current = null;
       return;
     }
@@ -80,6 +87,10 @@ export default function ChatPage() {
             trace: s.traces?.[i] ?? undefined,
           }))
         );
+        // Filters aren't persisted per chat; reset so a reopened chat never shows
+        // another session's stale (and now locked) filter values.
+        setTags([]);
+        setPapers([]);
         loadedId.current = chatId;
       })
       .catch(() => setTurns([]));
@@ -118,7 +129,7 @@ export default function ChatPage() {
     ]);
     setBusy(true);
     try {
-      await chat(history, tags, null, id, {
+      await chat(history, tags, papers, id, {
         onToken: (tok) => patchLast((t) => ({ ...t, content: t.content + tok })),
         onCitations: (c) => patchLast((t) => ({ ...t, citations: c })),
         onTrace: (e) => patchLast((t) => ({ ...t, trace: [...(t.trace ?? []), e] })),
@@ -136,6 +147,14 @@ export default function ChatPage() {
     await deleteChat(id);
     await refreshSessions();
     if (id === chatId) navigate("/");
+  }
+
+  // New chat: clear both filters (also covers the case where we're already at "/",
+  // where navigating wouldn't re-run the load effect).
+  function newChat() {
+    setTags([]);
+    setPapers([]);
+    navigate("/");
   }
 
   const composer = (
@@ -178,7 +197,7 @@ export default function ChatPage() {
         <ChatSidebar
           sessions={sessions}
           activeId={chatId}
-          onNew={() => navigate("/")}
+          onNew={newChat}
           onSelect={(id) => navigate(`/c/${id}`)}
           onDelete={onDelete}
         />
@@ -190,18 +209,41 @@ export default function ChatPage() {
               <IconSidebar size={18} />
             </ActionIcon>
           </Tooltip>
-          <MultiSelect
-            data={tagOptions}
-            value={tags}
-            onChange={setTags}
-            placeholder={tags.length ? "" : "All papers"}
-            searchable
-            clearable
-            size="xs"
-            variant="filled"
-            style={{ maxWidth: 320, flex: "0 1 320px" }}
-            aria-label="Restrict search to tags"
-          />
+          <Tooltip
+            label="Filters are fixed once the conversation starts — use New chat to change them"
+            disabled={turns.length === 0}
+            multiline
+            w={240}
+          >
+            <Group gap="xs" wrap="wrap" justify="flex-end" style={{ flex: 1 }}>
+              <MultiSelect
+                data={paperOptions}
+                value={papers}
+                onChange={setPapers}
+                placeholder={papers.length ? "" : "All papers"}
+                disabled={turns.length > 0}
+                searchable
+                clearable
+                size="xs"
+                variant="filled"
+                style={{ maxWidth: 300, flex: "0 1 300px" }}
+                aria-label="Restrict search to papers"
+              />
+              <MultiSelect
+                data={tagOptions}
+                value={tags}
+                onChange={setTags}
+                placeholder={tags.length ? "" : "All tags"}
+                disabled={turns.length > 0}
+                searchable
+                clearable
+                size="xs"
+                variant="filled"
+                style={{ maxWidth: 260, flex: "0 1 260px" }}
+                aria-label="Restrict search to tags"
+              />
+            </Group>
+          </Tooltip>
         </Group>
 
         {empty && (

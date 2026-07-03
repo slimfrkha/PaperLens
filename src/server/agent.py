@@ -62,28 +62,44 @@ class ChatAgent:
         self.client = client or build_llm(cfg.llm.chat)
 
     def _system(self, paper_ids: list[str] | None) -> str:
-        papers = (
-            ", ".join(f"{p['paper_id']} ({p['title']})" for p in self.manifest.papers())
-            or "(none yet)"
-        )
+        # Scope the injected catalog to the active filter — otherwise the model can
+        # read every paper off the prompt prefix and answer catalog questions
+        # ("which models?") without searching, bypassing the filter entirely.
+        recs = self.manifest.papers()
+        if paper_ids is not None:
+            allowed = set(paper_ids)
+            recs = [p for p in recs if p["paper_id"] in allowed]
+        papers = ", ".join(f"{p['paper_id']} ({p['title']})" for p in recs) or "(none)"
         if paper_ids is not None:
             note = (
-                "The user restricted this conversation to these papers: "
-                f"{', '.join(paper_ids) or '(none — no paper matches the active tags)'}. "
-                "Only these are searchable."
+                "The user restricted this conversation to the papers listed below — "
+                "treat those as the only papers that exist. Do not mention, list, or "
+                "search any other paper."
             )
         else:
             note = "No paper/tag filter is active; all papers are searchable."
         return SYSTEM_PROMPT.format(filter_note=note, papers=papers)
 
-    def run(self, messages, tags, paper, on_text, on_trace=None):
+    def run(self, messages, tags, papers, on_text, on_trace=None):
         """Returns (answer_text, citations[]).
+
+        `tags` and `papers` are two optional scoping filters the user can set: a
+        tag filter (papers carrying any of the tags) and an explicit paper picker.
+        Whichever are active intersect to form the searchable set.
 
         `on_trace(entry)` fires for each reasoning/tool step, where entry.type is
         "thought" (model reasoning), "action" (a search call), or "observation"
         (its results) — enough to render the full Thought→Action→Observation trace.
         """
-        paper_ids = self.manifest.paper_ids_for_tags(tags) if tags else None
+        tag_ids = self.manifest.paper_ids_for_tags(tags) if tags else None
+        selected = list(papers) if papers else None
+        if tag_ids is None:
+            paper_ids = selected
+        elif selected is None:
+            paper_ids = tag_ids
+        else:
+            wanted = set(selected)
+            paper_ids = [p for p in tag_ids if p in wanted]
         registry: dict[str, dict] = {}
         counter = {"n": 0}
 
