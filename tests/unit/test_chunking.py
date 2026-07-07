@@ -100,12 +100,23 @@ def test_markdown_table_is_kept_as_one_block():
 
 
 def test_large_section_splits_with_overlap():
-    huge = "\n\n".join(" ".join(["tok"] * 40) for _ in range(20))
-    md = f"## Title\n\n## 4 Big\n{huge}"
-    chunks = chunk_markdown(md, paper_id="p", max_tokens=120, overlap_tokens=40)
-    parts = [c for c in chunks if c.metadata["section_title"] == "Big"]
+    # Distinguishable blocks so the overlap carry-forward is observable: the tail
+    # block of each sub-chunk must reappear at the head of the next one. With
+    # identical blocks the test can't tell overlap from coincidence.
+    blocks = [f"BLOCK{j} " + " ".join(["tok"] * 14) for j in range(12)]  # ~20 tokens each
+    md = "## Title\n\n## 4 Big\n" + "\n\n".join(blocks)
+    parts = [
+        c
+        for c in chunk_markdown(md, paper_id="p", max_tokens=60, overlap_tokens=25)
+        if c.metadata["section_title"] == "Big"
+    ]
     assert len(parts) > 1
     assert parts[0].metadata["n_parts"] == len(parts)
+    # The last BLOCK marker in each part reappears in the next — proof the overlap
+    # carry-forward ran. Delete it in _pack_blocks and this assertion goes red.
+    for a, b in zip(parts, parts[1:], strict=False):  # parts[1:] is intentionally shorter
+        last_marker = [w for w in a.body.split() if w.startswith("BLOCK")][-1]
+        assert last_marker in b.body
 
 
 def test_approx_tokens_monotonic():

@@ -121,13 +121,21 @@ def test_tag_and_paper_filters_intersect(make_agent, fake_llm):
 def test_filter_scopes_the_paper_catalog_in_the_prompt(make_agent, fake_llm):
     # A filter must scope the paper list injected into the system prompt, or the
     # model can list the whole catalog from its prefix without ever searching.
-    agent = make_agent(fake_llm(answer="x", tool_calls=[]))
-
-    scoped = agent._system(["glm-4.5"])
+    # Assert through the public seam — the system prompt the LLM actually receives —
+    # so renaming the private _system helper doesn't break the test.
+    scoped_llm = fake_llm(answer="x", tool_calls=[])
+    make_agent(scoped_llm).run(
+        [{"role": "user", "content": "x"}], tags=[], papers=["glm-4.5"], on_text=lambda _t: None
+    )
+    scoped = scoped_llm.run_tools_calls[0]["system"]
     assert "GLM-4.5" in scoped
     assert "DeepSeek-V3" not in scoped
 
-    full = agent._system(None)
+    full_llm = fake_llm(answer="x", tool_calls=[])
+    make_agent(full_llm).run(
+        [{"role": "user", "content": "x"}], tags=[], papers=[], on_text=lambda _t: None
+    )
+    full = full_llm.run_tools_calls[0]["system"]
     assert "GLM-4.5" in full and "DeepSeek-V3" in full
 
 

@@ -214,6 +214,7 @@ def chunk_markdown(
                         "section_number": number or "",
                         "section_title": title,
                         "breadcrumb": breadcrumb,
+                        "body": sub,  # the reader reads this back; don't re-derive it downstream
                         "part": i,
                         "n_parts": len(sub_bodies),
                         "approx_tokens": approx_tokens(text),

@@ -123,7 +123,7 @@ class Searcher:
                 breadcrumb=m["breadcrumb"],
                 section_title=m["section_title"],
                 text=doc,
-                body=doc.split("\n\n", 1)[-1],
+                body=m["body"],
             )
             for doc, m, d in zip(docs, metas, dists, strict=True)
         ]

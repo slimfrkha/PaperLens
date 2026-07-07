@@ -113,7 +113,12 @@ class ChatStore:
             p.unlink()
 
     def _write(self, chat: dict) -> None:
-        self._path(chat["id"]).write_text(json.dumps(chat, indent=2))
+        # Write-temp-then-rename so a crash or full disk mid-write can't leave a
+        # truncated JSON file that get() would then fail to parse forever.
+        p = self._path(chat["id"])
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(chat, indent=2))
+        tmp.replace(p)
 
 
 def generate_name(first_user_msg: str, spec: LLMSpec) -> str:

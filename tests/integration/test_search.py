@@ -49,6 +49,17 @@ def test_result_body_strips_breadcrumb_prefix(make_searcher, seed_chunks):
     assert r.breadcrumb.startswith("Paper >")
 
 
+def test_result_body_returns_full_multiparagraph_body(make_searcher, seed_chunks):
+    # Body is read back from metadata, not re-split from the embedded doc, so a body
+    # that itself contains a blank line comes back whole and breadcrumb-free — the
+    # edge the old doc.split("\n\n", 1) contract fumbled.
+    body = "para one about latent attention\n\npara two continues"
+    ctx = make_searcher([seed_chunks("p", "Attention", body)])
+    r = ctx.searcher.search("latent attention", candidates=10, rerank=False)[0]
+    assert r.body == body
+    assert "Paper >" not in r.body
+
+
 class _KeywordReranker(Reranker):
     """Scores a passage 1.0 iff it contains ``needle``, else 0.0."""
 

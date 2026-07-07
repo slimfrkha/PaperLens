@@ -192,6 +192,7 @@ def seed_chunks():
             "section_number": "1",
             "section_title": section,
             "breadcrumb": breadcrumb,
+            "body": body,
             "part": 0,
             "n_parts": 1,
         }

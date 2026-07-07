@@ -178,7 +178,7 @@ def create_app(cfg: Config) -> FastAPI:
                     )
                     emit("meta", json.dumps({"chat_id": saved["id"], "name": saved["name"]}))
             except Exception as e:  # surface errors to the client
-                emit("error", str(e))
+                emit("error", f"{type(e).__name__}: {e}")
             finally:
                 emit("done", "")
 
@@ -201,10 +201,11 @@ def create_app(cfg: Config) -> FastAPI:
                 "Frontend not built. Run `npm --prefix web run build`, "
                 "or use the Vite dev server (`npm --prefix web run dev`).",
             )
-        candidate = web_dist / full_path
-        if full_path and candidate.is_file():
+        root = web_dist.resolve()
+        candidate = (web_dist / full_path).resolve()
+        if full_path and candidate.is_file() and candidate.is_relative_to(root):
             return FileResponse(candidate)
-        return FileResponse(web_dist / "index.html")
+        return FileResponse(root / "index.html")
 
     return app
 
