@@ -147,3 +147,53 @@ def test_empty_query_is_rejected(make_agent, fake_llm):
     )
     # Blank query -> no search performed, no citations.
     assert citations == []
+
+
+def test_uses_configured_retrieval_defaults_when_top_k_omitted(make_agent, fake_llm):
+    llm = fake_llm(
+        answer="ok", tool_calls=[("search_papers", {"query": "latent attention"})]
+    )  # no top_k -> falls back to retrieval.k
+    agent = make_agent(llm)
+    agent.cfg.retrieval.k = 2
+    agent.cfg.retrieval.candidates = 9
+
+    calls: list[dict] = []
+    real_search = agent.searcher.search
+
+    def spy(query, **kw):
+        calls.append(kw)
+        return real_search(query, **kw)
+
+    agent.searcher.search = spy
+    agent.run([{"role": "user", "content": "x"}], tags=[], papers=[], on_text=lambda _t: None)
+
+    assert calls[0]["k"] == 2
+    assert calls[0]["candidates"] == 9
+
+
+def test_candidate_pool_scales_with_requested_top_k(make_agent, fake_llm):
+    # A large top_k must still leave the reranker something to discard, otherwise
+    # it just reorders exactly what dense recall returned.
+    llm = fake_llm(answer="ok", tool_calls=[("search_papers", {"query": "mla", "top_k": 50})])
+    agent = make_agent(llm)
+
+    calls: list[dict] = []
+    real_search = agent.searcher.search
+
+    def spy(query, **kw):
+        calls.append(kw)
+        return real_search(query, **kw)
+
+    agent.searcher.search = spy
+    agent.run([{"role": "user", "content": "x"}], tags=[], papers=[], on_text=lambda _t: None)
+
+    assert calls[0]["k"] == 50
+    assert calls[0]["candidates"] == 200
+
+
+def test_max_rounds_flows_from_retrieval_config(make_agent, fake_llm):
+    llm = fake_llm(answer="ok", tool_calls=[])
+    agent = make_agent(llm)
+    agent.cfg.retrieval.max_rounds = 3
+    agent.run([{"role": "user", "content": "hi"}], tags=[], papers=[], on_text=lambda _t: None)
+    assert llm.run_tools_calls[0]["max_rounds"] == 3

@@ -56,6 +56,32 @@ class Paths:
     web_dist: str = "web/dist"  # built frontend SPA served by the backend
 
 
+@dataclass
+class ChunkingCfg:
+    """Corpus-dependent chunk sizing; the built-in numbers are tuned for dense
+    ML technical reports and may not fit a different kind of paper list."""
+
+    max_tokens: int = 512
+    overlap_tokens: int = 64
+    min_tokens: int = 24  # sections shorter than this are dropped (titles, stray captions)
+    noise_ratio: float = 0.4  # fraction of numeric/punctuation tokens that flags caption noise
+    # Extra regex patterns (case-insensitive) for section titles to always skip,
+    # appended to the built-in list (references, TOCs, acknowledgements, ...).
+    extra_skip_titles: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # overlap >= max makes packing carry every prior block into the next chunk.
+        if self.overlap_tokens >= self.max_tokens:
+            raise ValueError("chunking.overlap_tokens must be < chunking.max_tokens")
+        if not 0.0 <= self.noise_ratio <= 1.0:
+            raise ValueError("chunking.noise_ratio must be in [0, 1]")
+
+
+@dataclass
+class ExtractionCfg:
+    ocr_enabled: bool = False  # turn on for scanned/no-text-layer PDFs
+
+
 # --- Embedder: a `type` string selects the variant; each carries only its fields ---
 @dataclass
 class EmbeddingCfg(draccus.ChoiceRegistry):
@@ -110,12 +136,13 @@ class RerankerCfg(draccus.ChoiceRegistry):
 @dataclass
 class HFRerankerCfg(RerankerCfg):
     model: str = "BAAI/bge-reranker-v2-m3"  # local cross-encoder
+    max_length: int = 512  # cross-encoder input token cap; raise if chunking.max_tokens grows
 
 
 @RerankerCfg.register_subclass("llm")
 @dataclass
 class LLMRerankerCfg(RerankerCfg):
-    pass  # reuses the chat LLM; no extra fields
+    max_chars: int = 600  # per-passage excerpt sent to the judge LLM
 
 
 # --- LLM backends: a `type` string selects the provider variant ---
@@ -125,6 +152,10 @@ class LLMSpec(draccus.ChoiceRegistry):
     max_tokens: int = 2048
     temperature: float = 0.0
     api_key_env: str = "ANTHROPIC_API_KEY"
+    # Sentinels, not Optionals: draccus builds the per-field CLI overrides
+    # (--llm.chat.timeout=30) with argparse `type=`, which cannot take `X | None`.
+    timeout: float = 0.0  # seconds; 0 -> provider SDK default
+    max_retries: int = -1  # -1 -> provider SDK default
 
     @classmethod
     def default_choice_name(cls) -> str:
@@ -171,6 +202,28 @@ class LLMCfg:
 
 
 @dataclass
+class RetrievalCfg:
+    k: int = 5  # passages returned per search_papers call, unless the model asks for more
+    candidates: int = 20  # dense-recall pool size handed to the reranker
+    max_rounds: int = 8  # ReAct search/answer cycles before the agent must answer
+
+    def __post_init__(self) -> None:
+        if self.k > self.candidates:
+            raise ValueError("retrieval.k must be <= retrieval.candidates")
+
+
+@dataclass
+class TaggerCfg:
+    max_tags: int = 12
+    min_tags: int = 5
+    max_excerpt_chars: int = 6000  # how much of the paper (title/abstract/headings) to tag from
+
+    def __post_init__(self) -> None:
+        if self.min_tags > self.max_tags:
+            raise ValueError("tagger.min_tags must be <= tagger.max_tags")
+
+
+@dataclass
 class IngestionCfg:
     auto_start: bool = True
 
@@ -202,6 +255,9 @@ class IngestConfig:
     collection: str
     embedding: EmbeddingCfg
     tagging: LLMSpec  # flattened from Config.llm.tagging
+    chunking: ChunkingCfg
+    extraction: ExtractionCfg
+    tagger: TaggerCfg
     papers: list[Paper]
 
 
@@ -215,6 +271,10 @@ class Config:
     embedding: EmbeddingCfg = field(default_factory=HFEmbeddingCfg)
     reranker: RerankerCfg = field(default_factory=HFRerankerCfg)
     llm: LLMCfg = field(default_factory=LLMCfg)
+    chunking: ChunkingCfg = field(default_factory=ChunkingCfg)
+    extraction: ExtractionCfg = field(default_factory=ExtractionCfg)
+    retrieval: RetrievalCfg = field(default_factory=RetrievalCfg)
+    tagger: TaggerCfg = field(default_factory=TaggerCfg)
     ingestion: IngestionCfg = field(default_factory=IngestionCfg)
     server: ServerCfg = field(default_factory=ServerCfg)
     papers: list[Paper] = field(default_factory=list)
@@ -232,6 +292,9 @@ class Config:
             collection=self.collection,
             embedding=self.embedding,
             tagging=self.llm.tagging,
+            chunking=self.chunking,
+            extraction=self.extraction,
+            tagger=self.tagger,
             papers=self.papers,
         )
 

@@ -98,7 +98,7 @@ def _blocks(body: str) -> list[str]:
     return [b for b in blocks if b]
 
 
-def _is_caption_noise(body: str) -> bool:
+def _is_caption_noise(body: str, noise_ratio: float) -> bool:
     """Detect Docling figure fragments: caption bodies or plot-number dumps.
 
     Only applied to *unnumbered* sections — numbered sections and markdown
@@ -111,7 +111,7 @@ def _is_caption_noise(body: str) -> bool:
     if _CAPTION.match(body) or _CAPTION_INLINE.search(body):
         return True
     toks = body.split()
-    return bool(toks) and sum(bool(_NUMERIC_TOK.match(t)) for t in toks) / len(toks) > 0.4
+    return bool(toks) and sum(bool(_NUMERIC_TOK.match(t)) for t in toks) / len(toks) > noise_ratio
 
 
 def _pack_blocks(blocks: list[str], max_tokens: int, overlap_tokens: int) -> list[str]:
@@ -173,6 +173,8 @@ def chunk_markdown(
     max_tokens: int = 512,
     overlap_tokens: int = 64,
     min_tokens: int = 24,
+    noise_ratio: float = 0.4,
+    extra_skip_titles: list[str] | None = None,
 ) -> list[Chunk]:
     """Turn one paper's markdown into breadcrumb-prefixed chunks."""
     md = re.sub(r"<!--.*?-->", "", md, flags=re.DOTALL)  # drop Docling image placeholders
@@ -180,6 +182,7 @@ def chunk_markdown(
     if not sections:
         return []
 
+    extra_skip = [re.compile(p, re.IGNORECASE) for p in (extra_skip_titles or [])]
     paper_title = sections[0][0]  # first `##` heading is the paper title
     hier = _Hierarchy(paper_title)
     chunks: list[Chunk] = []
@@ -192,11 +195,12 @@ def chunk_markdown(
         # later subsections can still resolve their ancestors.
         breadcrumb = hier.breadcrumb(number, title)
 
-        if _SKIP_TITLES.match(title.strip()):
+        stripped_title = title.strip()
+        if _SKIP_TITLES.match(stripped_title) or any(p.match(stripped_title) for p in extra_skip):
             continue
         if not body or approx_tokens(body) < min_tokens:
             continue  # bare title lines, author lists, stray captions
-        if number is None and _is_caption_noise(body):
+        if number is None and _is_caption_noise(body, noise_ratio):
             continue  # unnumbered figure-caption / plot-number fragments
 
         blocks = _blocks(body)

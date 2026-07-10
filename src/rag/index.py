@@ -27,7 +27,7 @@ import os
 import time
 
 from .chunking import Chunk, chunk_markdown
-from .config import HFEmbeddingCfg, OpenAIEmbeddingCfg
+from .config import ChunkingCfg, HFEmbeddingCfg, OpenAIEmbeddingCfg
 from .embedders import build_embedder
 
 # Best quality-per-speed local default: BGE-M3 is battle-tested with
@@ -97,8 +97,7 @@ def index_markdown(
     md_path: str,
     paper_id: str,
     *,
-    max_tokens: int = 512,
-    overlap_tokens: int = 64,
+    chunking: ChunkingCfg,
     batch_size: int = 32,
     progress=None,
 ) -> int:
@@ -106,7 +105,13 @@ def index_markdown(
     with open(md_path) as f:
         md = f.read()
     chunks = chunk_markdown(
-        md, paper_id=paper_id, max_tokens=max_tokens, overlap_tokens=overlap_tokens
+        md,
+        paper_id=paper_id,
+        max_tokens=chunking.max_tokens,
+        overlap_tokens=chunking.overlap_tokens,
+        min_tokens=chunking.min_tokens,
+        noise_ratio=chunking.noise_ratio,
+        extra_skip_titles=chunking.extra_skip_titles,
     )
     upsert_chunks(collection, embedder, chunks, batch_size=batch_size, progress=progress)
     return len(chunks)

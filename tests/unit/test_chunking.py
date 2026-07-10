@@ -121,3 +121,44 @@ def test_large_section_splits_with_overlap():
 
 def test_approx_tokens_monotonic():
     assert approx_tokens("one two three") > approx_tokens("one")
+
+
+def test_min_tokens_override_keeps_short_section():
+    md = _md(
+        """
+        ## Title
+
+        ## 1 Intro
+        short body here
+        """
+    )
+    assert chunk_markdown(md, paper_id="p") == []  # default min_tokens=24 drops it
+    assert len(chunk_markdown(md, paper_id="p", min_tokens=1)) == 1
+
+
+def test_extra_skip_titles_drops_custom_section():
+    md = _md(
+        f"""
+        ## Title
+
+        ## Author Contributions
+        {_LONG}
+        """
+    )
+    assert len(chunk_markdown(md, paper_id="p")) == 1  # not in the built-in skip list
+    assert chunk_markdown(md, paper_id="p", extra_skip_titles=["author contributions"]) == []
+
+
+def test_noise_ratio_override_drops_borderline_numeric_section():
+    # 7 numeric / 20 tokens = 0.35 -> kept at the default 0.4 threshold, dropped at 0.3.
+    body = " ".join([f"word{i}" for i in range(13)] + [str(i) for i in range(7)])
+    md = _md(
+        f"""
+        ## Title
+
+        ## Random Notes
+        {body}
+        """
+    )
+    assert len(chunk_markdown(md, paper_id="p")) == 1
+    assert chunk_markdown(md, paper_id="p", noise_ratio=0.3) == []

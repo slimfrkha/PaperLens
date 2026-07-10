@@ -24,6 +24,14 @@ def test_build_reranker_hf_is_lazy(make_config):
     assert r._model is None  # model not loaded until first score()
 
 
+def test_build_reranker_honors_max_length_and_max_chars(fake_llm):
+    hf = build_reranker(HFRerankerCfg(max_length=256))
+    assert hf.max_length == 256
+
+    llm_r = build_reranker(LLMRerankerCfg(max_chars=100), llm=fake_llm())
+    assert llm_r.max_chars == 100
+
+
 def test_build_reranker_llm_requires_llm(fake_llm):
     with pytest.raises(ValueError, match="needs an LLM"):
         build_reranker(LLMRerankerCfg())  # no llm passed

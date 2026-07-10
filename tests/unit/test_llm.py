@@ -127,3 +127,62 @@ def test_gemini_client_built_lazily(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "k")
     client = GeminiBackend(GeminiSpec())._client()
     assert client is not None
+
+
+# ---- timeout / max_retries: 0 / -1 sentinels omit the kwarg (SDK default) ---
+
+
+def test_anthropic_client_honors_timeout_and_retries(monkeypatch):
+    pytest.importorskip("anthropic")
+    import anthropic
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    captured: dict = {}
+    monkeypatch.setattr(anthropic, "Anthropic", lambda **kw: captured.update(kw))
+    AnthropicBackend(AnthropicSpec(timeout=30.0, max_retries=5))._client()
+    assert captured["timeout"] == 30.0
+    assert captured["max_retries"] == 5
+
+
+def test_anthropic_client_omits_unset_timeout_and_retries(monkeypatch):
+    pytest.importorskip("anthropic")
+    import anthropic
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    captured: dict = {}
+    monkeypatch.setattr(anthropic, "Anthropic", lambda **kw: captured.update(kw))
+    AnthropicBackend(AnthropicSpec())._client()
+    assert "timeout" not in captured
+    assert "max_retries" not in captured
+
+
+def test_openai_client_honors_timeout_and_retries(monkeypatch):
+    pytest.importorskip("openai")
+    import openai
+
+    captured: dict = {}
+    monkeypatch.setattr(openai, "OpenAI", lambda **kw: captured.update(kw))
+    OpenAICompatBackend(OpenAISpec(api_base="http://x", timeout=10.0, max_retries=1))._client()
+    assert captured["timeout"] == 10.0
+    assert captured["max_retries"] == 1
+
+
+def test_gemini_client_converts_timeout_to_ms_and_sets_retry(monkeypatch):
+    genai = pytest.importorskip("google.genai")
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    captured: dict = {}
+    monkeypatch.setattr(genai, "Client", lambda **kw: captured.update(kw))
+    GeminiBackend(GeminiSpec(timeout=2.5, max_retries=3))._client()
+    http_options = captured["http_options"]
+    assert http_options.timeout == 2500
+    # Gemini's `attempts` is total attempts; max_retries=3 means 1 + 3 = 4.
+    assert http_options.retry_options.attempts == 4
+
+
+def test_gemini_zero_retries_still_makes_one_attempt(monkeypatch):
+    genai = pytest.importorskip("google.genai")
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    captured: dict = {}
+    monkeypatch.setattr(genai, "Client", lambda **kw: captured.update(kw))
+    GeminiBackend(GeminiSpec(max_retries=0))._client()
+    assert captured["http_options"].retry_options.attempts == 1

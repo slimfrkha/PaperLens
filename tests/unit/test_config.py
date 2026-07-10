@@ -7,7 +7,15 @@ import textwrap
 
 import pytest
 
-from rag.config import CONFIG_ENV_VAR, IngestConfig, load_config, parse_config
+from rag.config import (
+    CONFIG_ENV_VAR,
+    ChunkingCfg,
+    IngestConfig,
+    RetrievalCfg,
+    TaggerCfg,
+    load_config,
+    parse_config,
+)
 
 _YAML = textwrap.dedent(
     """
@@ -103,10 +111,42 @@ def test_legacy_provider_key_rejected(tmp_path):
         load_config(str(p))
 
 
+def test_incoherent_knobs_fail_at_construction():
+    # Guardrails, not gold-plating: overlap >= max makes chunk packing carry every
+    # prior block forward, silently poisoning the index instead of erroring.
+    with pytest.raises(ValueError, match="overlap_tokens"):
+        ChunkingCfg(max_tokens=512, overlap_tokens=512)
+    with pytest.raises(ValueError, match="noise_ratio"):
+        ChunkingCfg(noise_ratio=1.5)
+    with pytest.raises(ValueError, match="retrieval.k"):
+        RetrievalCfg(k=30, candidates=20)
+    with pytest.raises(ValueError, match="min_tags"):
+        TaggerCfg(min_tags=8, max_tags=3)
+
+
+def test_incoherent_knobs_fail_at_config_load(tmp_path):
+    # The failure must land at startup, not on the tenth paper. draccus wraps the
+    # __post_init__ ValueError in a ParsingError, so the reason rides on __cause__.
+    p = tmp_path / "config.yaml"
+    p.write_text("chunking:\n  max_tokens: 512\n  overlap_tokens: 512\n")
+    with pytest.raises(Exception, match="ChunkingCfg") as exc:
+        load_config(str(p))
+    assert "overlap_tokens" in str(exc.value.__cause__)
+
+
 def test_for_ingest_exposes_only_ingestion_fields(tmp_path):
-    # The projection's surface locks out serve-only config (server/reranker/chat/ingestion).
+    # The projection's surface locks out serve-only config (server/reranker/retrieval/chat).
     names = {f.name for f in dataclasses.fields(IngestConfig)}
-    assert names == {"paths", "collection", "embedding", "tagging", "papers"}
+    assert names == {
+        "paths",
+        "collection",
+        "embedding",
+        "tagging",
+        "chunking",
+        "extraction",
+        "tagger",
+        "papers",
+    }
 
 
 def test_for_ingest_is_a_shallow_view_of_config(tmp_path):

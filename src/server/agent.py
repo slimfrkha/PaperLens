@@ -14,25 +14,37 @@ from rag.llm import build_llm
 from rag.manifest import Manifest
 from rag.search import Searcher
 
-SEARCH_TOOL = {
-    "name": "search_papers",
-    "description": (
-        "Search the library of arXiv model technical reports and return the most "
-        "relevant passages. Call it once per focused sub-question (call it several "
-        "times to decompose a multi-part question). Each result carries a `ref` "
-        "(r1, r2, ...) you must use to cite it. Do NOT call this for greetings or "
-        "small talk."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "A focused natural-language search query."},
-            "paper": {"type": "string", "description": "Optional paper_id to restrict the search."},
-            "top_k": {"type": "integer", "description": "How many passages to return (default 5)."},
+
+def _search_tool(default_k: int) -> dict:
+    return {
+        "name": "search_papers",
+        "description": (
+            "Search the library of arXiv model technical reports and return the most "
+            "relevant passages. Call it once per focused sub-question (call it several "
+            "times to decompose a multi-part question). Each result carries a `ref` "
+            "(r1, r2, ...) you must use to cite it. Do NOT call this for greetings or "
+            "small talk."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "A focused natural-language search query.",
+                },
+                "paper": {
+                    "type": "string",
+                    "description": "Optional paper_id to restrict the search.",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": f"How many passages to return (default {default_k}).",
+                },
+            },
+            "required": ["query"],
         },
-        "required": ["query"],
-    },
-}
+    }
+
 
 SYSTEM_PROMPT = """You are a research assistant for a library of arXiv model \
 technical reports (LLM papers).
@@ -60,6 +72,7 @@ class ChatAgent:
         self.manifest = manifest
         # Inject an LLM client to run offline (tests); default uses the configured chat model.
         self.client = client or build_llm(cfg.llm.chat)
+        self.search_tool = _search_tool(cfg.retrieval.k)
 
     def _system(self, paper_ids: list[str] | None) -> str:
         # Scope the injected catalog to the active filter — otherwise the model can
@@ -114,10 +127,11 @@ class ChatAgent:
             if not query:
                 return "Error: empty query."
             trace({"type": "action", "query": query, "paper": args.get("paper") or None})
+            k = int(args.get("top_k") or self.cfg.retrieval.k)
             results = self.searcher.search(
                 query,
-                k=int(args.get("top_k") or 5),
-                candidates=max(20, int(args.get("top_k") or 5) * 4),
+                k=k,
+                candidates=max(self.cfg.retrieval.candidates, k * 4),
                 paper=args.get("paper") or None,
                 paper_ids=paper_ids,
                 rerank=self.cfg.reranker.enabled,
@@ -147,9 +161,10 @@ class ChatAgent:
         text = self.client.run_tools(
             system=self._system(paper_ids),
             messages=[dict(m) for m in messages],
-            tools=[SEARCH_TOOL],
+            tools=[self.search_tool],
             execute=execute,
             on_text=on_text,
             on_reasoning=lambda t: trace({"type": "thought", "text": t}),
+            max_rounds=self.cfg.retrieval.max_rounds,
         )
         return text, list(registry.values())

@@ -56,14 +56,19 @@ def _parse(text: str) -> list[str]:
 
 
 def generate_tags(
-    md: str, spec: LLMSpec, existing_tags: list[str] | None = None, max_tags: int = 12
+    md: str,
+    spec: LLMSpec,
+    existing_tags: list[str] | None = None,
+    max_tags: int = 12,
+    min_tags: int = 5,
+    max_excerpt_chars: int = 6000,
 ) -> list[str]:
     existing = ", ".join(existing_tags or []) or "(none yet)"
     prompt = (
         f"Existing tags in the library (reuse these when they fit, to avoid "
         f"near-duplicates): {existing}\n\n"
-        f"Paper:\n{_excerpt(md)}\n\n"
-        f"Return ONLY a JSON array of 5-{max_tags} lowercase kebab-case tags."
+        f"Paper:\n{_excerpt(md, max_chars=max_excerpt_chars)}\n\n"
+        f"Return ONLY a JSON array of {min_tags}-{max_tags} lowercase kebab-case tags."
     )
     raw = build_llm(spec).complete(system=_SYSTEM, user=prompt)
     return _normalize(_parse(raw), max_tags)

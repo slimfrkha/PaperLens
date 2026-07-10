@@ -37,3 +37,24 @@ def test_generate_tags_uses_llm_and_normalizes(monkeypatch):
     tags = generate_tags("## Paper\n\n## Abstract\nx", AnthropicSpec(), max_tags=5)
     # kebab-cased + de-duplicated ("MLA"/"mla" collapse).
     assert tags == ["multi-head-latent-attention", "mla"]
+
+
+def test_generate_tags_honors_min_tags_and_excerpt_chars(monkeypatch):
+    prompts: list[str] = []
+
+    class _Fake:
+        def complete(self, system, user, max_tokens=None):
+            prompts.append(user)
+            return "[]"
+
+    monkeypatch.setattr(tagger, "build_llm", lambda spec: _Fake())
+    generate_tags(
+        "## Paper\n\n## Abstract\n" + "x" * 100,
+        AnthropicSpec(),
+        max_tags=8,
+        min_tags=3,
+        max_excerpt_chars=20,
+    )
+    assert "3-8 lowercase kebab-case tags" in prompts[0]
+    # The excerpt itself (not the whole prompt) is capped to max_excerpt_chars.
+    assert "x" * 100 not in prompts[0]

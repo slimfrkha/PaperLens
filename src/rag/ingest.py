@@ -30,6 +30,9 @@ def retag(cfg: IngestConfig, manifest: Manifest) -> None:
             md_path.read_text(),
             cfg.tagging,
             existing_tags=[t["tag"] for t in manifest.all_tags()],
+            max_tags=cfg.tagger.max_tags,
+            min_tags=cfg.tagger.min_tags,
+            max_excerpt_chars=cfg.tagger.max_excerpt_chars,
         )
         rec["tags"] = tags
         manifest.upsert(rec)

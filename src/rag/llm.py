@@ -70,7 +70,12 @@ class AnthropicBackend(LLMBackend):
     def _client(self):
         from anthropic import Anthropic
 
-        return Anthropic(api_key=_api_key(self.spec))
+        kwargs: dict = {"api_key": _api_key(self.spec)}
+        if self.spec.timeout > 0:
+            kwargs["timeout"] = self.spec.timeout
+        if self.spec.max_retries >= 0:
+            kwargs["max_retries"] = self.spec.max_retries
+        return Anthropic(**kwargs)
 
     def complete(self, system, user, max_tokens=None):
         msg = self._client().messages.create(
@@ -142,7 +147,15 @@ class OpenAICompatBackend(LLMBackend):
     def _client(self):
         from openai import OpenAI
 
-        return OpenAI(api_key=_api_key(self.spec), base_url=self.spec.api_base or None)
+        kwargs: dict = {
+            "api_key": _api_key(self.spec),
+            "base_url": self.spec.api_base or None,
+        }
+        if self.spec.timeout > 0:
+            kwargs["timeout"] = self.spec.timeout
+        if self.spec.max_retries >= 0:
+            kwargs["max_retries"] = self.spec.max_retries
+        return OpenAI(**kwargs)
 
     def complete(self, system, user, max_tokens=None):
         resp = self._client().chat.completions.create(
@@ -308,8 +321,19 @@ class GeminiBackend(LLMBackend):
 
     def _client(self):
         from google import genai
+        from google.genai import types
 
-        return genai.Client(api_key=_api_key(self.spec))
+        http_options = None
+        if self.spec.timeout > 0 or self.spec.max_retries >= 0:
+            retry_options = None
+            if self.spec.max_retries >= 0:
+                # Gemini counts total attempts; max_retries counts retries after the first.
+                retry_options = types.HttpRetryOptions(attempts=self.spec.max_retries + 1)
+            http_options = types.HttpOptions(
+                timeout=int(self.spec.timeout * 1000) if self.spec.timeout > 0 else None,
+                retry_options=retry_options,
+            )
+        return genai.Client(api_key=_api_key(self.spec), http_options=http_options)
 
     def complete(self, system, user, max_tokens=None):
         from google.genai import types

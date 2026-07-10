@@ -86,7 +86,7 @@ def ingest_paper(
     if os.path.exists(md_path) and os.path.getsize(md_path) > 0:
         md = Path(md_path).read_text()
     else:
-        md = pdf_to_markdown(pdf_path)
+        md = pdf_to_markdown(pdf_path, ocr_enabled=cfg.extraction.ocr_enabled)
         Path(md_path).parent.mkdir(parents=True, exist_ok=True)
         Path(md_path).write_text(md)
 
@@ -97,7 +97,12 @@ def ingest_paper(
     def _tags() -> list[str]:
         try:
             return generate_tags(
-                md, cfg.tagging, existing_tags=[t["tag"] for t in manifest.all_tags()]
+                md,
+                cfg.tagging,
+                existing_tags=[t["tag"] for t in manifest.all_tags()],
+                max_tags=cfg.tagger.max_tags,
+                min_tags=cfg.tagger.min_tags,
+                max_excerpt_chars=cfg.tagger.max_excerpt_chars,
             )
         except Exception as e:  # tagging needs an API key; degrade gracefully
             print(f"  [warn] tag generation failed for {paper.name}: {e}")
@@ -107,7 +112,12 @@ def ingest_paper(
     with ThreadPoolExecutor(max_workers=1) as ex:
         tags_future = ex.submit(_tags)
         n_chunks = index_markdown(
-            collection, embedder, md_path, paper.name, batch_size=cfg.embedding.batch_size
+            collection,
+            embedder,
+            md_path,
+            paper.name,
+            batch_size=cfg.embedding.batch_size,
+            chunking=cfg.chunking,
         )
         tags = tags_future.result()
     stage("tag", 0.85)

@@ -99,9 +99,10 @@ add an import that violates this.
 
 The ingestion core (`pipeline`, `ingest`, the server's `worker`) is typed to `IngestConfig`
 — a frozen projection of `Config` (`Config.for_ingest()`) exposing only ingestion's fields
-(`paths`, `collection`, `embedding`, `tagging`, `papers`). Serve uses the full `Config`;
-there is deliberately **no** `ServeConfig` (the server hosts the worker, so it reads every
-field). Don't widen `IngestConfig` or add a `ServeConfig` for symmetry.
+(`paths`, `collection`, `embedding`, `tagging`, `chunking`, `extraction`, `tagger`,
+`papers`). Serve uses the full `Config`; there is deliberately **no** `ServeConfig` (the
+server hosts the worker, so it reads every field). Don't widen `IngestConfig` for symmetry
+— only add a field when ingestion genuinely consumes it — and don't add a `ServeConfig`.
 
 ## 💡 Key design facts / gotchas
 

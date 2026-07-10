@@ -90,7 +90,9 @@ class FakeLLM(LLMBackend):
     def run_tools(
         self, system, messages, tools, execute, on_text=None, on_reasoning=None, max_rounds=8
     ):
-        self.run_tools_calls.append({"system": system, "messages": messages, "tools": tools})
+        self.run_tools_calls.append(
+            {"system": system, "messages": messages, "tools": tools, "max_rounds": max_rounds}
+        )
         if self.reasoning and on_reasoning:
             on_reasoning(self.reasoning)
         for name, args in self.tool_calls:

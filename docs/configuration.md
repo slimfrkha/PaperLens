@@ -101,6 +101,8 @@ one. (Changing the embedder alone likewise invalidates the index; see the embedd
 | `type` | string | `hf` | `hf` (local cross-encoder) or `llm` (reuses the chat model, no extra deps). |
 | `model` | string | `BAAI/bge-reranker-v2-m3` | Cross-encoder model id (`hf` type). |
 | `enabled` | bool | `true` | Turn the whole rerank stage on/off. |
+| `max_length` | int | `512` | **`hf` only.** Cross-encoder input token cap — raise it if `chunking.max_tokens` grows, or passages get silently truncated before scoring. |
+| `max_chars` | int | `600` | **`llm` only.** Per-passage excerpt length sent to the judge LLM. |
 
 ### 🤖 `llm`
 
@@ -117,6 +119,8 @@ Each spec is a tagged union on `type` (the `LLMSpec` variants):
 | `api_key_env` | string | `ANTHROPIC_API_KEY` | Env var holding the API key (`OPENAI_API_KEY`/`GEMINI_API_KEY` per type). Local servers ignore it. |
 | `max_tokens` | int | `2048` | Max output tokens. |
 | `temperature` | float | `0.0` | Sampling temperature. |
+| `timeout` | float | `0.0` | Per-request timeout in seconds. `0` → the provider SDK's own default (Anthropic/OpenAI clients default to several minutes). |
+| `max_retries` | int | `-1` | Retries *after* the first attempt, on a failed request. `-1` → the provider SDK's own default; `0` → never retry. |
 
 `type` selects the variant; only that variant's keys are valid — an unknown key (e.g. the
 old `provider`, or `api_base` on `anthropic`) or an unknown `type` **fails loudly at load**.
@@ -124,6 +128,55 @@ old `provider`, or `api_base` on `anthropic`) or an unknown `type` **fails loudl
 Defaults differ by spec: `llm.tagging` defaults to model `claude-haiku-4-5-20251001`;
 `llm.chat` defaults to `claude-opus-4-8`. The **shipped `config.yaml`** overrides both to a
 local OpenAI-compatible server.
+
+### ✂️ `chunking`
+
+Corpus-dependent: the defaults are tuned for dense ML technical reports and may not fit a
+differently-shaped paper list (surveys, shorter position papers, non-ML PDFs, ...).
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `max_tokens` | int | `512` | Target max tokens per chunk. |
+| `overlap_tokens` | int | `64` | Overlap between sub-chunks when a section is split. Must be `< max_tokens`. |
+| `min_tokens` | int | `24` | Sections shorter than this are dropped (bare titles, author lists, stray captions). |
+| `noise_ratio` | float | `0.4` | Fraction of numeric/punctuation tokens in an unnumbered section body that flags it as figure/plot noise. |
+| `extra_skip_titles` | list[string] | `[]` | Extra case-insensitive regexes for section titles to always drop, appended to the built-in list (references, TOCs, acknowledgements, ...). |
+
+Changing these doesn't retroactively rechunk already-ingested papers — like the embedder,
+it only affects papers indexed after the change (delete `paths.rag_db` and re-ingest to
+apply retroactively).
+
+Incoherent combinations (`overlap_tokens >= max_tokens`, `noise_ratio` outside `[0, 1]`,
+`retrieval.k > retrieval.candidates`, `tagger.min_tags > tagger.max_tags`) **fail loudly at
+load** rather than silently degrading the index.
+
+### 📄 `extraction`
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `ocr_enabled` | bool | `false` | Turn on for scanned/no-text-layer PDFs. arXiv PDFs have a real text layer, so this is off by default — enabling it also triggers a Docling OCR model download. |
+
+### 🔍 `retrieval`
+
+Shapes the agentic search loop. The chat model can still request a different `top_k` per
+`search_papers` call.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `k` | int | `5` | Passages returned per `search_papers` call when the model doesn't specify `top_k`. Must be `<= candidates`. |
+| `candidates` | int | `20` | Dense-recall pool size handed to the reranker. This is a **floor**: a larger `top_k` scales the pool to `4 × top_k`, so the reranker always has candidates to discard rather than merely reordering what dense recall returned. |
+| `max_rounds` | int | `8` | How many search/answer ReAct cycles the agent gets before it must answer. |
+
+### 🏷️ `tagger`
+
+Shapes the prompt `generate_tags` sends to `llm.tagging` — the model itself is configured
+separately under `llm.tagging`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `max_tags` | int | `12` | Max tags requested per paper. |
+| `min_tags` | int | `5` | Min tags requested per paper. |
+| `max_excerpt_chars` | int | `6000` | How much of the paper (title/abstract/section headings) to tag from. |
 
 ### 📥 `ingestion`
 

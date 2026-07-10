@@ -69,6 +69,11 @@ heading text (`2`, `2.1`, `2.1.1`) still encodes it. So PaperLens:
 - and normalizes size: big sections split on paragraph/table boundaries with overlap, tiny
   ones are merged or dropped.
 
+The size thresholds and noise heuristics (`max_tokens`, `overlap_tokens`, `min_tokens`,
+`noise_ratio`, `extra_skip_titles`) are config, not constants — they're tuned for dense ML
+technical reports, and a differently-shaped paper list (surveys, shorter papers, non-ML
+PDFs) may need different numbers. See [`chunking`](configuration.md#️-chunking).
+
 A `Chunk` therefore stores both `text` (breadcrumb + body, what gets embedded) and `body`
 (shown to the reader). This is why citations can name the exact section.
 
@@ -76,13 +81,19 @@ A `Chunk` therefore stores both `text` (breadcrumb + body, what gets embedded) a
 
 `Searcher.search` (`src/rag/search.py`) is deliberately two-stage:
 
-1. **Dense recall.** Embed the query and pull `candidates` (default 20) nearest chunks from
-   Chroma by cosine similarity. Fast, high-recall, imprecise. Asymmetric embedders (e.g.
-   Gemini) embed the query differently from documents; symmetric ones don't.
+1. **Dense recall.** Embed the query and pull `candidates` (config `retrieval.candidates`,
+   default 20) nearest chunks from Chroma by cosine similarity. Fast, high-recall, imprecise.
+   Asymmetric embedders (e.g. Gemini) embed the query differently from documents; symmetric
+   ones don't.
 2. **Rerank.** A **reranker** rescores those candidates against the query and keeps the top
-   `k` (default 5). A cross-encoder reads query and passage together, so it is far more
+   `k` (config `retrieval.k`, default 5 — the agent lets the model request a different
+   `top_k` per call). A cross-encoder reads query and passage together, so it is far more
    precise than the bi-encoder recall — but too expensive to run over the whole corpus,
    which is exactly why it runs only on the candidate set.
+
+The reranker only adds precision when it has candidates to *discard*, so `retrieval.candidates`
+is a floor: when the model asks for a large `top_k`, the agent scales the recall pool to
+`4 × top_k`. A pool equal to `k` would reduce the second stage to reordering the first.
 
 Both stages are swappable via config through the **registry** pattern (see below). The
 reranker can even be the chat LLM (`reranker.type: llm`), scoring passages 0–10 in one
@@ -142,10 +153,11 @@ interpolation. See [Configuration](configuration.md).
 The full `Config` is the single decode target, but the ingestion core (`pipeline`, `ingest`,
 the server's `worker`) is typed to `IngestConfig` — a frozen, read-only *projection* of
 `Config` (`Config.for_ingest()`) exposing only the fields ingestion consumes (`paths`,
-`collection`, `embedding`, `tagging`, `papers`). It cannot express `server` / `reranker` /
-`llm.chat`, so the ingest/serve boundary is enforced by the type checker. There is
-deliberately **no** `ServeConfig`: serve uses the full `Config`, because `create_app` hosts
-the ingestion worker and therefore reads every field.
+`collection`, `embedding`, `tagging`, `chunking`, `extraction`, `tagger`, `papers`). It
+cannot express `server` / `reranker` / `retrieval` / `llm.chat`, so the ingest/serve
+boundary is enforced by the type checker. There is deliberately **no** `ServeConfig`: serve
+uses the full `Config`, because `create_app` hosts the ingestion worker and therefore reads
+every field.
 
 ## 🧱 Layering: `server` composes `rag`
 

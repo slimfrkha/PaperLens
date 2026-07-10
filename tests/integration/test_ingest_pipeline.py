@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from rag import pipeline
-from rag.config import Paper
+from rag.config import ChunkingCfg, Paper
 from rag.index import open_collection
 from rag.manifest import Manifest
 
@@ -36,9 +36,9 @@ def test_ingest_paper_populates_db_and_manifest(make_config, fake_embedder, monk
 
     # Stub the three external stages.
     monkeypatch.setattr(pipeline, "_download", _fake_download)
-    monkeypatch.setattr(pipeline, "pdf_to_markdown", lambda path: _MARKDOWN)
+    monkeypatch.setattr(pipeline, "pdf_to_markdown", lambda path, **kw: _MARKDOWN)
     monkeypatch.setattr(
-        pipeline, "generate_tags", lambda md, spec, existing_tags: ["moe", "attention"]
+        pipeline, "generate_tags", lambda md, spec, existing_tags, **kw: ["moe", "attention"]
     )
 
     stages: list[str] = []
@@ -67,7 +67,7 @@ def test_ingest_survives_tagging_failure(make_config, fake_embedder, monkeypatch
     collection = open_collection(cfg.paths.rag_db, cfg.collection)
 
     monkeypatch.setattr(pipeline, "_download", _fake_download)
-    monkeypatch.setattr(pipeline, "pdf_to_markdown", lambda path: _MARKDOWN)
+    monkeypatch.setattr(pipeline, "pdf_to_markdown", lambda path, **kw: _MARKDOWN)
 
     def _boom(*a, **k):
         raise RuntimeError("no tagging key")
@@ -92,8 +92,8 @@ def test_ingest_propagates_index_failure(make_config, fake_embedder, monkeypatch
     collection = open_collection(cfg.paths.rag_db, cfg.collection)
 
     monkeypatch.setattr(pipeline, "_download", _fake_download)
-    monkeypatch.setattr(pipeline, "pdf_to_markdown", lambda path: _MARKDOWN)
-    monkeypatch.setattr(pipeline, "generate_tags", lambda md, spec, existing_tags: ["moe"])
+    monkeypatch.setattr(pipeline, "pdf_to_markdown", lambda path, **kw: _MARKDOWN)
+    monkeypatch.setattr(pipeline, "generate_tags", lambda md, spec, existing_tags, **kw: ["moe"])
 
     def _boom(*a, **k):
         raise RuntimeError("index blew up")
@@ -105,3 +105,36 @@ def test_ingest_propagates_index_failure(make_config, fake_embedder, monkeypatch
             Paper(name="p", arxiv_id="1"), cfg.for_ingest(), fake_embedder, collection, manifest
         )
     assert not manifest.is_ingested("p")
+
+
+def test_chunking_config_reaches_chunk_markdown(make_config, fake_embedder, monkeypatch):
+    """The cfg.chunking -> index_markdown -> chunk_markdown forwarding chain.
+
+    Unit tests call chunk_markdown directly, so a kwarg dropped anywhere along
+    this chain would otherwise go unnoticed.
+    """
+    monkeypatch.setattr(pipeline, "_download", _fake_download)
+    monkeypatch.setattr(pipeline, "pdf_to_markdown", lambda path, **kw: _MARKDOWN)
+    monkeypatch.setattr(pipeline, "generate_tags", lambda md, spec, existing_tags, **kw: [])
+
+    def _ingest(chunking: ChunkingCfg | None) -> int:
+        cfg = make_config() if chunking is None else make_config(chunking=chunking)
+        manifest = Manifest(cfg.paths.rag_db)
+        collection = open_collection(
+            cfg.paths.rag_db, cfg.collection, embedder_name=fake_embedder.name(), reset=True
+        )
+        record = pipeline.ingest_paper(
+            Paper(name="deepseek-v3", arxiv_id="2412.19437"),
+            cfg.for_ingest(),
+            fake_embedder,
+            collection,
+            manifest,
+        )
+        return record["n_chunks"]
+
+    # Defaults: the short Abstract is dropped, "1 Architecture" survives.
+    assert _ingest(None) == 1
+    # min_tokens=1 keeps the Abstract too.
+    assert _ingest(ChunkingCfg(min_tokens=1)) == 2
+    # ...and an extra skip pattern drops the one section that was surviving.
+    assert _ingest(ChunkingCfg(extra_skip_titles=["architecture"])) == 0

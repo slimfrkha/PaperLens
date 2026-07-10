@@ -36,9 +36,10 @@ class Reranker(ABC):
 class CrossEncoderReranker(Reranker):
     """Local sentence-transformers cross-encoder (lazy: loads on first ``score``)."""
 
-    def __init__(self, model_name: str, device: str | None = None):
+    def __init__(self, model_name: str, device: str | None = None, max_length: int = 512):
         self.model_name = model_name
         self.device = device
+        self.max_length = max_length
         self._model = None
 
     @property
@@ -46,7 +47,9 @@ class CrossEncoderReranker(Reranker):
         if self._model is None:
             from sentence_transformers import CrossEncoder
 
-            self._model = CrossEncoder(self.model_name, device=self.device, max_length=512)
+            self._model = CrossEncoder(
+                self.model_name, device=self.device, max_length=self.max_length
+            )
         return self._model
 
     def score(self, query: str, docs: list[str]) -> list[float]:
@@ -116,12 +119,12 @@ def build_reranker(
     """Construct the reranker described by ``config.reranker`` (its variant)."""
     match cfg:
         case HFRerankerCfg():
-            return CrossEncoderReranker(cfg.model, device=device)
+            return CrossEncoderReranker(cfg.model, device=device, max_length=cfg.max_length)
         case LLMRerankerCfg():
             if llm is None:
                 raise ValueError(
                     "The 'llm' reranker needs an LLM; pass build_reranker(..., llm=...)."
                 )
-            return LLMReranker(llm)
+            return LLMReranker(llm, max_chars=cfg.max_chars)
         case _:
             raise ValueError(f"Unknown reranker config: {type(cfg).__name__}")

@@ -45,18 +45,21 @@ embedding:
   max_seq_length: 1024    # hf only; token cap guarding the MPS 2**32 tensor limit on Apple Silicon
 
 # --- Reranker: second retrieval stage, scores recalled chunks ---
-#   hf    model, enabled   (local cross-encoder)
-#   llm   enabled          (reuses the chat LLM — no extra model/deps)
+#   hf    model, enabled, max_length   (local cross-encoder)
+#   llm   enabled, max_chars           (reuses the chat LLM — no extra model/deps)
 reranker:
   type: hf                # hf | llm
   model: BAAI/bge-reranker-v2-m3  # cross-encoder model id (hf type only)
   enabled: true           # turn the whole rerank stage on/off
+  max_length: 512         # hf only; cross-encoder input token cap — raise if chunking.max_tokens grows
+  # max_chars: 600        # llm only (not valid on type: hf); per-passage excerpt sent to the judge LLM
 
 # --- LLMs: two specs (tagging + chat), each a tagged union on `type` ---
 #   tagging -> labels papers at ingestion (cheap + fast is fine)
 #   chat    -> powers the agentic-RAG loop; MUST support tool/function calling
 # `type` selects the provider variant; keys are per-type:
-#   common (all)                model, api_key_env, max_tokens (2048), temperature (0.0)
+#   common (all)     model, api_key_env, max_tokens (2048), temperature (0.0),
+#                     timeout (0.0 -> SDK default), max_retries (-1 -> SDK default)
 #   anthropic | gemini          (no api_base; api_key_env defaults ANTHROPIC_/GEMINI_API_KEY)
 #   openai | vllm | sglang      + api_base  (OpenAI wire format; local servers ignore the key)
 llm:
@@ -66,12 +69,42 @@ llm:
     api_key_env: ANTHROPIC_API_KEY
     max_tokens: 2048
     temperature: 0.0
+    timeout: 0.0            # seconds; 0 -> provider SDK default
+    max_retries: -1         # -1 -> provider SDK default
   chat:
     type: anthropic
     model: claude-opus-4-8
     api_key_env: ANTHROPIC_API_KEY
     max_tokens: 2048
     temperature: 0.0
+    timeout: 0.0            # seconds; 0 -> provider SDK default
+    max_retries: -1         # -1 -> provider SDK default
+
+# --- Chunking: corpus-dependent — the defaults are tuned for dense ML papers ---
+chunking:
+  max_tokens: 512          # target max tokens per chunk
+  overlap_tokens: 64       # overlap between sub-chunks of a large section
+  min_tokens: 24           # sections shorter than this are dropped (titles, stray captions)
+  noise_ratio: 0.4         # fraction of numeric/punctuation tokens that flags caption noise
+  extra_skip_titles: []    # extra case-insensitive regexes for section titles to always drop
+    # - "author contributions"
+
+# --- Extraction: PDF -> markdown via Docling ---
+extraction:
+  ocr_enabled: false       # turn on for scanned/no-text-layer PDFs (slower, extra model download)
+
+# --- Retrieval: the agentic search loop (the model can request a different top_k) ---
+retrieval:
+  k: 5                     # passages returned per search_papers call; must be <= candidates
+  candidates: 20           # dense-recall pool size handed to the reranker (floor; a larger
+                           # top_k scales the pool to 4x it, so the reranker can still discard)
+  max_rounds: 8            # ReAct search/answer cycles before the agent must answer
+
+# --- Tagging: how generate_tags shapes its LLM prompt (the model itself is llm.tagging) ---
+tagger:
+  max_tags: 12
+  min_tags: 5
+  max_excerpt_chars: 6000  # how much of the paper (title/abstract/headings) to tag from
 
 # --- Ingestion worker ---
 ingestion:

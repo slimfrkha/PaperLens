@@ -25,6 +25,7 @@ from __future__ import annotations
 from .chunking import Chunk, chunk_markdown
 from .config import (
     AnthropicSpec,
+    ChunkingCfg,
     Config,
     EmbeddingCfg,
     GeminiEmbeddingCfg,
@@ -64,6 +65,7 @@ from .tagger import generate_tags
 __all__ = [
     "AnthropicSpec",
     "Chunk",
+    "ChunkingCfg",
     "Config",
     "Embedder",
     "EmbeddingCfg",
