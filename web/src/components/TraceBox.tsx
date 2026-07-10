@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Badge, Box, Collapse, Group, Loader, Text, UnstyledButton } from "@mantine/core";
 import { IconChevron, IconSearch, IconSpark } from "./Icons";
 import type { TraceEntry } from "../api";
@@ -14,9 +14,13 @@ export default function TraceBox({
   streaming?: boolean;
 }) {
   const [open, setOpen] = useState<boolean>(!!streaming);
-  useEffect(() => {
+  // Adjust state during render (not in an effect) when `streaming` flips on —
+  // see https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes.
+  const [prevStreaming, setPrevStreaming] = useState(streaming);
+  if (streaming !== prevStreaming) {
+    setPrevStreaming(streaming);
     if (streaming) setOpen(true);
-  }, [streaming]);
+  }
 
   if (entries.length === 0) return null;
   const nActions = entries.filter((e) => e.type === "action").length;

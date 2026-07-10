@@ -35,6 +35,22 @@ Auto-fix the first two with `uv run ruff format src` and `uv run ruff check --fi
 commits to `main`. `ty` and `pytest` stay **out of the hooks** (CI only) so commits stay
 fast — you still run the full gate yourself before pushing.
 
+### Frontend gate
+
+`web/` has its own 4-command gate, identical locally and in CI:
+
+```bash
+npm --prefix web run format:check   # prettier --check
+npm --prefix web run lint           # eslint
+npm --prefix web run typecheck      # tsc --noEmit
+npm --prefix web run test           # vitest run
+```
+
+Auto-fix the first two with `npm --prefix web run format` and
+`npm --prefix web run lint -- --fix`. The `web-eslint --fix` / `web-prettier --write`
+pre-commit hooks run the fast, auto-fixing subset on every commit touching `web/`;
+`typecheck` and `test` stay CI-only, same rationale as `ty`/`pytest`.
+
 ## 🧱 Project layout
 
 ```text

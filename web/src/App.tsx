@@ -68,7 +68,12 @@ export default function App() {
           background: "color-mix(in srgb, var(--mantine-color-body) 82%, transparent)",
         }}
       >
-        <Group h="100%" px="xl" justify="space-between" style={{ maxWidth: 1180, margin: "0 auto" }}>
+        <Group
+          h="100%"
+          px="xl"
+          justify="space-between"
+          style={{ maxWidth: 1180, margin: "0 auto" }}
+        >
           <Group gap={9} align="center">
             <IconBook size={20} />
             <Text

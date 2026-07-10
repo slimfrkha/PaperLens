@@ -67,16 +67,27 @@ export default function ChatPage() {
     refreshSessions();
   }, []);
 
-  // Load the session named in the URL (restores conversation after navigation).
-  useEffect(() => {
+  // Reset turns/filters synchronously during render when the URL's chatId changes away
+  // from a chat — see https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes.
+  const [prevChatId, setPrevChatId] = useState(chatId);
+  if (chatId !== prevChatId) {
+    setPrevChatId(chatId);
     if (!chatId) {
       setTurns([]);
       setTags([]);
       setPapers([]);
-      loadedId.current = null;
-      return;
     }
-    if (loadedId.current === chatId) return; // already have it (e.g. just created)
+  }
+
+  // Refs may only be written outside of render (effects/handlers) — clear the
+  // "loaded" marker here, once the chatId-cleared render above has committed.
+  useEffect(() => {
+    if (!chatId) loadedId.current = null;
+  }, [chatId]);
+
+  // Load the session named in the URL (restores conversation after navigation).
+  useEffect(() => {
+    if (!chatId || loadedId.current === chatId) return; // already have it (e.g. just created)
     getChat(chatId)
       .then((s) => {
         setTurns(
@@ -85,7 +96,7 @@ export default function ChatPage() {
             content: m.content,
             citations: s.citations?.[i] ?? undefined,
             trace: s.traces?.[i] ?? undefined,
-          }))
+          })),
         );
         // Filters aren't persisted per chat; reset so a reopened chat never shows
         // another session's stale (and now locked) filter values.
@@ -192,7 +203,12 @@ export default function ChatPage() {
   );
 
   return (
-    <Group align="stretch" gap="lg" wrap="nowrap" style={{ minHeight: "calc(100vh - 60px - 3rem)" }}>
+    <Group
+      align="stretch"
+      gap="lg"
+      wrap="nowrap"
+      style={{ minHeight: "calc(100vh - 60px - 3rem)" }}
+    >
       {sidebarOpen && (
         <ChatSidebar
           sessions={sessions}
@@ -288,7 +304,7 @@ export default function ChatPage() {
                     </Group>
                   ) : null}
                 </Box>
-              )
+              ),
             )}
             <div ref={bottomRef} />
           </Stack>

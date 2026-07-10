@@ -51,7 +51,7 @@ function collapsedIndexOf(text: string, needle: string): number {
     needle
       .split(" ")
       .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-      .join("\\s+")
+      .join("\\s+"),
   );
   const m = re.exec(text);
   return m ? m.index : -1;
@@ -63,11 +63,20 @@ function rawLengthFor(text: string, start: number, approxLen: number): number {
   return Math.min(slice.length, approxLen * 3);
 }
 
+// TS's DOM lib types HighlightRegistry with only `forEach`, missing the set()/delete()
+// methods the CSS Custom Highlight API actually defines — fill the gap via declaration merging.
+declare global {
+  interface HighlightRegistry {
+    set(name: string, highlight: Highlight): HighlightRegistry;
+    delete(name: string): boolean;
+  }
+}
+
 export function highlightPassage(container: HTMLElement, snippet: string, sectionSlug?: string) {
-  const HL = (window as any).Highlight; // Highlight API not in older TS DOM libs
+  const HL = window.Highlight as typeof Highlight | undefined; // absent in older browsers
   const range = rangeFor(container, snippet);
-  if (range && HL && (CSS as any).highlights) {
-    (CSS as any).highlights.set("citation", new HL(range));
+  if (range && HL && CSS.highlights) {
+    CSS.highlights.set("citation", new HL(range));
     (range.startContainer.parentElement || container).scrollIntoView({
       behavior: "smooth",
       block: "center",
@@ -84,5 +93,5 @@ export function highlightPassage(container: HTMLElement, snippet: string, sectio
 }
 
 export function clearHighlight() {
-  if ((CSS as any).highlights) (CSS as any).highlights.delete("citation");
+  if (CSS.highlights) CSS.highlights.delete("citation");
 }

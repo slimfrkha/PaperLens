@@ -37,13 +37,19 @@ repos:
       - id: check-merge-conflict
       - id: check-added-large-files
 
-  # TODO(Phase 10): once web/ has `lint` + `format:check` npm scripts, add a local
-  # hook that runs them on staged web/** files (npm-based, not husky/lint-staged):
-  #   - repo: local
-  #     hooks:
-  #       - id: web-lint
-  #         name: web eslint
-  #         entry: npm --prefix web run lint
-  #         language: system
-  #         files: ^web/.*\.(ts|tsx|js|jsx)$
-  #         pass_filenames: false
+  # web/'s fast, auto-fixing subset — mirrors the ruff hooks above. typecheck + test
+  # stay CI-only, same rationale as ty/pytest.
+  - repo: local
+    hooks:
+      - id: web-eslint
+        name: web eslint --fix
+        entry: npm --prefix web run lint -- --fix
+        language: system
+        files: ^web/.*\.(ts|tsx|js|jsx)$
+        pass_filenames: false
+      - id: web-prettier
+        name: web prettier --write
+        entry: npm --prefix web run format
+        language: system
+        files: ^web/.*\.(ts|tsx|js|jsx|css|json|html)$
+        pass_filenames: false

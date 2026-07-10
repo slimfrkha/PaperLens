@@ -25,6 +25,19 @@ uv run pytest                    # tests
 Auto-fix the first two with `uv run ruff format src` / `uv run ruff check --fix src`.
 `pre-commit` runs the fast auto-fixing subset on commit; `ty` + `pytest` are yours to run.
 
+`web/` has its own 4-command gate, identical locally and in CI:
+
+```bash
+npm --prefix web run format:check   # prettier
+npm --prefix web run lint           # eslint
+npm --prefix web run typecheck      # tsc --noEmit
+npm --prefix web run test           # vitest
+```
+
+Auto-fix with `npm --prefix web run format` / `npm --prefix web run lint -- --fix`.
+`pre-commit` runs the fast auto-fixing subset on commits touching `web/`; `typecheck` +
+`test` are yours to run.
+
 ## 🏃 Common commands
 
 ```bash

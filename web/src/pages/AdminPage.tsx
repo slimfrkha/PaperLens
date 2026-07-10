@@ -20,7 +20,10 @@ export default function AdminPage() {
   const [status, setStatus] = useState<AdminStatus | null>(null);
 
   useEffect(() => {
-    const load = () => getStatus().then(setStatus).catch(() => {});
+    const load = () =>
+      getStatus()
+        .then(setStatus)
+        .catch(() => {});
     load();
     const iv = setInterval(load, 1500);
     return () => clearInterval(iv);
@@ -34,19 +37,13 @@ export default function AdminPage() {
     );
 
   const ing = status.ingestion;
-  const pct = ing.total
-    ? Math.round(((ing.done + (ing.current?.pct ?? 0)) / ing.total) * 100)
-    : 0;
+  const pct = ing.total ? Math.round(((ing.done + (ing.current?.pct ?? 0)) / ing.total) * 100) : 0;
 
   return (
     <Stack gap="lg">
       <Group justify="space-between">
         <Title order={2}>Admin</Title>
-        <Button
-          variant="default"
-          leftSection={<IconRescan size={16} />}
-          onClick={() => rescan()}
-        >
+        <Button variant="default" leftSection={<IconRescan size={16} />} onClick={() => rescan()}>
           Re-scan config
         </Button>
       </Group>
@@ -70,8 +67,8 @@ export default function AdminPage() {
         {ing.state === "running" && (
           <Stack gap={6} mt="sm">
             <Text size="sm" className="tnum">
-              {ing.current ? `${ing.current.name} — ${ing.current.stage}` : "starting…"} (
-              {ing.done}/{ing.total})
+              {ing.current ? `${ing.current.name} — ${ing.current.stage}` : "starting…"} ({ing.done}
+              /{ing.total})
             </Text>
             <Progress value={pct} color="accent" animated radius="xl" />
           </Stack>

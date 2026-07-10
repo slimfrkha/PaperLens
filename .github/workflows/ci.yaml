@@ -36,10 +36,8 @@ jobs:
       - name: pytest --cov
         run: uv run pytest --cov=rag --cov=server --cov-branch --cov-report=term-missing
 
-  # Frontend gate. The full gate (lint · typecheck · test · build) lands with Phase 10;
-  # until web/ has those npm scripts, CI runs what exists today: install + build
-  # (build already type-checks via `tsc -p tsconfig.json`). Uncomment the steps below
-  # as Phase 10 adds each script.
+  # Frontend gate — the same 4 commands run locally and in the web pre-commit hooks:
+  #   format:check · lint · typecheck · test
   web:
     runs-on: ubuntu-latest
     defaults:
@@ -50,20 +48,24 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: web/.nvmrc
           cache: npm
           cache-dependency-path: web/package-lock.json
 
       - name: Install
         run: npm ci
 
-      # TODO(Phase 10): enable once web/ has these npm scripts.
-      # - name: lint
-      #   run: npm run lint
-      # - name: typecheck
-      #   run: npm run typecheck
-      # - name: test
-      #   run: npm run test
+      - name: format:check
+        run: npm run format:check
+
+      - name: lint
+        run: npm run lint
+
+      - name: typecheck
+        run: npm run typecheck
+
+      - name: test
+        run: npm run test:cov
 
       - name: build
         run: npm run build

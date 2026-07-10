@@ -60,7 +60,7 @@ async function j<T>(r: Response): Promise<T> {
 export const getPapers = () => fetch("/api/papers").then(j<Paper[]>);
 export const getPaper = (id: string) =>
   fetch(`/api/papers/${encodeURIComponent(id)}`).then(
-    j<{ paper_id: string; title: string; tags: string[]; arxiv_id?: string; markdown: string }>
+    j<{ paper_id: string; title: string; tags: string[]; arxiv_id?: string; markdown: string }>,
   );
 export const getTags = () => fetch("/api/tags").then(j<TagCount[]>);
 export const getStatus = () => fetch("/api/admin/status").then(j<AdminStatus>);
@@ -96,7 +96,7 @@ export async function chat(
   tags: string[],
   papers: string[],
   chatId: string | null,
-  h: ChatHandlers
+  h: ChatHandlers,
 ): Promise<void> {
   const resp = await fetch("/api/chat", {
     method: "POST",

@@ -12,7 +12,7 @@ export default function Answer({ text, citations }: { text: string; citations: C
 
   // Rewrite [rN] into a markdown link (cite:rN) so it survives markdown parsing.
   const processed = text.replace(/\[(r\d+)\]/g, (m, ref) =>
-    byRef.has(ref) ? `[${ref}](cite:${ref})` : m
+    byRef.has(ref) ? `[${ref}](cite:${ref})` : m,
   );
 
   const components: Components = {

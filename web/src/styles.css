@@ -23,7 +23,9 @@ body,
 body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
-  font-feature-settings: "cv05" 1, "ss01" 1; /* Inter: refined a, single-story details */
+  font-feature-settings:
+    "cv05" 1,
+    "ss01" 1; /* Inter: refined a, single-story details */
 }
 
 /* Unobtrusive scrollbars that track the active scheme. */
@@ -154,7 +156,9 @@ body {
   color: var(--mantine-color-accent-light-color);
   background: var(--mantine-color-accent-light);
   text-decoration: none;
-  transition: background-color 120ms ease, color 120ms ease;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
 }
 .cite:hover {
   background: var(--mantine-color-accent-filled);
@@ -181,7 +185,9 @@ body {
   border: 1px solid var(--pl-border-strong);
   border-radius: 14px;
   background: var(--mantine-color-body);
-  transition: border-color 140ms ease, box-shadow 140ms ease;
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease;
 }
 .composer:focus-within {
   border-color: var(--mantine-color-accent-filled);
@@ -190,7 +196,10 @@ body {
 
 /* Paper cards + sidebar rows lift/tint on hover. */
 .paper-card {
-  transition: transform 130ms ease, box-shadow 130ms ease, border-color 130ms ease;
+  transition:
+    transform 130ms ease,
+    box-shadow 130ms ease,
+    border-color 130ms ease;
 }
 .paper-card:hover {
   transform: translateY(-2px);
