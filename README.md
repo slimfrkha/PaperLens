@@ -7,6 +7,8 @@ answers with **clickable citations** 📎 that jump to the exact passage. Browse
 full papers, and watch ingestion progress in an admin panel. Everything is driven
 by a single `config.yaml`. ⚙️
 
+> 🤖 This repo is **vibecoded with [Claude Code](https://claude.com/claude-code)**.
+
 ## 🛠️ How it works
 
 ```text
@@ -52,6 +54,14 @@ make install
 
 > 🔑 Provide LLM credentials in a `.env` (e.g. `ANTHROPIC_API_KEY=...`) if using a
 > cloud provider — local servers need no key.
+
+> ⚠️ **Running models locally? Check your hardware first.** The defaults load
+> `bge-m3` and `bge-reranker-v2-m3` onto your machine, and pointing `llm` at a local
+> server (LM Studio, Ollama, vLLM) loads a chat model on top of that. Make sure your
+> RAM/VRAM can hold everything you've chosen before you start — an oversized model
+> will swap, crawl, or get OOM-killed mid-ingestion. On Apple Silicon, also mind the
+> Metal per-tensor cap: keep `embedding.max_seq_length` at its default (1024). Pick
+> smaller models or use a cloud provider if your machine can't carry the load.
 
 ## 🚀 Quickstart
 
