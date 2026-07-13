@@ -30,6 +30,7 @@ import {
 } from "../api";
 import Answer from "../components/Answer";
 import ChatSidebar from "../components/ChatSidebar";
+import SourceCards from "../components/SourceCards";
 import TraceBox from "../components/TraceBox";
 
 interface Turn {
@@ -303,6 +304,7 @@ export default function ChatPage() {
                       </Text>
                     </Group>
                   ) : null}
+                  {!t.streaming && t.citations && <SourceCards citations={t.citations} />}
                 </Box>
               ),
             )}
