@@ -116,8 +116,9 @@ server hosts the worker, so it reads every field). Don't widen `IngestConfig` fo
   first `/api/chat` skips the 20-30s load while startup stays instant. Cloud clients are
   optional extras imported lazily — an OpenAI-compatible or cloud setup never pays for local
   model downloads.
-- **Config anchoring.** Every relative path in `config.yaml` resolves against the config
-  file's directory (the **project root**), so every entry point is CWD-independent.
+- **Config anchoring.** Every relative path in `config.yaml` resolves against the **project
+  root** — the nearest `pyproject.toml` ancestor of the config file — so a config in
+  `configs/` still writes data to the repo root, and every entry point is CWD-independent.
   Located by `--config_path` → `PAPERLENS_CONFIG` → upward search from CWD. Config is
   dataclasses decoded by `draccus` with OmegaConf `${...}` interpolation; `parse_config`
   adds per-field CLI overrides (`--server.port=…`) that feed interpolation.

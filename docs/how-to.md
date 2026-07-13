@@ -48,8 +48,12 @@ tagging model):
 uv run paperlens-ingest --retag
 ```
 
-✅ Verify: the printed tags per paper change, and the **Papers** page / tag filter reflect
-them.
+Both re-tagging and a normal ingest end with a **tag normalization** pass: the LLM sees the
+whole tag vocabulary and merges near-duplicates (e.g. `moe` → `mixture-of-experts`) across
+all papers, so the tag filter isn't fragmented by spelling variants.
+
+✅ Verify: the printed tags per paper change, the `X -> Y` merges are listed under
+`== Normalizing tags ==`, and the **Papers** page / tag filter reflect them.
 
 ---
 

@@ -16,7 +16,12 @@ from pathlib import Path
 from .config import IngestConfig, parse_config
 from .index import open_collection
 from .manifest import Manifest
-from .pipeline import build_embedder_from_config, ingest_paper, pending_papers
+from .pipeline import (
+    build_embedder_from_config,
+    ingest_paper,
+    normalize_manifest_tags,
+    pending_papers,
+)
 from .tagger import generate_tags
 
 
@@ -37,6 +42,17 @@ def retag(cfg: IngestConfig, manifest: Manifest) -> None:
         rec["tags"] = tags
         manifest.upsert(rec)
         print(f"  {rec['paper_id']}: {', '.join(tags) or '(none)'}")
+    _normalize_step(cfg, manifest)
+
+
+def _normalize_step(cfg: IngestConfig, manifest: Manifest) -> None:
+    """Consolidate near-duplicate tags across the library and report the merges."""
+    print("== Normalizing tags ==")
+    mapping = normalize_manifest_tags(cfg, manifest)
+    for src, dst in sorted(mapping.items()):
+        print(f"  {src} -> {dst}")
+    if not mapping:
+        print("  (no near-duplicates to merge)")
 
 
 def main() -> None:
@@ -73,6 +89,7 @@ def main() -> None:
         )
         print(f"   -> {rec['n_chunks']} chunks, tags: {', '.join(rec['tags']) or '(none)'}")
 
+    _normalize_step(cfg, manifest)
     print("\nDone.")
 
 

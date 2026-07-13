@@ -43,6 +43,20 @@ def test_relative_paths_anchored_to_config_dir(tmp_path):
     assert cfg.root == tmp_path.resolve()
 
 
+def test_relative_paths_anchored_to_pyproject_root_not_config_dir(tmp_path):
+    # The exact bug: config lives in configs/, a pyproject.toml marks the real
+    # root above it. Relative paths must anchor to the root, not to configs/.
+    (tmp_path / "pyproject.toml").write_text("[project]\n")
+    cfgdir = tmp_path / "configs"
+    cfgdir.mkdir()
+    p = cfgdir / "config.yaml"
+    p.write_text(_YAML)
+
+    cfg = load_config(str(p))
+    assert cfg.root == tmp_path.resolve()  # NOT tmp_path/configs
+    assert cfg.paths.rag_db == str((tmp_path / "data/db").resolve())
+
+
 def test_absolute_paths_left_untouched(tmp_path):
     cfg = load_config(str(_write_config(tmp_path)))
     assert cfg.paths.pdf_dir == "/tmp/abs_pdfs"

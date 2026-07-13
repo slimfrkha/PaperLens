@@ -37,6 +37,21 @@ def test_all_tags_counts_and_ordering(tmp_path):
     assert tags == [{"tag": "moe", "count": 2}, {"tag": "rl", "count": 1}]
 
 
+def test_discriminating_tags_drops_universal(tmp_path):
+    m = Manifest(str(tmp_path))
+    m.upsert(_rec("a", ["llm", "moe"]))
+    m.upsert(_rec("b", ["llm", "rl"]))
+    # "llm" is on every paper -> useless as a filter -> dropped.
+    assert m.discriminating_tags() == [{"tag": "moe", "count": 1}, {"tag": "rl", "count": 1}]
+
+
+def test_discriminating_tags_keeps_all_for_single_paper(tmp_path):
+    m = Manifest(str(tmp_path))
+    m.upsert(_rec("a", ["llm", "moe"]))
+    # Every tag is trivially universal with one paper; don't hide them all.
+    assert m.discriminating_tags() == m.all_tags()
+
+
 def test_paper_ids_for_tags_is_or_semantics(tmp_path):
     m = Manifest(str(tmp_path))
     m.upsert(_rec("a", ["moe"]))

@@ -99,7 +99,7 @@ def create_app(cfg: Config) -> FastAPI:
 
     @app.get("/api/tags")
     def list_tags():
-        return manifest.all_tags()
+        return manifest.discriminating_tags()
 
     @app.get("/api/admin/status")
     def admin_status():

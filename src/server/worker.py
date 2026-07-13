@@ -14,7 +14,12 @@ from typing import Any
 from rag.config import IngestConfig
 from rag.index import open_collection
 from rag.manifest import Manifest
-from rag.pipeline import build_embedder_from_config, ingest_paper, pending_papers
+from rag.pipeline import (
+    build_embedder_from_config,
+    ingest_paper,
+    normalize_manifest_tags,
+    pending_papers,
+)
 
 
 class IngestionWorker:
@@ -85,6 +90,11 @@ class IngestionWorker:
                 except Exception as e:
                     self._error(paper.name, str(e))
                 self._set(done=i + 1)
+
+            # Consolidate near-duplicate tags across the library once, after all
+            # pending papers are tagged.
+            self._set(current={"name": "library", "stage": "normalize", "pct": 0.0})
+            normalize_manifest_tags(self.cfg, self.manifest)
 
             self._set(state="idle", current=None)
         except Exception:

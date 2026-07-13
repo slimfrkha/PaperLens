@@ -31,11 +31,16 @@ def _excerpt(md: str, max_chars: int = 6000) -> str:
     return body[:max_chars]
 
 
+def _canon(t: str) -> str:
+    """Lowercase, kebab-case a single tag."""
+    return re.sub(r"[^a-z0-9]+", "-", str(t).lower()).strip("-")
+
+
 def _normalize(tags: list[str], max_tags: int) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for t in tags:
-        t = re.sub(r"[^a-z0-9]+", "-", str(t).lower()).strip("-")
+        t = _canon(t)
         if t and t not in seen:
             seen.add(t)
             out.append(t)
@@ -72,3 +77,53 @@ def generate_tags(
     )
     raw = build_llm(spec).complete(system=_SYSTEM, user=prompt)
     return _normalize(_parse(raw), max_tags)
+
+
+_NORMALIZE_SYSTEM = (
+    "You curate a controlled vocabulary of topical tags for a machine-learning "
+    "paper search index. You merge only tags that name the SAME concept — spelling "
+    "variants, acronym vs expansion, near-synonyms. You never merge tags that name "
+    "distinct techniques."
+)
+
+
+def _parse_map(text: str, valid: set[str]) -> dict[str, str]:
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if not m:
+        return {}
+    try:
+        obj = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(obj, dict):
+        return {}
+    out: dict[str, str] = {}
+    for k, v in obj.items():
+        src, dst = _canon(str(k)), _canon(str(v))
+        # Keep only real remaps: a known tag mapped to a different canonical form.
+        if src in valid and dst and src != dst:
+            out[src] = dst
+    return out
+
+
+def normalize_tags(tags: list[str], spec: LLMSpec) -> dict[str, str]:
+    """Ask the LLM for a ``{tag -> canonical}`` map that merges only near-duplicates.
+
+    Returns only the tags that should change; any tag absent from the map keeps its
+    current form. Empty on empty input or an unparsable reply, so callers leave the
+    vocabulary untouched rather than corrupt it.
+    """
+    if not tags:
+        return {}
+    listing = "\n".join(f"- {t}" for t in tags)
+    prompt = (
+        f"Full tag vocabulary of the library:\n{listing}\n\n"
+        "Some of these name the same concept in different words. Pick one canonical "
+        "form per concept — prefer the clearest, most widely-used term already in the "
+        "list — and map the near-duplicates onto it. Keep distinct techniques separate; "
+        "never merge tags that mean different things.\n\n"
+        "Return ONLY a JSON object mapping each tag that should change to its canonical "
+        "form (omit tags that stay as they are)."
+    )
+    raw = build_llm(spec).complete(system=_NORMALIZE_SYSTEM, user=prompt)
+    return _parse_map(raw, valid={_canon(t) for t in tags})

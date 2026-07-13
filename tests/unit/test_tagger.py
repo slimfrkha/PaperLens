@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from rag import tagger
 from rag.config import AnthropicSpec
-from rag.tagger import _excerpt, _normalize, _parse, generate_tags
+from rag.tagger import _excerpt, _normalize, _parse, _parse_map, generate_tags
 
 
 def test_parse_json_array():
@@ -58,3 +58,35 @@ def test_generate_tags_honors_min_tags_and_excerpt_chars(monkeypatch):
     assert "3-8 lowercase kebab-case tags" in prompts[0]
     # The excerpt itself (not the whole prompt) is capped to max_excerpt_chars.
     assert "x" * 100 not in prompts[0]
+
+
+def test_parse_map_keeps_real_remaps_and_canonicalizes_values():
+    # Identity ("rl"->"rl") and unknown source ("ghost") dropped; value kebab-cased.
+    m = _parse_map(
+        '{"moe": "mixture-of-experts", "rl": "rl", "ghost": "x", "cot": "Chain Of Thought"}',
+        valid={"moe", "rl", "cot"},
+    )
+    assert m == {"moe": "mixture-of-experts", "cot": "chain-of-thought"}
+
+
+def test_parse_map_empty_on_non_object():
+    assert _parse_map("no json here", valid={"moe"}) == {}
+    assert _parse_map('["moe", "rl"]', valid={"moe"}) == {}
+
+
+def test_normalize_tags_uses_llm_over_the_vocabulary(monkeypatch):
+    class _Fake:
+        def complete(self, system, user, max_tokens=None):
+            return '{"moe": "mixture-of-experts"}'
+
+    monkeypatch.setattr(tagger, "build_llm", lambda spec: _Fake())
+    m = tagger.normalize_tags(["moe", "mixture-of-experts", "rl"], AnthropicSpec())
+    assert m == {"moe": "mixture-of-experts"}
+
+
+def test_normalize_tags_empty_input_skips_llm(monkeypatch):
+    def _boom(spec):
+        raise AssertionError("must not build an LLM for an empty vocabulary")
+
+    monkeypatch.setattr(tagger, "build_llm", _boom)
+    assert tagger.normalize_tags([], AnthropicSpec()) == {}

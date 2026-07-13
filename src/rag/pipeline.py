@@ -21,7 +21,7 @@ from .config import IngestConfig, Paper
 from .extract import pdf_to_markdown
 from .index import index_markdown
 from .manifest import Manifest
-from .tagger import generate_tags
+from .tagger import generate_tags, normalize_tags
 
 ARXIV_PDF = "https://arxiv.org/pdf/{id}"
 
@@ -134,3 +134,27 @@ def ingest_paper(
     manifest.upsert(record)
     stage("done", 1.0)
     return record
+
+
+def normalize_manifest_tags(cfg: IngestConfig, manifest: Manifest) -> dict[str, str]:
+    """Consolidate near-duplicate tags across the whole library, in place.
+
+    Builds one LLM-generated ``{tag -> canonical}`` map over the full vocabulary and
+    rewrites every paper's tags through it (de-duplicating, order preserved). A no-op
+    when nothing merges or tagging is unavailable — never wipes existing tags.
+    """
+    vocab = [t["tag"] for t in manifest.all_tags()]
+    try:
+        mapping = normalize_tags(vocab, cfg.tagging)
+    except Exception as e:  # tagging needs an API key; degrade gracefully
+        print(f"  [warn] tag normalization skipped: {e}")
+        return {}
+    if not mapping:
+        return {}
+    for rec in manifest.papers():
+        tags = rec.get("tags", [])
+        merged = list(dict.fromkeys(mapping.get(t, t) for t in tags))
+        if merged != tags:
+            rec["tags"] = merged
+            manifest.upsert(rec)
+    return mapping

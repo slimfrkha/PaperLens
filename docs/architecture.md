@@ -56,6 +56,14 @@ chunk metadata, so neither needs the other's output; they meet at the manifest w
 compute-bound embedder and the I/O-bound LLM call overlap for free. (This is also why
 `--retag` can regenerate tags without re-indexing.)
 
+After the per-paper loop finishes, a single library-level **tag normalization** pass runs
+(`normalize_manifest_tags`): it shows the LLM the whole tag vocabulary, gets back a
+`{tag -> canonical}` map that merges only near-duplicates (spelling variants, acronym vs
+expansion), and rewrites every paper's tags through it. Per-paper tagging still coins tags
+in isolation; this pass consolidates the vocabulary across papers. It degrades to a no-op
+if the map is empty or tagging is unavailable — it never wipes existing tags. Both the CLI
+and the worker run it after ingesting, and `--retag` runs it after regeneration.
+
 ### ✂️ Section-aware chunking
 
 The interesting design choice is chunking (`src/rag/chunking.py`). Docling flattens every
@@ -185,7 +193,9 @@ is documented in `src/rag/__init__.py`. Keeping it acyclic is a maintained invar
   dummy search) so the first `/api/chat` doesn't pay the 20-30s load; startup itself stays
   instant. Cloud clients are optional extras imported lazily — so an OpenAI-compatible or
   cloud setup never pays for local model downloads it won't use.
-- **Config anchoring.** All relative paths resolve against the `config.yaml` directory, so
-  every entry point is CWD-independent.
+- **Config anchoring.** All relative paths resolve against the **project root** — the
+  nearest `pyproject.toml` ancestor of the config file — so `data_path: data` lands at the
+  repo root even when the config lives in `configs/`, and every entry point is
+  CWD-independent.
 - **SSE streaming.** `/api/chat` streams tokens and trace steps over Server-Sent Events, so
   the UI renders the answer and the Thought → Action → Observation trace as they happen.

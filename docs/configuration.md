@@ -21,9 +21,10 @@ Configs live under [`configs/`](../configs/); the default run config is
 bare command with no `--config_path`/`PAPERLENS_CONFIG` falls back to the code defaults). The
 `make` targets pass it for you and take `CONFIG=` to override.
 
-The directory containing the resolved config file is the **project root**. Every relative
-path in the file is anchored to it, so commands work from any working directory. Absolute
-paths are used as-is.
+The **project root** — the nearest `pyproject.toml` ancestor of the resolved config file —
+is what every relative path in the file is anchored to, so commands work from any working
+directory and a config kept in `configs/` still writes data to the repo root (not
+`configs/data`). Absolute paths are used as-is.
 
 ### 🔧 Interpolation & CLI overrides
 
@@ -242,7 +243,7 @@ Served under `/api`; any other path falls through to the SPA.
 |---|---|---|
 | GET | `/api/papers` | List ingested papers with tags. |
 | GET | `/api/papers/{paper_id}` | One paper's full markdown. |
-| GET | `/api/tags` | All tags with paper counts. |
+| GET | `/api/tags` | Tags with paper counts, excluding any tag present on every paper (no filtering value). |
 | GET | `/api/admin/status` | Paper/chunk counts, pending papers, ingestion progress. |
 | POST | `/api/admin/rescan` | Re-scan `config.yaml` and ingest new papers. |
 | GET | `/api/chats` | List chat sessions. |

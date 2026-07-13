@@ -183,10 +183,12 @@ The four commands that define "done", identical locally and in CI:
 
 ### 🌱 Config / project root
 
-`config.yaml` is the single source of truth. Its directory is the **project root**, and
-every relative path in it is anchored there, so commands work from any working directory.
-Located by: explicit `--config_path` → `PAPERLENS_CONFIG` env → upward search from the CWD.
+`config.yaml` is the single source of truth. The **project root** is the nearest
+`pyproject.toml` ancestor of the config file, and every relative path in the config is
+anchored there — so a config in `configs/` still writes to the repo root, and commands work
+from any working directory. Located by: explicit `--config_path` → `PAPERLENS_CONFIG` env →
+upward search from the CWD.
 
-- Code: `load_config` in `src/rag/config.py`.
-- `_Avoid_:` settings, config dir, working dir (the root is the config file's directory,
-  not necessarily the CWD).
+- Code: `load_config` / `_project_root` in `src/rag/config.py`.
+- `_Avoid_:` settings, config dir, working dir (the root is the pyproject.toml ancestor, not
+  necessarily the CWD or the config file's own directory).

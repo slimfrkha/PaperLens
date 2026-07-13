@@ -49,6 +49,19 @@ class Manifest:
             key=lambda x: (-x["count"], x["tag"]),
         )
 
+    def discriminating_tags(self) -> list[dict]:
+        """Tags useful as a filter: those *not* present on every paper.
+
+        A tag shared by all papers can't narrow a search, so it's hidden from the
+        user-facing list. With a single paper — where every tag is trivially
+        universal — nothing is dropped.
+        """
+        n = len(self._load())
+        tags = self.all_tags()
+        if n <= 1:
+            return tags
+        return [t for t in tags if t["count"] < n]
+
     def paper_ids_for_tags(self, tags: list[str]) -> list[str]:
         """Paper ids tagged with ANY of the given tags (OR semantics)."""
         wanted = set(tags)

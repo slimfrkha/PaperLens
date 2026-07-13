@@ -278,8 +278,9 @@ class Config:
     ingestion: IngestionCfg = field(default_factory=IngestionCfg)
     server: ServerCfg = field(default_factory=ServerCfg)
     papers: list[Paper] = field(default_factory=list)
-    # Resolved project root (directory of the loaded config.yaml). Set by the
-    # loader, not read from YAML; init=False keeps it off the CLI and decode input.
+    # Resolved project root (nearest pyproject.toml ancestor of the config file).
+    # Set by the loader, not read from YAML; init=False keeps it off the CLI and
+    # decode input.
     root: Path = field(default_factory=Path.cwd, init=False)
 
     def for_ingest(self) -> IngestConfig:
@@ -331,10 +332,28 @@ def _resolve(data: dict) -> dict:
     return resolved
 
 
+def _project_root(cfg_path: Path) -> Path:
+    """The repo root that relative config paths anchor to: the nearest ancestor
+    containing ``pyproject.toml``.
+
+    This decouples the data location from where the config file happens to live
+    (e.g. ``configs/``), so ``data_path: data`` always lands at the repo root
+    regardless of launch method. ``cfg_path`` may be a config file, a directory
+    (the CWD fallback), or a not-yet-existing path; falls back to a sensible start
+    directory when no ``pyproject.toml`` marker is found upward.
+    """
+    p = cfg_path.resolve()
+    start = p.parent if p.is_file() else p if p.is_dir() else Path.cwd().resolve()
+    for d in (start, *start.parents):
+        if (d / "pyproject.toml").exists():
+            return d
+    return start
+
+
 def _anchor(cfg: Config, cfg_path: Path) -> Config:
-    """Anchor every relative path to the config file's directory (project root);
-    absolute paths are left untouched. Also records ``cfg.root``."""
-    cfg.root = cfg_path.resolve().parent if cfg_path.exists() else Path.cwd()
+    """Anchor every relative path to the project root (nearest ``pyproject.toml``
+    ancestor); absolute paths are left untouched. Also records ``cfg.root``."""
+    cfg.root = _project_root(cfg_path)
     for name in _PATH_FIELDS:
         p = Path(getattr(cfg.paths, name))
         if not p.is_absolute():
