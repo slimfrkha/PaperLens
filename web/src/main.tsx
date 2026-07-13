@@ -6,13 +6,16 @@ import "@mantine/core/styles.css";
 import "katex/dist/katex.min.css";
 import "./styles.css";
 import App from "./App";
+import ErrorBoundary from "./components/ErrorBoundary";
 import { theme } from "./theme";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <MantineProvider theme={theme} defaultColorScheme="auto">
       <BrowserRouter>
-        <App />
+        <ErrorBoundary>
+          <App />
+        </ErrorBoundary>
       </BrowserRouter>
     </MantineProvider>
   </React.StrictMode>,

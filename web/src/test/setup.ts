@@ -19,3 +19,10 @@ Object.defineProperty(window, "matchMedia", {
     dispatchEvent: vi.fn(),
   }),
 });
+
+// jsdom lacks ResizeObserver; Mantine's ScrollArea reads it. (Mantine's documented test shim.)
+window.ResizeObserver = class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+};

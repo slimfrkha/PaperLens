@@ -108,7 +108,12 @@ export default function ChatPage() {
       .catch(() => setTurns([]));
   }, [chatId]);
 
-  useEffect(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), [turns]);
+  // Block body (not a concise arrow): some smooth-scroll polyfills / browser
+  // extensions make scrollIntoView return a Promise, and a concise body would
+  // leak that as the effect's cleanup → "destroy is not a function" on unmount.
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [turns]);
 
   const patchLast = (fn: (t: Turn) => Turn) =>
     setTurns((prev) => {
