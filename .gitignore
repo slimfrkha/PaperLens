@@ -214,6 +214,7 @@ tempCodeRunnerFile.py
 # Runtime data: downloaded PDFs, extracted markdown, Chroma vector DB + manifest,
 # and chat history — all regenerable via `paperlens-ingest`.
 data/
+evals/
 
 # Frontend
 web/node_modules/

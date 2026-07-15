@@ -36,12 +36,13 @@ all = ["paperlens[anthropic,gemini]"]
 [project.scripts]
 paperlens-serve = "server.main:main"
 paperlens-ingest = "rag.ingest:main"
+paperlens-eval = "eval.cli:main"
 
 [dependency-groups]
 dev = ["ruff", "ty", "pytest", "pytest-cov", "pre-commit"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/rag", "src/server"]
+packages = ["src/rag", "src/server", "src/eval"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -49,7 +50,7 @@ addopts = "--import-mode=importlib"
 
 [tool.coverage.run]
 branch = true
-source = ["rag", "server"]
+source = ["rag", "server", "eval"]
 
 [tool.ruff]
 src = ["src"]
