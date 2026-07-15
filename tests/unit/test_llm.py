@@ -129,6 +129,50 @@ def test_gemini_client_built_lazily(monkeypatch):
     assert client is not None
 
 
+def test_client_built_once_and_reused(monkeypatch):
+    # Regression: a fresh SDK client per call leaks httpx sockets/fds and blows the
+    # open-file limit under a high-volume caller (eval harness: one call per section).
+    pytest.importorskip("anthropic")
+    import anthropic
+
+    builds = {"n": 0}
+
+    def _fake(**kw):
+        builds["n"] += 1
+        return SimpleNamespace(kw=kw)
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    monkeypatch.setattr(anthropic, "Anthropic", _fake)
+
+    backend = AnthropicBackend(AnthropicSpec())
+    first = backend._client()
+    for _ in range(20):
+        backend._client()
+    assert builds["n"] == 1  # built once, not 21 times
+    assert backend._client() is first
+
+
+def test_openai_client_built_once_and_reused(monkeypatch):
+    # The path the eval harness actually exercised (local OpenAI-compatible server).
+    pytest.importorskip("openai")
+    import openai
+
+    builds = {"n": 0}
+
+    def _fake(**kw):
+        builds["n"] += 1
+        return SimpleNamespace(kw=kw)
+
+    monkeypatch.setattr(openai, "OpenAI", _fake)
+
+    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
+    first = backend._client()
+    for _ in range(20):
+        backend._client()
+    assert builds["n"] == 1
+    assert backend._client() is first
+
+
 # ---- timeout / max_retries: 0 / -1 sentinels omit the kwarg (SDK default) ---
 
 

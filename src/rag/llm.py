@@ -19,6 +19,7 @@ import json
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from typing import Any
 
 from .config import AnthropicSpec, GeminiSpec, LLMSpec, OpenAISpec, SGLangSpec, VLLMSpec
 
@@ -47,6 +48,11 @@ class LLMBackend(ABC):
 
     def __init__(self, spec: LLMSpec):
         self.spec = spec
+        # Build the SDK client once and reuse it: each client holds an httpx
+        # connection pool (open sockets/fds), so constructing one per call leaks
+        # descriptors and eventually raises OSError [too many open files] under a
+        # high-volume caller like the eval harness (one call per section).
+        self._client_cache: Any = None
 
     @abstractmethod
     def complete(self, system: str, user: str, max_tokens: int | None = None) -> str: ...
@@ -68,6 +74,8 @@ class AnthropicBackend(LLMBackend):
     """Anthropic Messages API (tool_use / tool_result blocks, streaming)."""
 
     def _client(self):
+        if self._client_cache is not None:
+            return self._client_cache
         from anthropic import Anthropic
 
         kwargs: dict = {"api_key": _api_key(self.spec)}
@@ -75,7 +83,8 @@ class AnthropicBackend(LLMBackend):
             kwargs["timeout"] = self.spec.timeout
         if self.spec.max_retries >= 0:
             kwargs["max_retries"] = self.spec.max_retries
-        return Anthropic(**kwargs)
+        self._client_cache = Anthropic(**kwargs)
+        return self._client_cache
 
     def complete(self, system, user, max_tokens=None):
         msg = self._client().messages.create(
@@ -145,6 +154,8 @@ class OpenAICompatBackend(LLMBackend):
     spec: OpenAISpec  # always built from an OpenAISpec variant (api_base, ...)
 
     def _client(self):
+        if self._client_cache is not None:
+            return self._client_cache
         from openai import OpenAI
 
         kwargs: dict = {
@@ -155,7 +166,8 @@ class OpenAICompatBackend(LLMBackend):
             kwargs["timeout"] = self.spec.timeout
         if self.spec.max_retries >= 0:
             kwargs["max_retries"] = self.spec.max_retries
-        return OpenAI(**kwargs)
+        self._client_cache = OpenAI(**kwargs)
+        return self._client_cache
 
     def complete(self, system, user, max_tokens=None):
         resp = self._client().chat.completions.create(
@@ -320,6 +332,8 @@ class GeminiBackend(LLMBackend):
     """
 
     def _client(self):
+        if self._client_cache is not None:
+            return self._client_cache
         from google import genai
         from google.genai import types
 
@@ -333,7 +347,8 @@ class GeminiBackend(LLMBackend):
                 timeout=int(self.spec.timeout * 1000) if self.spec.timeout > 0 else None,
                 retry_options=retry_options,
             )
-        return genai.Client(api_key=_api_key(self.spec), http_options=http_options)
+        self._client_cache = genai.Client(api_key=_api_key(self.spec), http_options=http_options)
+        return self._client_cache
 
     def complete(self, system, user, max_tokens=None):
         from google.genai import types
