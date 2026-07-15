@@ -14,13 +14,13 @@ by a single `config.yaml`. ⚙️
 ```text
 config.yaml ─┬─> ingestion worker: download → markdown (Docling) → index (Chroma) ‖ LLM tags
              └─> FastAPI backend ── agentic RAG ──> LLM (Claude | any OpenAI-compatible server)
-                       │  tool: search_papers → Searcher (bge-m3 + bge-reranker-v2-m3)
+                       │  tool: search_papers → Searcher (embedder + reranker)
                        └─> React + Vite + Mantine UI: Chat · Papers · Admin
 ```
 
 - ✂️ **Chunking** is section-aware with hierarchical breadcrumbs rebuilt from the
   paper's section numbering (`src/rag/chunking.py`).
-- 🎯 **Retrieval** is two-stage: dense `bge-m3` + `bge-reranker-v2-m3` cross-encoder
+- 🎯 **Retrieval** is two-stage: dense embedding recall + a cross-encoder reranker
   (`src/rag/search.py`). Both stages are config-swappable — the embedder
   (`embedding.type`: `hf` · `openai` · `gemini` · `ollama`) and the reranker
   (`reranker.type`: `hf` cross-encoder · `llm`, which reuses the chat model).
@@ -55,8 +55,8 @@ make install
 > 🔑 Provide LLM credentials in a `.env` (e.g. `ANTHROPIC_API_KEY=...`) if using a
 > cloud provider — local servers need no key.
 
-> ⚠️ **Running models locally? Check your hardware first.** The defaults load
-> `bge-m3` and `bge-reranker-v2-m3` onto your machine, and pointing `llm` at a local
+> ⚠️ **Running models locally? Check your hardware first.** The default embedder and
+> reranker load onto your machine, and pointing `llm` at a local
 > server (LM Studio, Ollama, vLLM) loads a chat model on top of that. Make sure your
 > RAM/VRAM can hold everything you've chosen before you start — an oversized model
 > will swap, crawl, or get OOM-killed mid-ingestion. On Apple Silicon, also mind the
