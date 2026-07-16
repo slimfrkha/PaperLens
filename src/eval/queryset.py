@@ -60,6 +60,12 @@ class QAItem:
     paper_id: str
     gold_span: tuple[int, int]
     source_unit: str  # section number + title the question was generated from
+    # Section identity of the gold: scoring matches a retrieved chunk as relevant iff it
+    # carries this same (paper_id, section_number, section_title). Config-independent (the
+    # `##` split ignores chunking knobs), so it keeps arms comparable. `section_number` is
+    # "" (not None) to mirror how `rag.index` stores it in chunk metadata.
+    section_number: str = ""
+    section_title: str = ""
     stratum: str = "section"
     answer: str = ""  # kept for reference / optional closed-book genfilter (Phase 7)
 
@@ -163,6 +169,8 @@ def iter_queryset(pool: dict[str, str], llm: LLMBackend, gen: GenConfig) -> Iter
                 paper_id=paper_id,
                 gold_span=(sec.start, sec.end),
                 source_unit=_section_unit(sec),
+                section_number=sec.number or "",
+                section_title=sec.title,
                 answer=str(obj.get("answer", "")).strip(),
             )
         print(f"  [{i}/{len(pool)}] {paper_id}: {n} questions")
@@ -199,3 +207,36 @@ def item_to_dict(it: QAItem) -> dict:
     d = asdict(it)
     d["gold_span"] = list(it.gold_span)  # tuple -> list for JSON round-trip stability
     return d
+
+
+def load_queryset(path: str) -> list[QAItem]:
+    """Read a ``.jsonl`` eval split back into ``QAItem``s.
+
+    Raises with a regenerate hint if the file predates the section-identity fields
+    (``gen`` before Phase 2), since scoring needs them to match retrieved chunks.
+    """
+    items: list[QAItem] = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            d = json.loads(line)
+            if "section_title" not in d:
+                raise SystemExit(
+                    f"{path} predates the section-identity fields — regenerate the eval "
+                    f"set with `paperlens-eval gen`."
+                )
+            items.append(
+                QAItem(
+                    query=d["query"],
+                    paper_id=d["paper_id"],
+                    gold_span=(d["gold_span"][0], d["gold_span"][1]),
+                    source_unit=d["source_unit"],
+                    section_number=d.get("section_number", ""),
+                    section_title=d["section_title"],
+                    stratum=d.get("stratum", "section"),
+                    answer=d.get("answer", ""),
+                )
+            )
+    return items
