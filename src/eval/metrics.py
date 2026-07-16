@@ -41,6 +41,7 @@ class QueryScore:
     candidate_ids: list[str]
     ranked: list[tuple[str, float]] = field(default_factory=list)
     relevant_ids: set[str] = field(default_factory=set)
+    paper_id: str = ""  # cluster key for the paper-clustered bootstrap (stats.py)
 
     @property
     def goldable(self) -> bool:
@@ -84,6 +85,19 @@ def success_at_candidates(scores: list[QueryScore]) -> float:
     return sum(s.gold_in_pool for s in goldable) / len(goldable)
 
 
+def reciprocal_rank(score: QueryScore, k: int) -> float:
+    """Reciprocal rank of the gold section's first chunk in the reranked top-k (0.0 if absent).
+
+    The single source of truth for the rank term, shared by :func:`mrr_at_k` and the
+    per-query decomposition the bootstrap resamples (``stats.mrr_samples``) — they must
+    report the same quantity, so they must not compute it twice.
+    """
+    rank = next(
+        (i + 1 for i, (cid, _) in enumerate(score.ranked[:k]) if cid in score.relevant_ids), None
+    )
+    return 1.0 / rank if rank else 0.0
+
+
 def mrr_at_k(scores: list[QueryScore], k: int) -> float:
     """Stage-2 ``MRR@k``: reciprocal rank of the gold section's first chunk in the reranked
     top-k, averaged over questions whose gold section reached the pool (:func:`n_conditioned`).
@@ -91,14 +105,7 @@ def mrr_at_k(scores: list[QueryScore], k: int) -> float:
     One relevant unit (the section), so the count of chunks it split into cannot move the
     score — the property a chunking sweep needs. Returns 0.0 if no question qualifies.
     """
-    rr: list[float] = []
-    for s in scores:
-        if not s.gold_in_pool:
-            continue
-        rank = next(
-            (i + 1 for i, (cid, _) in enumerate(s.ranked[:k]) if cid in s.relevant_ids), None
-        )
-        rr.append(1.0 / rank if rank else 0.0)
+    rr = [reciprocal_rank(s, k) for s in scores if s.gold_in_pool]
     return sum(rr) / len(rr) if rr else 0.0
 
 

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from .fingerprint import corpus_fingerprint, load_pool
 from .harness import RunReport, run
-from .metrics import QueryScore, mrr_at_k, relevant_ids, success_at_candidates
+from .metrics import QueryScore, mrr_at_k, reciprocal_rank, relevant_ids, success_at_candidates
 from .queryset import (
     GenConfig,
     QAItem,
@@ -28,22 +28,43 @@ from .queryset import (
     load_queryset,
     split_by_paper,
 )
+from .stats import (
+    BootResult,
+    DeltaResult,
+    Sample,
+    cluster_bootstrap,
+    mdd,
+    mrr_samples,
+    paired_delta,
+    resolution_warning,
+    success_samples,
+)
 
 __all__ = [
+    "BootResult",
+    "DeltaResult",
     "GenConfig",
     "QAItem",
     "QueryScore",
     "RunReport",
+    "Sample",
     "build_queryset",
+    "cluster_bootstrap",
     "corpus_fingerprint",
     "held_out_paper_ids",
     "iter_queryset",
     "iter_sections",
     "load_pool",
     "load_queryset",
+    "mdd",
+    "mrr_samples",
     "mrr_at_k",
+    "paired_delta",
+    "reciprocal_rank",
     "relevant_ids",
+    "resolution_warning",
     "run",
     "split_by_paper",
     "success_at_candidates",
+    "success_samples",
 ]
