@@ -20,7 +20,8 @@ from rag.config import load_config
 from rag.llm import build_llm
 
 from .fingerprint import corpus_fingerprint, load_pool
-from .queryset import GenConfig, held_out_paper_ids, item_to_dict, iter_queryset
+from .harness import format_report, run
+from .queryset import GenConfig, held_out_paper_ids, item_to_dict, iter_queryset, load_queryset
 
 
 def cmd_gen(args: argparse.Namespace) -> None:
@@ -81,6 +82,31 @@ def cmd_gen(args: argparse.Namespace) -> None:
     print(f"Wrote {n_dev} dev / {n_test} test questions to {out_dir}")
 
 
+def cmd_run(args: argparse.Namespace) -> None:
+    cfg = load_config(args.config)
+    pool = load_pool(cfg.paths.markdown_dir)
+    if not pool:
+        raise SystemExit(
+            f"No markdown papers in {cfg.paths.markdown_dir} — ingest the pool first "
+            f"(uv run paperlens-ingest)."
+        )
+    if args.limit:
+        pool = dict(list(pool.items())[: args.limit])
+
+    fingerprint = corpus_fingerprint(pool)
+    dev_path = Path(cfg.root) / "evals" / f"{fingerprint}.dev.jsonl"
+    if not dev_path.exists():
+        raise SystemExit(
+            f"No eval set for this pool (fingerprint={fingerprint}) at {dev_path} — "
+            f"generate it first with `paperlens-eval gen`."
+        )
+
+    items = load_queryset(str(dev_path))
+    print(f"Pool: {len(pool)} papers  fingerprint={fingerprint}  dev={len(items)} questions")
+    print("Running default config on the dev split...")
+    print(format_report(run(cfg, items)))
+
+
 def main() -> None:
     p = argparse.ArgumentParser(prog="paperlens-eval", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -93,6 +119,17 @@ def main() -> None:
         help="smoke test: cap the pool to the first N papers (own fingerprint, no clobber)",
     )
     g.set_defaults(func=cmd_gen)
+
+    r = sub.add_parser("run", help="score one config on the dev set (recall@candidates + nDCG@k)")
+    r.add_argument("--config", default=None, help="path to config.yaml (else discovery)")
+    r.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="cap the pool to the first N papers (must match the fingerprint gen used)",
+    )
+    r.set_defaults(func=cmd_run)
+
     args = p.parse_args()
     args.func(args)
 

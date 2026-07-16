@@ -4,14 +4,20 @@ The harness recalibrates ``config.yaml`` for whatever pool of papers is loaded â
 is not a study of any fixed corpus. It composes ``rag`` (Searcher, llm, chunking,
 config) behind a ``paperlens-eval`` CLI; ``rag`` never imports ``eval``.
 
-Phase 1 (this slice): ``gen`` builds a span-anchored QA eval set from the loaded pool.
-Gold is a character span in the source markdown (config-independent), so the set
-survives a re-chunk and keeps chunking configs comparable.
+Phase 1: ``gen`` builds a span-anchored QA eval set from the loaded pool. Gold is a
+character span in the source markdown (config-independent), so the set survives a
+re-chunk and keeps chunking configs comparable.
+
+Phase 2: ``run`` scores one config on the dev set â€” ``success@candidates`` (stage-1
+ceiling) and gold-conditioned ``MRR@k`` (stage-2). Relevance is section identity, and the
+section is one relevant unit, so both metrics are chunking-independent.
 """
 
 from __future__ import annotations
 
 from .fingerprint import corpus_fingerprint, load_pool
+from .harness import RunReport, run
+from .metrics import QueryScore, mrr_at_k, relevant_ids, success_at_candidates
 from .queryset import (
     GenConfig,
     QAItem,
@@ -19,17 +25,25 @@ from .queryset import (
     held_out_paper_ids,
     iter_queryset,
     iter_sections,
+    load_queryset,
     split_by_paper,
 )
 
 __all__ = [
     "GenConfig",
     "QAItem",
+    "QueryScore",
+    "RunReport",
     "build_queryset",
     "corpus_fingerprint",
     "held_out_paper_ids",
     "iter_queryset",
     "iter_sections",
     "load_pool",
+    "load_queryset",
+    "mrr_at_k",
+    "relevant_ids",
+    "run",
     "split_by_paper",
+    "success_at_candidates",
 ]
