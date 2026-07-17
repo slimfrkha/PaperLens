@@ -18,6 +18,14 @@ from __future__ import annotations
 from .fingerprint import corpus_fingerprint, load_pool
 from .harness import RunReport, run
 from .metrics import QueryScore, mrr_at_k, reciprocal_rank, relevant_ids, success_at_candidates
+from .optimizer import (
+    Arm,
+    ArmResult,
+    ScreenReport,
+    format_screen_report,
+    score_from_cache,
+    screen_tier_a,
+)
 from .queryset import (
     GenConfig,
     QAItem,
@@ -41,6 +49,8 @@ from .stats import (
 )
 
 __all__ = [
+    "Arm",
+    "ArmResult",
     "BootResult",
     "DeltaResult",
     "GenConfig",
@@ -48,9 +58,11 @@ __all__ = [
     "QueryScore",
     "RunReport",
     "Sample",
+    "ScreenReport",
     "build_queryset",
     "cluster_bootstrap",
     "corpus_fingerprint",
+    "format_screen_report",
     "held_out_paper_ids",
     "iter_queryset",
     "iter_sections",
@@ -64,6 +76,8 @@ __all__ = [
     "relevant_ids",
     "resolution_warning",
     "run",
+    "score_from_cache",
+    "screen_tier_a",
     "split_by_paper",
     "success_at_candidates",
     "success_samples",

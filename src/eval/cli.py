@@ -21,6 +21,7 @@ from rag.llm import build_llm
 
 from .fingerprint import corpus_fingerprint, load_pool
 from .harness import format_report, run
+from .optimizer import format_screen_report, screen_tier_a
 from .queryset import GenConfig, held_out_paper_ids, item_to_dict, iter_queryset, load_queryset
 
 
@@ -82,7 +83,13 @@ def cmd_gen(args: argparse.Namespace) -> None:
     print(f"Wrote {n_dev} dev / {n_test} test questions to {out_dir}")
 
 
-def cmd_run(args: argparse.Namespace) -> None:
+def _load_dev_set(args: argparse.Namespace):
+    """Discover config, load the pool, and load the dev split keyed on its fingerprint.
+
+    Shared by ``run`` and ``screen``: both score the loaded pool's dev set. Returns
+    ``(cfg, pool, fingerprint, items)``; exits with a clear message if the pool is
+    un-ingested or the eval set has not been generated for it yet.
+    """
     cfg = load_config(args.config)
     pool = load_pool(cfg.paths.markdown_dir)
     if not pool:
@@ -100,11 +107,39 @@ def cmd_run(args: argparse.Namespace) -> None:
             f"No eval set for this pool (fingerprint={fingerprint}) at {dev_path} — "
             f"generate it first with `paperlens-eval gen`."
         )
+    return cfg, pool, fingerprint, load_queryset(str(dev_path))
 
-    items = load_queryset(str(dev_path))
+
+def cmd_run(args: argparse.Namespace) -> None:
+    cfg, pool, fingerprint, items = _load_dev_set(args)
     print(f"Pool: {len(pool)} papers  fingerprint={fingerprint}  dev={len(items)} questions")
     print("Running default config on the dev split...")
     print(format_report(run(cfg, items)))
+
+
+def _parse_grid(raw: str | None) -> list[int] | None:
+    """Parse ``--candidates`` into a sorted, de-duplicated list of positive ints (else None).
+
+    Tolerates whitespace and stray/trailing commas; rejects non-integer or non-positive
+    values with a clean message rather than a raw traceback.
+    """
+    if not raw:
+        return None
+    try:
+        vals = [int(tok) for tok in raw.split(",") if tok.strip()]
+    except ValueError as e:
+        raise SystemExit(f"--candidates must be comma-separated integers, got: {raw!r}") from e
+    if any(v <= 0 for v in vals):
+        raise SystemExit(f"--candidates values must be positive, got: {raw!r}")
+    return sorted(set(vals)) or None
+
+
+def cmd_screen(args: argparse.Namespace) -> None:
+    cfg, pool, fingerprint, items = _load_dev_set(args)
+    grid = _parse_grid(args.candidates)
+    print(f"Pool: {len(pool)} papers  fingerprint={fingerprint}  dev={len(items)} questions")
+    print("Screening Tier-A knobs (reranker on/off, candidates depth) on the dev split...")
+    print(format_screen_report(screen_tier_a(cfg, items, candidate_grid=grid)))
 
 
 def main() -> None:
@@ -129,6 +164,29 @@ def main() -> None:
         help="cap the pool to the first N papers (must match the fingerprint gen used)",
     )
     r.set_defaults(func=cmd_run)
+
+    s = sub.add_parser(
+        "screen", help="Tier-A OFAT screen of reranker on/off + candidates depth (no re-index)"
+    )
+    s.add_argument("--config", default=None, help="path to config.yaml (else discovery)")
+    s.add_argument(
+        "--tier",
+        default="a",
+        choices=["a"],
+        help="only Tier A (no re-index) is available; Tier B lands in Phase 5",
+    )
+    s.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="cap the pool to the first N papers (must match the fingerprint gen used)",
+    )
+    s.add_argument(
+        "--candidates",
+        default=None,
+        help="comma-separated candidates grid (default 10,20,30,50; default arm always added)",
+    )
+    s.set_defaults(func=cmd_screen)
 
     args = p.parse_args()
     args.func(args)
