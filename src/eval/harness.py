@@ -25,7 +25,13 @@ from .metrics import (
     relevant_ids,
 )
 from .queryset import QAItem
-from .stats import cluster_bootstrap, mdd, resolution_warning, success_samples
+from .stats import (
+    ceiling_saturation_note,
+    cluster_bootstrap,
+    mdd,
+    resolution_warning,
+    success_samples,
+)
 
 
 @dataclass
@@ -159,6 +165,9 @@ def format_report(report: RunReport) -> str:
     warning = resolution_warning(report.n_clusters)
     if warning:
         lines.append(f"  ⚠ {warning}")
+    saturated = ceiling_saturation_note(report.success_at_candidates)
+    if saturated:
+        lines.append(f"  ⚠ {saturated}")
     lines += [
         f"  success@candidates = {report.success_at_candidates:.3f}  "
         f"[{lo:.3f}, {hi:.3f}]   "
