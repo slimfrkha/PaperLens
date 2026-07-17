@@ -16,6 +16,7 @@ from eval.stats import (
     MDD_FACTOR,
     Z_ALPHA,
     Sample,
+    ceiling_saturation_note,
     cluster_bootstrap,
     mdd,
     mrr_samples,
@@ -23,6 +24,14 @@ from eval.stats import (
     resolution_warning,
     success_samples,
 )
+
+
+def test_ceiling_saturation_note_fires_only_near_one():
+    assert ceiling_saturation_note(0.90) is None  # comfortable headroom → no note
+    assert ceiling_saturation_note(0.979) is None  # just below the 0.98 threshold
+    note = ceiling_saturation_note(0.985)
+    assert note is not None and "near-saturated" in note and "MRR@k" in note
+    assert "1.5 pts" in ceiling_saturation_note(0.985)  # (1 - .985)*100
 
 
 def _arm(diffs_base: float, spread: float, n: int, side: int) -> list[Sample]:
