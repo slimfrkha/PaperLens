@@ -72,10 +72,14 @@ src/
     ingest.py          # headless ingestion CLI (+ --retag)
   server/              # FastAPI backend + in-process ingestion worker (composes rag)
     main.py agent.py worker.py chats.py schemas.py
+  eval/                # per-pool config optimizer (composes rag; see docs/harness.md)
+    cli.py fingerprint.py queryset.py genfilter.py metrics.py stats.py
+    index_isolated.py optimizer.py harness.py
 web/                   # Vite + React + Mantine frontend
 tests/                 # unit/ + integration/
 docs/                  # documentation hub (see docs/README.md)
 data/                  # git-ignored runtime: papers/, rag_db/, chat_history/
+evals/                 # git-ignored eval-harness artifacts (per-pool eval sets, confirm log)
 ```
 
 Import the public API from the package (`from rag import Searcher, load_config`), not the
@@ -91,8 +95,10 @@ config  chunking  embedders  extract  manifest   →   llm  index  reranker
    →   tagger  search  pipeline   →   ingest
 ```
 
-`server` **composes** `rag` behind an HTTP API; `rag` never imports `server`. Don't add an
-import that violates this.
+`server` **composes** `rag` behind an HTTP API; `rag` never imports `server`. `eval` (the
+`paperlens-eval` per-pool config optimizer, see [docs/harness.md](docs/harness.md))
+composes `rag` the same way; `rag`/`server` never import `eval`. Don't add an import that
+violates either direction.
 
 ## ✍️ Code style
 
@@ -124,10 +130,10 @@ Adding a paper, an LLM backend, or an embedder is a documented recipe — see
   call a live API.
 - **Optional-extra tests self-skip** with `pytest.importorskip(...)` (e.g. `anthropic`,
   `google.genai`).
-- **Coverage** (branch, over `rag` + `server`):
+- **Coverage** (branch, over `rag` + `server` + `eval`):
 
   ```bash
-  uv run pytest --cov=rag --cov=server --cov-branch --cov-report=term-missing
+  uv run pytest --cov=rag --cov=server --cov=eval --cov-branch --cov-report=term-missing
   ```
 
 ## 📝 Update docs on user-facing changes
@@ -140,5 +146,6 @@ change**:
 - new task or backend → [docs/how-to.md](docs/how-to.md)
 - design/behavior change → [docs/architecture.md](docs/architecture.md)
 - a new or renamed domain term → [CONTEXT.md](CONTEXT.md)
+- a change to `src/eval/` or the `paperlens-eval` flow → [docs/harness.md](docs/harness.md)
 
 Docs that contradict the code are worse than no docs. A change isn't done until they agree.

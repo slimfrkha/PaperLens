@@ -34,7 +34,7 @@ jobs:
         run: uv run ty check src
 
       - name: pytest --cov
-        run: uv run pytest --cov=rag --cov=server --cov-branch --cov-report=term-missing
+        run: uv run pytest --cov=rag --cov=server --cov=eval --cov-branch --cov-report=term-missing
 
   # Frontend gate — the same 4 commands run locally and in the web pre-commit hooks:
   #   format:check · lint · typecheck · test

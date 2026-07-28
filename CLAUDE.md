@@ -9,7 +9,9 @@ Thought → Action → Observation trace over SSE. Backend is Python (`rag` core
 frontend is `web/`.
 
 **New here?** Read [CONTEXT.md](CONTEXT.md) (domain glossary — use these exact terms) and
-[docs/architecture.md](docs/architecture.md) (why it's built this way) first.
+[docs/architecture.md](docs/architecture.md) (why it's built this way) first. Tuning
+retrieval config for a specific pool? Read [docs/harness.md](docs/harness.md) — the
+`paperlens-eval` per-pool config optimizer.
 
 ## ✅ The gate — run before calling anything done
 
@@ -46,6 +48,7 @@ npm --prefix web install         # frontend deps
 uv run paperlens-serve           # backend only (FastAPI, port 8000)
 uv run paperlens-ingest          # ingest configured papers not yet in the DB
 uv run paperlens-ingest --retag  # regenerate tags without re-indexing
+uv run paperlens-eval gen        # per-pool eval set + config tuning (see docs/harness.md)
 make dev                         # backend + Vite dev server together
 ```
 
@@ -76,10 +79,15 @@ src/
     agent.py           # ChatAgent: ReAct loop, search_papers tool, ref/citation registry
     worker.py          # IngestionWorker: background thread over pending papers
     chats.py schemas.py
+  eval/                # per-pool config optimizer (composes rag; see docs/harness.md)
+    cli.py             # gen / run / screen / sweep / confirm
+    fingerprint.py queryset.py genfilter.py metrics.py stats.py
+    index_isolated.py optimizer.py harness.py
 web/                   # Vite + React + Mantine frontend (SSE chat, trace, paper viewer)
 tests/                 # unit/ + integration/ (no __init__.py; importlib mode)
 docs/                  # documentation hub (docs/README.md)
 data/                  # git-ignored runtime: papers/, rag_db/, chat_history/
+evals/                 # git-ignored eval-harness artifacts: <fingerprint>.dev/test.jsonl, confirm.json
 ```
 
 Import the public API from the package (`from rag import Searcher, load_config`), **not**
@@ -94,8 +102,10 @@ config  chunking  embedders  extract  manifest  →  llm  index  reranker
    →  tagger  search  pipeline  →  ingest
 ```
 
-`server` **composes** `rag` behind the HTTP API; `rag` **never** imports `server`. Don't
-add an import that violates this.
+`server` **composes** `rag` behind the HTTP API; `rag` **never** imports `server`. `eval`
+**composes** `rag` the same way (`Searcher`, `rag.llm`, `chunk_markdown`) to build the
+per-pool config optimizer; `rag`/`server` **never** import `eval`. Don't add an import that
+violates either direction.
 
 The ingestion core (`pipeline`, `ingest`, the server's `worker`) is typed to `IngestConfig`
 — a frozen projection of `Config` (`Config.for_ingest()`) exposing only ingestion's fields
@@ -151,7 +161,9 @@ server hosts the worker, so it reads every field). Don't widen `IngestConfig` fo
 - **Update docs on user-facing change.** A `config.yaml` key, command, API route, or
   supported backend → [docs/configuration.md](docs/configuration.md); a new task/backend →
   [docs/how-to.md](docs/how-to.md); a design change → [docs/architecture.md](docs/architecture.md);
-  a new/renamed term → [CONTEXT.md](CONTEXT.md). A change isn't done until docs agree.
+  a new/renamed term → [CONTEXT.md](CONTEXT.md); a change to `src/eval/` or the
+  `paperlens-eval` flow → [docs/harness.md](docs/harness.md). A change isn't done until docs
+  agree.
 
 Full contributor guide: [CONTRIBUTING.md](CONTRIBUTING.md). Recipes for adding a paper,
 LLM backend, or embedder: [docs/how-to.md](docs/how-to.md).
