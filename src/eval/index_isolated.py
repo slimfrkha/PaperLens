@@ -1,4 +1,4 @@
-"""Guard 1: isolated re-index cells for Tier-B sweeps — never touch the prod collection.
+"""Guard 1: isolated re-index cells for chunking sweeps — never touch the prod collection.
 
 Changing ``chunking.max_tokens`` and re-ingesting into the **same** collection contaminates
 it: ``_chunk_id`` is a content hash of ``paper_id|section_number|section_title|part`` and
@@ -15,8 +15,8 @@ not a harness fault.
 
 We reuse ``rag.index`` (``open_collection`` + ``upsert_chunks``) rather than reimplement
 indexing, and return the ordinary :class:`~rag.search.Searcher` over the cell's collection —
-so the whole Tier-A scoring/caching path (``harness.score_items``, ``optimizer.build_cache``)
-runs over an ablation cell unchanged.
+so the whole retrieval-screen scoring/caching path (``harness.score_items``,
+``optimizer.build_cache``) runs over an ablation cell unchanged.
 """
 
 from __future__ import annotations

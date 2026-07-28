@@ -6,8 +6,9 @@ it, keyed on the corpus fingerprint, under ``evals/`` at the project root::
     paperlens-eval gen                 # discover config.yaml, build the set
     paperlens-eval gen --config path/to/config.yaml
 
-``run`` scores one config; ``screen`` / ``sweep`` optimize Tier A / Tier B knobs over the
-pool; ``confirm`` (Phase 6) validates the winner on the held-out test split.
+``run`` scores one config; ``screen`` / ``sweep`` optimize retrieval knobs (reranker,
+candidates) and chunking knobs over the pool; ``confirm`` (Phase 6) validates the winner on
+the held-out test split.
 """
 
 from __future__ import annotations
@@ -16,24 +17,30 @@ import argparse
 import json
 import tempfile
 import time
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from typing import Any
 
-from rag.config import ChunkingCfg, load_config
+import draccus
+
+from rag.config import ChunkingCfg, Config, EmbeddingCfg, RerankerCfg, load_config
 from rag.llm import build_llm
+from rag.reranker import Reranker
+from rag.search import Searcher
 
 from .fingerprint import corpus_fingerprint, load_pool
 from .harness import format_report, run
-from .index_isolated import chunks_for
+from .index_isolated import build_isolated_searcher, chunks_for
 from .optimizer import (
     DEFAULT_CHUNK_GRIDS,
     DEFAULT_MAX_TOKENS_GRID,
+    build_reranker_for_cfg,
+    chunking_arms,
+    format_chunking_report,
     format_screen_report,
-    format_tier_b_report,
-    screen_tier_a,
-    screen_tier_b,
+    screen_chunking,
+    screen_retrieval,
     sweep,
-    tier_b_arms,
 )
 from .queryset import GenConfig, held_out_paper_ids, item_to_dict, iter_queryset, load_queryset
 
@@ -161,7 +168,7 @@ def _print_index_sizes(pool: dict[str, str], cells: list[tuple[str, ChunkingCfg]
     print("  index sizes (chunks): " + "  ".join(parts))
 
 
-def _tier_b_grids(args: argparse.Namespace) -> dict[str, list[float]] | None:
+def _chunking_grids(args: argparse.Namespace) -> dict[str, list[float]] | None:
     """Screen grids with an optional ``--max-tokens`` override of the headline knob."""
     mt = _parse_grid(args.max_tokens)
     if mt is None:
@@ -174,24 +181,24 @@ def _tier_b_grids(args: argparse.Namespace) -> dict[str, list[float]] | None:
 def cmd_screen(args: argparse.Namespace) -> None:
     cfg, pool, fingerprint, items = _load_dev_set(args)
     print(f"Pool: {len(pool)} papers  fingerprint={fingerprint}  dev={len(items)} questions")
-    if args.tier == "a":
+    if args.tier == "retrieval":
         grid = _parse_grid(args.candidates)
-        print("Screening Tier-A knobs (reranker on/off, candidates depth) on the dev split...")
-        print(format_screen_report(screen_tier_a(cfg, items, candidate_grid=grid)))
+        print("Screening retrieval knobs (reranker on/off, candidates depth) on the dev split...")
+        print(format_screen_report(screen_retrieval(cfg, items, candidate_grid=grid)))
         return
-    # Tier B: each arm is an isolated re-index — print the cell count up front (not a
+    # Chunking: each arm is an isolated re-index — print the cell count up front (not a
     # fabricated ETA), then run in a throwaway temp dir (the prod collection is never touched).
-    grids = _tier_b_grids(args)
-    arms = tier_b_arms(cfg, grids=grids)
+    grids = _chunking_grids(args)
+    arms = chunking_arms(cfg, grids=grids)
     print(
-        f"Screening Tier-B chunking knobs on the dev split: {len(arms)} cells, "
+        f"Screening chunking knobs on the dev split: {len(arms)} cells, "
         f"re-indexing {len(pool)} papers each..."
     )
     _print_index_sizes(pool, [(a.label, a.chunking) for a in arms])
     with tempfile.TemporaryDirectory(prefix="paperlens-eval-") as tmp:
         t0 = time.time()
-        report = screen_tier_b(cfg, pool, items, db_dir=tmp, grids=grids)
-        print(format_tier_b_report(report))
+        report = screen_chunking(cfg, pool, items, db_dir=tmp, grids=grids)
+        print(format_chunking_report(report))
         print(f"  ({time.time() - t0:.1f}s wall)")
 
 
@@ -219,8 +226,200 @@ def cmd_sweep(args: argparse.Namespace) -> None:
         report = sweep(
             cfg, pool, items, db_dir=tmp, max_tokens_grid=mt_grid, candidate_grid=cand_grid
         )
-        print(format_tier_b_report(report))
+        print(format_chunking_report(report))
         print(f"  ({time.time() - t0:.1f}s wall)")
+
+
+def _load_test_set(args: argparse.Namespace):
+    """Discover config, load the pool, and load the held-out test split.
+
+    Mirrors ``_load_dev_set`` exactly except for the split file — used only by ``confirm``,
+    the one command allowed to touch it.
+    """
+    cfg = load_config(args.config)
+    pool = load_pool(cfg.paths.markdown_dir)
+    if not pool:
+        raise SystemExit(
+            f"No markdown papers in {cfg.paths.markdown_dir} — ingest the pool first "
+            f"(uv run paperlens-ingest)."
+        )
+    if args.limit:
+        pool = dict(list(pool.items())[: args.limit])
+
+    fingerprint = corpus_fingerprint(pool)
+    test_path = Path(cfg.root) / "evals" / f"{fingerprint}.test.jsonl"
+    if not test_path.exists():
+        raise SystemExit(
+            f"No eval set for this pool (fingerprint={fingerprint}) at {test_path} — "
+            f"generate it first with `paperlens-eval gen`."
+        )
+    return cfg, pool, fingerprint, load_queryset(str(test_path))
+
+
+# Carried forward from Phases 4/5, not resolved here: the harness scores whole questions,
+# but production decomposes them into short, keyword-shaped sub-queries before retrieving
+# (src/server/agent.py:126-138) — a confirmed ~4x length/shape gap. Printed so a recommendation
+# is never read as fully validated against the deployed retriever.
+_ESTIMAND_CAVEAT = (
+    "estimand caveat: scored on whole questions; production retrieves on decomposed "
+    "sub-queries (agent.py:126-138) — this ranking is not yet validated against that gap."
+)
+
+
+@dataclass
+class _ConfigBlock:
+    chunking: ChunkingCfg
+    embedding: EmbeddingCfg
+    reranker: RerankerCfg
+
+
+def format_config_block(
+    cfg: Config, *, chunking: ChunkingCfg, candidates: int, rerank: bool
+) -> str:
+    """A paste-ready ``config.yaml`` block for the confirmed config.
+
+    ``chunking``/``embedding``/``reranker`` are dumped via ``draccus.dump`` (correctly emits
+    each ``ChoiceRegistry`` variant's ``type:`` discriminator when the dataclass field is typed
+    as the base class, as here). ``retrieval.candidates`` is appended by hand — the block scopes
+    to just that one field, not the whole ``RetrievalCfg`` (which also holds ``k`` and
+    ``max_rounds``; ``k`` stays a product decision, out of the optimizer's scope, and printing
+    it alongside a tuned value would be misleading).
+    """
+    block = _ConfigBlock(
+        chunking=chunking,
+        embedding=cfg.embedding,
+        reranker=replace(cfg.reranker, enabled=rerank),
+    )
+    yaml_text = draccus.dump(block)
+    return (
+        f"{yaml_text}retrieval:\n"
+        f"  candidates: {candidates}  # only candidates is tuned here — k stays product-chosen\n"
+    )
+
+
+def cmd_confirm(
+    args: argparse.Namespace,
+    *,
+    searcher: Searcher | None = None,
+    embedder: Any = None,
+    reranker: Reranker | None = None,
+) -> None:
+    """Score the winning config once on the held-out test split, then emit a config block.
+
+    "The winner" is read from ``--max-tokens``/``--candidates``/``--rerank`` (each falling back
+    to the loaded config's own value) — the user reads ``screen``/``sweep`` output and passes
+    the values themselves; there is no auto-selection formula (see harness_plan.md's Phase 6
+    notes: Phase 4's own live report needed a human trade-off call between success and MRR).
+
+    ``searcher``/``embedder``/``reranker`` are injectable for offline tests; production leaves
+    them ``None`` and builds real ones.
+    """
+    cfg, pool, fingerprint, items = _load_test_set(args)
+
+    max_tokens = cfg.chunking.max_tokens if args.max_tokens is None else args.max_tokens
+    candidates = cfg.retrieval.candidates if args.candidates is None else args.candidates
+    rerank = cfg.reranker.enabled if args.rerank is None else args.rerank
+    if candidates < cfg.retrieval.k:
+        raise SystemExit(
+            f"--candidates={candidates} is below retrieval.k={cfg.retrieval.k} — "
+            f"scoring would silently return fewer than k ranked results per query."
+        )
+
+    evals_dir = Path(cfg.root) / "evals"
+    marker_path = evals_dir / f"{fingerprint}.confirm.json"
+    if marker_path.exists():
+        prior = json.loads(marker_path.read_text())
+        print(
+            f"⚠ test split for this pool was already confirmed at {prior['timestamp']} with "
+            f"max_tokens={prior['max_tokens']} candidates={prior['candidates']} "
+            f"rerank={prior['rerank']} — re-running weakens the held-out guarantee."
+        )
+
+    print(f"Pool: {len(pool)} papers  fingerprint={fingerprint}  test={len(items)} questions")
+    print("Confirming on the HELD-OUT TEST SPLIT (touched once per pool).")
+    print(f"Config: max_tokens={max_tokens} candidates={candidates} rerank={rerank}")
+
+    # Built once regardless of `rerank`'s value ("the on-arm always needs it", mirroring
+    # optimizer.py's screen arms) and regardless of `cfg.reranker.enabled` — that flag is the
+    # loaded config's own default, which `--rerank` may override, so gating construction on it
+    # would silently fall back to Searcher.reranker's lazy hf cross-encoder for a `type: llm`
+    # config whenever the override turns reranking on. build_reranker_for_cfg handles the
+    # LLMRerankerCfg case correctly; the lazy default does not.
+    active_reranker = reranker if reranker is not None else build_reranker_for_cfg(cfg)
+
+    if max_tokens == cfg.chunking.max_tokens:
+        # No chunking change -> the existing on-disk collection already holds exactly this
+        # config's chunks (same markdown, same ChunkingCfg -> same content-hashed chunk ids),
+        # so read it directly rather than paying a full re-embed to reproduce it from scratch.
+        active_searcher = (
+            searcher
+            if searcher is not None
+            else Searcher(
+                db_dir=cfg.paths.rag_db,
+                collection=cfg.collection,
+                embedder=embedder,
+                embedder_model=cfg.embedding.model,
+                reranker=active_reranker,
+            )
+        )
+        report = run(
+            cfg,
+            items,
+            searcher=active_searcher,
+            candidates=candidates,
+            k=cfg.retrieval.k,
+            rerank=rerank,
+        )
+    else:
+        # Chunking changed -> a fresh index is required; isolate it (Guard 1) so the prod
+        # collection at paths.rag_db is never touched.
+        chunking = replace(cfg.chunking, max_tokens=max_tokens)
+        with tempfile.TemporaryDirectory(prefix="paperlens-eval-") as tmp:
+            active_searcher = (
+                searcher
+                if searcher is not None
+                else build_isolated_searcher(
+                    pool,
+                    chunking,
+                    cfg.embedding,
+                    db_dir=tmp,
+                    embedder=embedder,
+                    reranker=active_reranker,
+                )
+            )
+            report = run(
+                cfg,
+                items,
+                searcher=active_searcher,
+                candidates=candidates,
+                k=cfg.retrieval.k,
+                rerank=rerank,
+            )
+
+    print(format_report(report))
+    print(f"  · {_ESTIMAND_CAVEAT}")
+
+    winning_chunking = replace(cfg.chunking, max_tokens=max_tokens)
+    print()
+    print("--- config.yaml block ---")
+    print(format_config_block(cfg, chunking=winning_chunking, candidates=candidates, rerank=rerank))
+
+    evals_dir.mkdir(parents=True, exist_ok=True)
+    marker_path.write_text(
+        json.dumps(
+            {
+                "fingerprint": fingerprint,
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "max_tokens": max_tokens,
+                "candidates": candidates,
+                "rerank": rerank,
+                "success_at_candidates": report.success_at_candidates,
+                "mrr_at_k": report.mrr_at_k,
+                "n_clusters": report.n_clusters,
+            },
+            indent=2,
+        )
+    )
 
 
 def main() -> None:
@@ -248,14 +447,15 @@ def main() -> None:
 
     s = sub.add_parser(
         "screen",
-        help="OFAT screen: Tier A (reranker/candidates, no re-index) or Tier B (chunking knobs)",
+        help="OFAT screen: retrieval knobs (reranker/candidates, no re-index) or chunking knobs",
     )
     s.add_argument("--config", default=None, help="path to config.yaml (else discovery)")
     s.add_argument(
         "--tier",
-        default="a",
-        choices=["a", "b"],
-        help="a: reranker/candidates (no re-index); b: chunking knobs (isolated re-index per cell)",
+        default="retrieval",
+        choices=["retrieval", "chunking"],
+        help="retrieval: reranker/candidates, no re-index; "
+        "chunking: chunking knobs, isolated re-index per cell",
     )
     s.add_argument(
         "--limit",
@@ -266,18 +466,18 @@ def main() -> None:
     s.add_argument(
         "--candidates",
         default=None,
-        help="Tier A: comma-separated candidates grid (default 10,20,30,50)",
+        help="--tier retrieval: comma-separated candidates grid (default 10,20,30,50)",
     )
     s.add_argument(
         "--max-tokens",
         default=None,
-        help="Tier B: comma-separated max_tokens grid overriding the default chunking screen",
+        help="--tier chunking: comma-separated max_tokens grid overriding the default screen",
     )
     s.set_defaults(func=cmd_screen)
 
     w = sub.add_parser(
         "sweep",
-        help="Tier-B grid: re-index per max_tokens × cached candidates/rerank slices",
+        help="chunking × retrieval grid: re-index per max_tokens × cached candidates/rerank slices",
     )
     w.add_argument("--config", default=None, help="path to config.yaml (else discovery)")
     w.add_argument(
@@ -297,6 +497,39 @@ def main() -> None:
         help="comma-separated candidates grid, derived from cache (default 10,20,30,50)",
     )
     w.set_defaults(func=cmd_sweep)
+
+    c = sub.add_parser(
+        "confirm",
+        help="score the winning config once on the held-out test split, then emit a config block",
+    )
+    c.add_argument("--config", default=None, help="path to config.yaml (else discovery)")
+    c.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="cap the pool to the first N papers (must match the fingerprint gen used)",
+    )
+    c.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        help="winning chunking.max_tokens (default: the config's own value); confirm only "
+        "covers the sweep grid's axes (max_tokens, candidates, rerank) — a screen --tier "
+        "chunking winner on overlap_tokens/min_tokens/noise_ratio isn't confirmable here",
+    )
+    c.add_argument(
+        "--candidates",
+        type=int,
+        default=None,
+        help="winning retrieval.candidates (default: the config's own value)",
+    )
+    c.add_argument(
+        "--rerank",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="winning reranker.enabled (default: the config's own value)",
+    )
+    c.set_defaults(func=cmd_confirm)
 
     args = p.parse_args()
     args.func(args)

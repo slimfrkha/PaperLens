@@ -24,7 +24,7 @@ from .optimizer import (
     ScreenReport,
     format_screen_report,
     score_from_cache,
-    screen_tier_a,
+    screen_retrieval,
 )
 from .queryset import (
     GenConfig,
@@ -77,7 +77,7 @@ __all__ = [
     "resolution_warning",
     "run",
     "score_from_cache",
-    "screen_tier_a",
+    "screen_retrieval",
     "split_by_paper",
     "success_at_candidates",
     "success_samples",

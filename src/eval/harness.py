@@ -3,8 +3,8 @@
 This is flow step 1 — "run the default config, see what you get" — with no sweep. It
 composes ``rag`` (``Searcher`` + its embedder/collection/reranker) rather than forking it,
 but reaches past ``Searcher.search`` (which hides chunk ids and the pre-rerank pool) for the
-per-stage ids the metrics need. That thin retrieval seam is also what Tier-A caching builds
-on later.
+per-stage ids the metrics need. That thin retrieval seam is also what the retrieval screen's
+caching builds on later.
 """
 
 from __future__ import annotations
@@ -118,15 +118,26 @@ def score_items(
     return scores
 
 
-def run(cfg: Config, items: list[QAItem], *, searcher: Searcher | None = None) -> RunReport:
+def run(
+    cfg: Config,
+    items: list[QAItem],
+    *,
+    searcher: Searcher | None = None,
+    candidates: int | None = None,
+    k: int | None = None,
+    rerank: bool | None = None,
+) -> RunReport:
     """Score ``items`` at ``cfg``'s retrieval settings and return the report.
 
     ``searcher`` is injectable for offline tests; production builds one from ``cfg``.
+    ``candidates``/``k``/``rerank`` override ``cfg``'s own values when given — this is what
+    lets ``confirm`` score a different config than ``cfg`` carries (e.g. against an isolated,
+    re-chunked searcher) while reusing this function's stats/report plumbing.
     """
     searcher = searcher or build_searcher(cfg)
-    candidates = cfg.retrieval.candidates
-    k = cfg.retrieval.k
-    rerank = cfg.reranker.enabled
+    candidates = cfg.retrieval.candidates if candidates is None else candidates
+    k = cfg.retrieval.k if k is None else k
+    rerank = cfg.reranker.enabled if rerank is None else rerank
     scores = score_items(searcher, items, candidates=candidates, k=k, rerank=rerank)
     boot = cluster_bootstrap(success_samples(scores))
     # boot.point is the same quantity as success_at_candidates(scores) — read it off the

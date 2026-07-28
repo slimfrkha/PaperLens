@@ -14,6 +14,13 @@ from eval.harness import run, score_items
 from eval.queryset import QAItem, load_queryset
 
 
+class _FakeReranker:
+    """Deterministic no-model reranker for exercising the rerank=True path offline."""
+
+    def score(self, query: str, docs: list[str]) -> list[float]:
+        return [1.0] * len(docs)
+
+
 def _item(query: str, paper_id: str, section_title: str) -> QAItem:
     # section_number "1" matches seed_chunks' metadata; gold_span is unused by scoring
     # (relevance is section identity), so a placeholder is fine.
@@ -65,6 +72,29 @@ def test_run_excludes_ungoldable_and_charges_a_stage1_miss_to_recall_not_mrr(
     assert report.success_at_candidates == 1.0  # 1 hit over 1 goldable — ungoldable excluded
     assert report.n_conditioned == 1  # MRR averages over the reachable query only
     assert report.mrr_at_k == 1.0
+
+
+def test_run_overrides_win_over_cfg_and_omitting_them_reproduces_cfg_behavior(
+    make_searcher, make_config, seed_chunks
+):
+    docs = [
+        seed_chunks("p1", "Method", "latent attention compresses the cache", doc_id="p1-method"),
+        seed_chunks("p1", "Training", "fp8 mixed precision schedule warmup", doc_id="p1-train"),
+    ]
+    ctx = make_searcher(docs)
+    items = [_item("latent attention compresses the cache", "p1", "Method")]
+    cfg = make_config()  # retrieval.candidates=20, retrieval.k=5, reranker disabled by default
+
+    default_report = run(cfg, items, searcher=ctx.searcher)
+    assert default_report.candidates == cfg.retrieval.candidates
+    assert default_report.k == cfg.retrieval.k
+    assert default_report.rerank == cfg.reranker.enabled
+
+    ctx.searcher._reranker = _FakeReranker()  # avoid loading a real cross-encoder for rerank=True
+    override_report = run(cfg, items, searcher=ctx.searcher, candidates=1, k=1, rerank=True)
+    assert override_report.candidates == 1
+    assert override_report.k == 1
+    assert override_report.rerank is True
 
 
 def test_score_items_pairs_each_query_with_its_relevant_set(

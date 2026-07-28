@@ -1,6 +1,6 @@
-"""Tier-A optimizer: screen ``reranker.enabled`` and ``retrieval.candidates`` — no re-index.
+"""Retrieval optimizer: screen ``reranker.enabled`` and ``retrieval.candidates`` — no re-index.
 
-Tier A is "no re-index" **and** "no re-retrieve." Across every arm the collection, the
+This is "no re-index" **and** "no re-retrieve." Across every arm the collection, the
 embedder, and the cross-encoder scores are fixed; only two knobs vary, and both are pure
 post-processing of a single dense pool:
 
@@ -48,7 +48,7 @@ from .stats import (
     success_samples,
 )
 
-# Caveats surfaced in Tier-B reports so a reader doesn't misread the table (Dre review):
+# Caveats surfaced in chunking reports so a reader doesn't misread the table (Dre review):
 # the max_tokens confound is screen-only (the sweep disentangles it); the eligibility caveat
 # applies wherever arms condition on different goldable / gold-in-pool sets (both).
 _CAVEAT_CONFOUND = (
@@ -61,7 +61,7 @@ _CAVEAT_ELIGIBILITY = (
 )
 
 DEFAULT_CANDIDATE_GRID = [10, 20, 30, 50]
-# OFAT grids for the Tier-B chunking screen: values tried per knob (the config's own value
+# OFAT grids for the chunking screen: values tried per knob (the config's own value
 # is always the paired-against default and is skipped if it appears here). Overridable.
 DEFAULT_CHUNK_GRIDS: dict[str, list[float]] = {
     "max_tokens": [256, 1024],
@@ -69,7 +69,7 @@ DEFAULT_CHUNK_GRIDS: dict[str, list[float]] = {
     "min_tokens": [12, 48],
     "noise_ratio": [0.3, 0.5],
 }
-DEFAULT_MAX_TOKENS_GRID = [256, 512, 1024]  # Tier-B re-index axis of the sweep grid
+DEFAULT_MAX_TOKENS_GRID = [256, 512, 1024]  # chunking re-index axis of the sweep grid
 
 
 @dataclass
@@ -116,7 +116,7 @@ class ScreenReport:
     results: list[ArmResult]
 
 
-def _build_reranker(cfg: Config) -> Reranker:
+def build_reranker_for_cfg(cfg: Config) -> Reranker:
     """The config's reranker, built regardless of ``enabled`` — the on-arm always needs it."""
     llm = build_llm(cfg.llm.chat) if isinstance(cfg.reranker, LLMRerankerCfg) else None
     return build_reranker(cfg.reranker, llm=llm)
@@ -197,7 +197,7 @@ def _arms(cfg: Config, grid: list[int]) -> list[Arm]:
     return arms
 
 
-def screen_tier_a(
+def screen_retrieval(
     cfg: Config,
     items: list[QAItem],
     *,
@@ -217,7 +217,7 @@ def screen_tier_a(
     # the default hf cross-encoder, which is the WRONG reranker for an `llm`-type config.
     # `_reranker` is what build_searcher injected (set iff the config enabled it); when it's
     # None we build the config's actual variant, so the rerank-on arm always uses the right one.
-    reranker = searcher._reranker or _build_reranker(cfg)
+    reranker = searcher._reranker or build_reranker_for_cfg(cfg)
     cache = build_cache(searcher, items, max_candidates=max_candidates, reranker=reranker)
 
     def arm_scores(arm: Arm) -> list[QueryScore]:
@@ -260,7 +260,8 @@ def _min_report_clusters(results: list[Any]) -> int:
     A paired MRR delta conditions on gold-in-pool-in-both-arms and can cluster on fewer
     papers than the ceiling, so ``resolution_warning`` must gate on this minimum, not on the
     most optimistic number. Duck-typed over any result with ``success`` / ``*_delta`` fields
-    (Tier A ``ArmResult`` and Tier B ``TierBArmResult`` both qualify).
+    (``ArmResult`` from the retrieval screen and ``ChunkingArmResult`` from the chunking one
+    both qualify).
     """
     delta_clusters = [
         d.n_clusters for r in results for d in (r.success_delta, r.mrr_delta) if d is not None
@@ -280,8 +281,8 @@ def _delta_cell(d: DeltaResult | None) -> str:
     return f"{d.delta:+.3f} [{d.ci_lo:+.3f},{d.ci_hi:+.3f}]{flag}"
 
 
-# --- Shared screen rendering (Tier A + Tier B) — the structs differ per tier, the table does
-# not, so only the renderer is shared (the gnarly _delta_cell / column alignment lives once).
+# --- Shared screen rendering (retrieval + chunking) — the structs differ per screen, the table
+# does not, so only the renderer is shared (the gnarly _delta_cell / column alignment lives once).
 
 
 def _resolution_header(
@@ -318,12 +319,13 @@ def _arm_row(
 
 
 def format_screen_report(report: ScreenReport) -> str:
-    """Human-readable Tier-A screen. Leads with resolution (n_clusters, small-cluster warning),
-    then a per-arm table of ``success`` / ``MRR@k`` with paired Δ-vs-default and its CI.
+    """Human-readable retrieval screen. Leads with resolution (n_clusters, small-cluster
+    warning), then a per-arm table of ``success`` / ``MRR@k`` with paired Δ-vs-default and its
+    CI.
     """
     d = report.default
     lines = _resolution_header(
-        "Tier-A screen (no re-index)",
+        "Retrieval screen (no re-index)",
         f"candidates={d.candidates} rerank={'on' if d.rerank else 'off'}",
         n_clusters=report.n_clusters,
         n_queries=report.n_queries,
@@ -337,11 +339,11 @@ def format_screen_report(report: ScreenReport) -> str:
     return "\n".join(lines)
 
 
-# --- Tier B: re-index knobs (chunking), each arm an isolated collection (Guard 1) ----------
+# --- Chunking: re-index knobs, each arm an isolated collection (Guard 1) -------------------
 
 
 @dataclass
-class TierBArm:
+class ChunkingArm:
     """One re-index point: a label and the ``ChunkingCfg`` it re-chunks the pool at."""
 
     label: str
@@ -349,7 +351,7 @@ class TierBArm:
 
 
 @dataclass
-class TierBArmResult:
+class ChunkingArmResult:
     label: str
     success: BootResult
     mrr: BootResult
@@ -358,17 +360,17 @@ class TierBArmResult:
 
 
 @dataclass
-class TierBReport:
+class ChunkingReport:
     default_desc: str
     k: int
     n_queries: int
     n_clusters: int
-    results: list[TierBArmResult]
-    title: str = "Tier-B screen (re-index per cell)"
+    results: list[ChunkingArmResult]
+    title: str = "Chunking screen (re-index per cell)"
     caveats: list[str] = field(default_factory=list)
 
 
-def tier_b_arms(cfg: Config, *, grids: dict[str, list[float]] | None = None) -> list[TierBArm]:
+def chunking_arms(cfg: Config, *, grids: dict[str, list[float]] | None = None) -> list[ChunkingArm]:
     """OFAT chunking arms around ``cfg.chunking``: the default plus one arm per off-default
     knob value in ``grids``. Each arm changes exactly one knob (``dataclasses.replace``), so a
     non-null delta attributes to that knob alone. ``ChunkingCfg`` validation still applies —
@@ -376,7 +378,7 @@ def tier_b_arms(cfg: Config, *, grids: dict[str, list[float]] | None = None) -> 
     """
     ch = cfg.chunking
     grids = grids or DEFAULT_CHUNK_GRIDS
-    arms = [TierBArm("default", ch)]
+    arms = [ChunkingArm("default", ch)]
     current = {
         "max_tokens": ch.max_tokens,
         "overlap_tokens": ch.overlap_tokens,
@@ -386,11 +388,11 @@ def tier_b_arms(cfg: Config, *, grids: dict[str, list[float]] | None = None) -> 
     for knob, cur in current.items():
         for v in grids.get(knob, []):
             if v != cur:
-                arms.append(TierBArm(f"{knob}={v}", replace(ch, **{knob: v})))
+                arms.append(ChunkingArm(f"{knob}={v}", replace(ch, **{knob: v})))
     return arms
 
 
-def _tier_b_default_desc(cfg: Config) -> str:
+def _chunking_default_desc(cfg: Config) -> str:
     ch = cfg.chunking
     return (
         f"max_tokens={ch.max_tokens} overlap={ch.overlap_tokens} min={ch.min_tokens} "
@@ -399,7 +401,7 @@ def _tier_b_default_desc(cfg: Config) -> str:
     )
 
 
-def screen_tier_b(
+def screen_chunking(
     cfg: Config,
     pool: dict[str, str],
     items: list[QAItem],
@@ -408,7 +410,7 @@ def screen_tier_b(
     grids: dict[str, list[float]] | None = None,
     embedder: Any = None,
     reranker: Reranker | None = None,
-) -> TierBReport:
+) -> ChunkingReport:
     """OFAT screen over chunking knobs, each arm re-indexed into its own isolated collection.
 
     Each arm re-chunks the pool and re-embeds it (``build_isolated_searcher``, Guard 1), then
@@ -420,13 +422,13 @@ def screen_tier_b(
     ``db_dir`` is a throwaway directory the caller owns; ``embedder`` is injectable so offline
     tests skip the model download.
     """
-    arms = tier_b_arms(cfg, grids=grids)
+    arms = chunking_arms(cfg, grids=grids)
     embedder = embedder if embedder is not None else build_embedder(cfg.embedding)
     if reranker is None and cfg.reranker.enabled:
-        reranker = _build_reranker(cfg)
+        reranker = build_reranker_for_cfg(cfg)
     candidates, k, rerank = cfg.retrieval.candidates, cfg.retrieval.k, cfg.reranker.enabled
 
-    def arm_samples(arm: TierBArm):
+    def arm_samples(arm: ChunkingArm):
         searcher = build_isolated_searcher(
             pool, arm.chunking, cfg.embedding, db_dir=db_dir, embedder=embedder, reranker=reranker
         )
@@ -435,7 +437,7 @@ def screen_tier_b(
 
     default_succ, default_mrr = arm_samples(arms[0])
     results = [
-        TierBArmResult(
+        ChunkingArmResult(
             label=arms[0].label,
             success=cluster_bootstrap(default_succ),
             mrr=cluster_bootstrap(default_mrr),
@@ -446,7 +448,7 @@ def screen_tier_b(
     for arm in arms[1:]:
         succ, mrr = arm_samples(arm)
         results.append(
-            TierBArmResult(
+            ChunkingArmResult(
                 label=arm.label,
                 success=cluster_bootstrap(succ),
                 mrr=cluster_bootstrap(mrr),
@@ -459,8 +461,8 @@ def screen_tier_b(
     caveats = [_CAVEAT_ELIGIBILITY]
     if any(r.label.startswith("max_tokens") for r in results):
         caveats.insert(0, _CAVEAT_CONFOUND)
-    return TierBReport(
-        default_desc=_tier_b_default_desc(cfg),
+    return ChunkingReport(
+        default_desc=_chunking_default_desc(cfg),
         k=k,
         n_queries=len(items),
         n_clusters=_min_report_clusters(results),
@@ -469,9 +471,10 @@ def screen_tier_b(
     )
 
 
-def format_tier_b_report(report: TierBReport) -> str:
-    """Human-readable Tier-B screen/sweep — same resolution-led table as Tier A, plus the
-    caveats that keep a reader from misreading the confounded/eligibility-shifted columns."""
+def format_chunking_report(report: ChunkingReport) -> str:
+    """Human-readable chunking screen/sweep — same resolution-led table as the retrieval
+    screen, plus the caveats that keep a reader from misreading the confounded/
+    eligibility-shifted columns."""
     lines = _resolution_header(
         report.title,
         report.default_desc,
@@ -529,8 +532,8 @@ def sweep(
     candidate_grid: list[int] | None = None,
     embedder: Any = None,
     reranker: Reranker | None = None,
-) -> TierBReport:
-    """Staged Tier-B × Tier-A grid: re-index once per ``max_tokens`` (the expensive axis),
+) -> ChunkingReport:
+    """Staged chunking × retrieval grid: re-index once per ``max_tokens`` (the expensive axis),
     then derive every ``candidates × rerank`` slice of that cell from **one cached** dense +
     rerank pass (:func:`build_cache` / :func:`score_from_cache`, Phase 4's exactness property).
     So cost is ``|max_tokens_grid|`` re-indexes, not the full grid. Reports each cell paired
@@ -540,8 +543,9 @@ def sweep(
     cand_grid = candidate_grid or DEFAULT_CANDIDATE_GRID
     k = cfg.retrieval.k
     embedder = embedder if embedder is not None else build_embedder(cfg.embedding)
-    # rerank on-arms always need the reranker, even if the config has it off (mirrors Tier A).
-    reranker = reranker if reranker is not None else _build_reranker(cfg)
+    # rerank on-arms always need the reranker, even if the config has it off (mirrors the
+    # retrieval screen).
+    reranker = reranker if reranker is not None else build_reranker_for_cfg(cfg)
     max_c = max(cand_grid)
 
     # One isolated cell + one cached dense/rerank pass per distinct max_tokens.
@@ -567,7 +571,7 @@ def sweep(
     arms = _sweep_arms(cfg, mt_grid, cand_grid)
     default_succ, default_mrr = arm_samples(arms[0])
     results = [
-        TierBArmResult(
+        ChunkingArmResult(
             label=arms[0].label,
             success=cluster_bootstrap(default_succ),
             mrr=cluster_bootstrap(default_mrr),
@@ -578,7 +582,7 @@ def sweep(
     for arm in arms[1:]:
         succ, mrr = arm_samples(arm)
         results.append(
-            TierBArmResult(
+            ChunkingArmResult(
                 label=arm.label,
                 success=cluster_bootstrap(succ),
                 mrr=cluster_bootstrap(mrr),
@@ -586,13 +590,13 @@ def sweep(
                 mrr_delta=paired_delta(mrr, default_mrr),
             )
         )
-    return TierBReport(
-        default_desc=_tier_b_default_desc(cfg),
+    return ChunkingReport(
+        default_desc=_chunking_default_desc(cfg),
         k=k,
         n_queries=len(items),
         n_clusters=_min_report_clusters(results),
         results=results,
-        title="Tier-B sweep (re-index per max_tokens × cached candidates/rerank)",
+        title="Sweep (re-index per max_tokens × cached candidates/rerank)",
         # No confound caveat — the sweep IS the disentangling grid. Eligibility still varies
         # across max_tokens cells (different gold-in-pool sets), so keep that one.
         caveats=[_CAVEAT_ELIGIBILITY],

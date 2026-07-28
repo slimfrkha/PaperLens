@@ -1,4 +1,4 @@
-"""Phase 4 Tier-A optimizer: cache equivalence, paired deltas, and the OFAT arm set.
+"""Phase 4 retrieval optimizer: cache equivalence, paired deltas, and the OFAT arm set.
 
 Offline against a real temp Chroma (fake embedder). A fake reranker lets the tests move the
 stage-2 ordering deterministically without loading the cross-encoder.
@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from eval.harness import score_items
-from eval.optimizer import _arms, _delta_cell, build_cache, score_from_cache, screen_tier_a
+from eval.optimizer import _arms, _delta_cell, build_cache, score_from_cache, screen_retrieval
 from eval.queryset import QAItem
 from eval.stats import DeltaResult
 
@@ -102,7 +102,7 @@ def test_screen_detects_a_candidates_drop(make_searcher, make_config, seed_chunk
     items = [_item("quiver plankton", "p1", "Method"), _item("zebra cactus", "p2", "Method")]
     cfg = make_config()  # candidates=20, rerank off
 
-    report = screen_tier_a(cfg, items, candidate_grid=[1, 20], searcher=ctx.searcher)
+    report = screen_retrieval(cfg, items, candidate_grid=[1, 20], searcher=ctx.searcher)
     labels = [r.arm.label for r in report.results]
     assert "candidates=1" in labels
     assert report.default.candidates == 20
@@ -117,12 +117,12 @@ def test_format_screen_report_leads_with_resolution(make_searcher, make_config, 
     ctx = make_searcher(docs)
     ctx.searcher._reranker = FakeReranker(set())  # rerank=on toggle arm; no model download
     items = [_item("alpha beta", "p1", "Method")]
-    report = screen_tier_a(make_config(), items, candidate_grid=[10, 20], searcher=ctx.searcher)
+    report = screen_retrieval(make_config(), items, candidate_grid=[10, 20], searcher=ctx.searcher)
 
     from eval.optimizer import format_screen_report
 
     text = format_screen_report(report)
-    assert text.splitlines()[0].startswith("Tier-A screen")
+    assert text.splitlines()[0].startswith("Retrieval screen")
     assert "n_clusters=" in text
     assert "default arm:" in text
 
@@ -154,11 +154,11 @@ def test_parse_grid_tolerates_junk_and_rejects_bad_values():
             _parse_grid(bad)
 
 
-# --- Tier B (Phase 5): isolated re-index screen + sweep, offline over a temp Chroma ---------
+# --- Chunking (Phase 5): isolated re-index screen + sweep, offline over a temp Chroma ------
 
 # A two-paper pool with numbered sections. Numbered sections are immune to the noise_ratio
 # filter, so a noise_ratio arm re-chunks to the *same* chunks — an inert knob by construction.
-_TIER_B_POOL = {
+_CHUNKING_POOL = {
     "p1": "## Paper One\n\nAuthors\n\n"
     "## 1. Method\n\nlatent attention compresses the key value cache substantially\n\n"
     "## 2. Training\n\nfp8 mixed precision schedule with a long warmup for stability\n",
@@ -166,7 +166,7 @@ _TIER_B_POOL = {
     "## 1. Method\n\nrotary embeddings extend the context window efficiently\n\n"
     "## 2. Training\n\nadamw optimizer with cosine decay and gradient clipping\n",
 }
-_TIER_B_ITEMS = [
+_CHUNKING_ITEMS = [
     _item("latent attention compresses the key value cache", "p1", "Method"),
     _item("fp8 mixed precision schedule long warmup", "p1", "Training"),
     _item("rotary embeddings extend the context window", "p2", "Method"),
@@ -174,11 +174,11 @@ _TIER_B_ITEMS = [
 ]
 
 
-def test_tier_b_arms_are_ofat_around_default(make_config):
-    from eval.optimizer import tier_b_arms
+def test_chunking_arms_are_ofat_around_default(make_config):
+    from eval.optimizer import chunking_arms
 
     cfg = make_config()  # default chunking: max_tokens=512, overlap=64, min=24, noise=0.4
-    arms = tier_b_arms(cfg, grids={"max_tokens": [256, 512, 1024], "noise_ratio": [0.9]})
+    arms = chunking_arms(cfg, grids={"max_tokens": [256, 512, 1024], "noise_ratio": [0.9]})
     assert arms[0].label == "default"
     # 512 == default is skipped; each off-default value becomes exactly one arm.
     assert [a.label for a in arms[1:]] == ["max_tokens=256", "max_tokens=1024", "noise_ratio=0.9"]
@@ -186,14 +186,14 @@ def test_tier_b_arms_are_ofat_around_default(make_config):
     assert arms[1].chunking.overlap_tokens == cfg.chunking.overlap_tokens
 
 
-def test_screen_tier_b_does_not_star_an_inert_knob(make_config, tmp_path, fake_embedder):
-    from eval.optimizer import _delta_cell, screen_tier_b
+def test_screen_chunking_does_not_star_an_inert_knob(make_config, tmp_path, fake_embedder):
+    from eval.optimizer import _delta_cell, screen_chunking
 
     cfg = make_config()  # reranker disabled → no model, rerank=off path
-    report = screen_tier_b(
+    report = screen_chunking(
         cfg,
-        _TIER_B_POOL,
-        _TIER_B_ITEMS,
+        _CHUNKING_POOL,
+        _CHUNKING_ITEMS,
         db_dir=str(tmp_path),
         grids={"noise_ratio": [0.9]},  # inert on numbered sections
         embedder=fake_embedder,
@@ -207,19 +207,19 @@ def test_screen_tier_b_does_not_star_an_inert_knob(make_config, tmp_path, fake_e
     assert not _delta_cell(arm.mrr_delta).rstrip().endswith("*")
 
 
-def test_screen_tier_b_report_leads_with_resolution(make_config, tmp_path, fake_embedder):
-    from eval.optimizer import format_tier_b_report, screen_tier_b
+def test_screen_chunking_report_leads_with_resolution(make_config, tmp_path, fake_embedder):
+    from eval.optimizer import format_chunking_report, screen_chunking
 
-    report = screen_tier_b(
+    report = screen_chunking(
         make_config(),
-        _TIER_B_POOL,
-        _TIER_B_ITEMS,
+        _CHUNKING_POOL,
+        _CHUNKING_ITEMS,
         db_dir=str(tmp_path),
         grids={"max_tokens": [256]},
         embedder=fake_embedder,
     )
-    text = format_tier_b_report(report)
-    assert text.splitlines()[0].startswith("Tier-B screen")
+    text = format_chunking_report(report)
+    assert text.splitlines()[0].startswith("Chunking screen")
     assert "n_clusters=" in text
     assert "default arm:" in text and "max_tokens=512" in text
     # A max_tokens arm is present → the confound caveat is surfaced; the eligibility one always.
@@ -227,20 +227,20 @@ def test_screen_tier_b_report_leads_with_resolution(make_config, tmp_path, fake_
     assert "trust the starred paired Δ" in text
 
 
-def test_screen_tier_b_omits_confound_caveat_without_a_max_tokens_arm(
+def test_screen_chunking_omits_confound_caveat_without_a_max_tokens_arm(
     make_config, tmp_path, fake_embedder
 ):
-    from eval.optimizer import format_tier_b_report, screen_tier_b
+    from eval.optimizer import format_chunking_report, screen_chunking
 
-    report = screen_tier_b(
+    report = screen_chunking(
         make_config(),
-        _TIER_B_POOL,
-        _TIER_B_ITEMS,
+        _CHUNKING_POOL,
+        _CHUNKING_ITEMS,
         db_dir=str(tmp_path),
         grids={"noise_ratio": [0.9]},  # no max_tokens arm → confound caveat does not apply
         embedder=fake_embedder,
     )
-    text = format_tier_b_report(report)
+    text = format_chunking_report(report)
     assert "entangles with pool depth" not in text
     assert "trust the starred paired Δ" in text  # eligibility caveat still applies
 
@@ -251,8 +251,8 @@ def test_sweep_runs_offline_and_derives_the_grid(make_config, tmp_path, fake_emb
     cfg = make_config()  # chunking max_tokens=512, candidates=20, rerank off
     report = sweep(
         cfg,
-        _TIER_B_POOL,
-        _TIER_B_ITEMS,
+        _CHUNKING_POOL,
+        _CHUNKING_ITEMS,
         db_dir=str(tmp_path),
         max_tokens_grid=[256, 512],
         candidate_grid=[10, 20],
@@ -264,4 +264,4 @@ def test_sweep_runs_offline_and_derives_the_grid(make_config, tmp_path, fake_emb
     # The re-index axis (max_tokens) × cached retrieval axis (candidates × rerank) is enumerated.
     assert any("mt=256" in label for label in labels)
     assert any("rr=on" in label for label in labels)
-    assert report.n_queries == len(_TIER_B_ITEMS)
+    assert report.n_queries == len(_CHUNKING_ITEMS)
