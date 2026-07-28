@@ -148,7 +148,7 @@ CEILING_SATURATED = 0.98
 
 def ceiling_saturation_note(success_point: float) -> str | None:
     """A one-line caveat when success@candidates is near-saturated, redirecting the reader to
-    the rank metric. Fires the report line Phase 3 deferred (ceiling within ~2 pts of 1.0)."""
+    the rank metric (ceiling within ~2 pts of 1.0)."""
     if success_point < CEILING_SATURATED:
         return None
     gap = (1.0 - success_point) * 100

@@ -2,11 +2,11 @@
 
 An LLM writing a question "from" a paper span has also read well-known papers in
 pretraining, and sometimes writes a question answerable from general knowledge rather
-than the span. Per harness_plan.md, this is a gen-time filter, not a scorer: ask the
-model the *closed-book* question (no span, no gold text) and compare its answer against
-the gold `QAItem.answer` with a cheap deterministic overlap score, no second "judge" LLM
-call (mirrors metrics.py's no-`ir_measures`-for-exact-operations precedent). Off by
-default (harness_plan.md Phase 7) — add only if MDD comes out too high to be useful.
+than the span. This is a gen-time filter, not a scorer: ask the model the *closed-book*
+question (no span, no gold text) and compare its answer against the gold `QAItem.answer`
+with a cheap deterministic overlap score, no second "judge" LLM call (mirrors metrics.py's
+no-`ir_measures`-for-exact-operations precedent). Off by default — add only if MDD comes
+out too high to be useful.
 
 Known limitation, accepted not solved: the gold `answer` is the *generation* LLM's own
 paraphrase (not text extracted from the section), and the closed-book call reuses the

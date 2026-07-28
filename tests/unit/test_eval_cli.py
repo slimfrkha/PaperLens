@@ -1,4 +1,4 @@
-"""Phase 6 CLI: ``confirm`` + the config-block emitter.
+"""CLI: ``confirm`` + the config-block emitter.
 
 Offline against a real temp Chroma (fake embedder, no models). ``load_config``/``load_pool``
 are monkeypatched per test (no real ``config.yaml``/markdown dir needed) — the same style

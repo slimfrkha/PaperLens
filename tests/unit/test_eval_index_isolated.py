@@ -1,4 +1,4 @@
-"""Phase 5 Guard 1: isolated re-index cells never contaminate, and the count guard holds.
+"""Guard 1: isolated re-index cells never contaminate, and the count guard holds.
 
 Offline against a real temp Chroma (fake embedder) — no model download, no network. The
 contamination test *is* the plan's 10-minute proof, turned into a regression: re-chunking

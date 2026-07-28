@@ -1,4 +1,4 @@
-"""Phase 1 harness: span-anchored eval-set generation (offline, fake_llm)."""
+"""Harness: span-anchored eval-set generation (offline, fake_llm)."""
 
 from __future__ import annotations
 

@@ -67,7 +67,7 @@ class QAItem:
     section_number: str = ""
     section_title: str = ""
     stratum: str = "section"
-    answer: str = ""  # kept for reference / optional closed-book genfilter (Phase 7)
+    answer: str = ""  # kept for reference / optional closed-book genfilter
 
 
 def iter_sections(md: str, paper_id: str, *, min_tokens: int):
@@ -212,8 +212,8 @@ def item_to_dict(it: QAItem) -> dict:
 def load_queryset(path: str) -> list[QAItem]:
     """Read a ``.jsonl`` eval split back into ``QAItem``s.
 
-    Raises with a regenerate hint if the file predates the section-identity fields
-    (``gen`` before Phase 2), since scoring needs them to match retrieved chunks.
+    Raises with a regenerate hint if the file predates the section-identity fields, since
+    scoring needs them to match retrieved chunks.
     """
     items: list[QAItem] = []
     with open(path, encoding="utf-8") as f:

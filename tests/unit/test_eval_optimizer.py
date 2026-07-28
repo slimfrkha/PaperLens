@@ -1,4 +1,4 @@
-"""Phase 4 retrieval optimizer: cache equivalence, paired deltas, and the OFAT arm set.
+"""Retrieval optimizer: cache equivalence, paired deltas, and the OFAT arm set.
 
 Offline against a real temp Chroma (fake embedder). A fake reranker lets the tests move the
 stage-2 ordering deterministically without loading the cross-encoder.
@@ -154,7 +154,7 @@ def test_parse_grid_tolerates_junk_and_rejects_bad_values():
             _parse_grid(bad)
 
 
-# --- Chunking (Phase 5): isolated re-index screen + sweep, offline over a temp Chroma ------
+# --- Chunking: isolated re-index screen + sweep, offline over a temp Chroma ---------------
 
 # A two-paper pool with numbered sections. Numbered sections are immune to the noise_ratio
 # filter, so a noise_ratio arm re-chunks to the *same* chunks — an inert knob by construction.

@@ -1,14 +1,14 @@
 """paperlens-eval — per-pool config-optimization harness.
 
-Phase 1: ``gen`` builds the span-anchored QA eval set from the loaded pool and writes
-it, keyed on the corpus fingerprint, under ``evals/`` at the project root::
+``gen`` builds the span-anchored QA eval set from the loaded pool and writes it, keyed on
+the corpus fingerprint, under ``evals/`` at the project root::
 
     paperlens-eval gen                 # discover config.yaml, build the set
     paperlens-eval gen --config path/to/config.yaml
 
 ``run`` scores one config; ``screen`` / ``sweep`` optimize retrieval knobs (reranker,
-candidates) and chunking knobs over the pool; ``confirm`` (Phase 6) validates the winner on
-the held-out test split.
+candidates) and chunking knobs over the pool; ``confirm`` validates the winner on the
+held-out test split.
 """
 
 from __future__ import annotations
@@ -296,10 +296,10 @@ def _load_test_set(args: argparse.Namespace):
     return cfg, pool, fingerprint, load_queryset(str(test_path))
 
 
-# Carried forward from Phases 4/5, not resolved here: the harness scores whole questions,
-# but production decomposes them into short, keyword-shaped sub-queries before retrieving
-# (src/server/agent.py:126-138) — a confirmed ~4x length/shape gap. Printed so a recommendation
-# is never read as fully validated against the deployed retriever.
+# Not resolved here: the harness scores whole questions, but production decomposes them
+# into short, keyword-shaped sub-queries before retrieving (src/server/agent.py:126-138) —
+# a confirmed ~4x length/shape gap. Printed so a recommendation is never read as fully
+# validated against the deployed retriever.
 _ESTIMAND_CAVEAT = (
     "estimand caveat: scored on whole questions; production retrieves on decomposed "
     "sub-queries (agent.py:126-138) — this ranking is not yet validated against that gap."
@@ -348,8 +348,8 @@ def cmd_confirm(
 
     "The winner" is read from ``--max-tokens``/``--candidates``/``--rerank`` (each falling back
     to the loaded config's own value) — the user reads ``screen``/``sweep`` output and passes
-    the values themselves; there is no auto-selection formula (see harness_plan.md's Phase 6
-    notes: Phase 4's own live report needed a human trade-off call between success and MRR).
+    the values themselves; there is no auto-selection formula (the retrieval screen's own live
+    report needed a human trade-off call between success and MRR).
 
     ``searcher``/``embedder``/``reranker`` are injectable for offline tests; production leaves
     them ``None`` and builds real ones.
@@ -477,7 +477,7 @@ def main() -> None:
         "--genfilter",
         action="store_true",
         help=(
-            "Phase 7: closed-book leakage filter — discard questions the model can already "
+            "closed-book leakage filter — discard questions the model can already "
             "answer without the section (rag.llm, no judge call). Roughly doubles gen's LLM "
             "call volume. Off by default; add only if a screen/sweep report's MDD is too "
             "high to be useful, and hand-check <fingerprint>.genfilter.jsonl before trusting "

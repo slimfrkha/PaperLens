@@ -17,9 +17,9 @@ of pool depth, so slicing to top-``c`` and sorting by cached scores is bit-ident
 :func:`eval.harness._retrieve` computes at ``candidates=c``. :func:`score_from_cache` at the
 default arm therefore reproduces :func:`eval.harness.score_items` exactly (asserted in tests).
 
-Screening is one-factor-at-a-time around the default (per the plan): each non-default arm
-changes exactly one knob and is compared **paired vs default on the same queries** via
-:func:`eval.stats.paired_delta`. The full ``reranker × candidates`` grid is Phase 5's ``sweep``.
+Screening is one-factor-at-a-time around the default: each non-default arm changes exactly
+one knob and is compared **paired vs default on the same queries** via
+:func:`eval.stats.paired_delta`. The full ``reranker × candidates`` grid is ``sweep``.
 """
 
 from __future__ import annotations
@@ -535,7 +535,7 @@ def sweep(
 ) -> ChunkingReport:
     """Staged chunking × retrieval grid: re-index once per ``max_tokens`` (the expensive axis),
     then derive every ``candidates × rerank`` slice of that cell from **one cached** dense +
-    rerank pass (:func:`build_cache` / :func:`score_from_cache`, Phase 4's exactness property).
+    rerank pass (:func:`build_cache` / :func:`score_from_cache`'s exactness property).
     So cost is ``|max_tokens_grid|`` re-indexes, not the full grid. Reports each cell paired
     vs the default via :func:`~eval.stats.paired_delta`.
     """

@@ -1,4 +1,4 @@
-"""Phase 2 metrics: section-identity relevance, success@candidates, MRR@k.
+"""Metrics: section-identity relevance, success@candidates, MRR@k.
 
 Section is ONE relevant unit, so both metrics must be chunking-independent — the sharpest
 test here (`test_mrr_is_chunking_independent`) pins that property directly.

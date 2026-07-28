@@ -1,9 +1,9 @@
-"""Phase 7: closed-book leakage filter. answer_overlap_f1 is pure and gets exact-value
+"""Closed-book leakage filter. answer_overlap_f1 is pure and gets exact-value
 coverage; check_leak's fail-open behavior (no gold answer, LLM error) is the sharpest thing
 to pin, since a filter that discards on ambiguous evidence would be worse than no filter.
-Per the Slim Shady review folded into harness_plan.md's Phase 7 notes, the F1 heuristic has
-a known false-positive risk on ML's shared jargon — these tests pin the *mechanism*'s
-correctness (does it do what it says), not that the mechanism is a good leakage detector on
+Per the Slim Shady review, the F1 heuristic has a known false-positive risk on ML's shared
+jargon — these tests pin the *mechanism*'s correctness (does it do what it says), not that
+the mechanism is a good leakage detector on
 real papers (that needs a hand-audit of a live <fp>.genfilter.jsonl, not a unit test)."""
 
 from __future__ import annotations
