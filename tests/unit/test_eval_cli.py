@@ -285,3 +285,115 @@ def test_end_to_end_gen_screen_sweep_confirm_produces_a_parseable_block(
     parsed = yaml.safe_load(block_text)
     assert parsed["chunking"]["max_tokens"] == 256
     assert parsed["retrieval"]["candidates"] == 5
+
+
+class _ScriptedLLM:
+    """Returns each of ``answers`` in call order.
+
+    ``cmd_gen``'s genfilter path needs the *generation* call and the *closed-book* call to
+    return different things per item — FakeLLM's single fixed answer can't script that, so
+    this mirrors the local-subclass precedent in test_eval_queryset.py's ``_BoomLLM``.
+    """
+
+    def __init__(self, answers: list[str]) -> None:
+        self._answers = list(answers)
+        self.complete_calls: list[dict] = []
+
+    def complete(self, system, user, max_tokens=None):
+        self.complete_calls.append({"system": system, "user": user})
+        return self._answers.pop(0)
+
+    def run_tools(self, *args, **kwargs):
+        raise NotImplementedError
+
+
+def _gen_args(
+    config=None, limit=None, genfilter=False, genfilter_threshold=None
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        config=config, limit=limit, genfilter=genfilter, genfilter_threshold=genfilter_threshold
+    )
+
+
+def test_cmd_gen_discards_leaked_items_and_writes_audit_log(monkeypatch, make_config, tmp_path):
+    from eval.fingerprint import corpus_fingerprint
+
+    md = (
+        "## DeepFake-V1 Technical Report\n\nAlice, Bob, and Carol. Institute of Things.\n\n"
+        "## 2. Method\n\nWe introduce multi-head latent attention, which compresses the "
+        "key-value cache by projecting keys and values into a shared low-rank latent space "
+        "before caching them. This reduces memory bandwidth during autoregressive decoding.\n\n"
+        "## 2.1 Training\n\nThe model is trained with FP8 mixed precision on a cluster of "
+        "GPUs using a cosine learning-rate schedule and a warmup of two thousand steps for "
+        "stability.\n"
+    )
+    pool = {"p1": md}
+    cfg = make_config(root=tmp_path)
+    monkeypatch.setattr(cli_mod, "load_config", lambda path: cfg)
+    monkeypatch.setattr(cli_mod, "load_pool", lambda md_dir: pool)
+    # Call order: generate(Method), closed-book(Method item), generate(Training),
+    # closed-book(Training item). Method's closed-book answer shares no tokens with its
+    # gold answer (kept); Training's closed-book answer exactly matches its gold answer
+    # (discarded).
+    scripted = _ScriptedLLM(
+        [
+            '{"question": "How is the KV cache compressed?", "answer": "rotary embeddings"}',
+            "gradient descent",
+            '{"question": "What precision is training done in?", "answer": "FP8 mixed precision"}',
+            "FP8 mixed precision",
+        ]
+    )
+    monkeypatch.setattr(cli_mod, "build_llm", lambda spec: scripted)
+
+    cli_mod.cmd_gen(_gen_args(genfilter=True))
+
+    fp = corpus_fingerprint(pool)
+    evals_dir = cfg.root / "evals"
+    dev_lines = (evals_dir / f"{fp}.dev.jsonl").read_text().splitlines()
+    test_lines = (evals_dir / f"{fp}.test.jsonl").read_text().splitlines()
+    assert test_lines == []  # single paper -> nothing held out
+    assert len(dev_lines) == 1
+    kept = json.loads(dev_lines[0])
+    assert kept["query"] == "How is the KV cache compressed?"  # the non-leaked item survives
+
+    meta = json.loads((evals_dir / f"{fp}.meta.json").read_text())
+    assert meta["genfilter"] == {"enabled": True, "match_threshold": 0.5, "n_filtered": 1}
+
+    audit_lines = [
+        json.loads(line) for line in (evals_dir / f"{fp}.genfilter.jsonl").read_text().splitlines()
+    ]
+    assert len(audit_lines) == 2  # every checked item is logged, not just the discard
+    assert {
+        "query",
+        "paper_id",
+        "gold_answer",
+        "closed_book_answer",
+        "score",
+        "leaked",
+        "error",
+    } <= set(audit_lines[0])
+    leaked_rows = [row for row in audit_lines if row["leaked"]]
+    assert len(leaked_rows) == 1
+    assert leaked_rows[0]["query"] == "What precision is training done in?"
+    assert all(row["error"] is None for row in audit_lines)  # both were real, successful checks
+
+
+def test_cmd_gen_writes_empty_genfilter_log_when_disabled(monkeypatch, make_config, tmp_path):
+    from eval.fingerprint import corpus_fingerprint
+
+    pool = {"p1": "## Paper\n\nAuthors\n\n## 1. Method\n\nlatent attention compresses the cache\n"}
+    cfg = make_config(root=tmp_path)
+    monkeypatch.setattr(cli_mod, "load_config", lambda path: cfg)
+    monkeypatch.setattr(cli_mod, "load_pool", lambda md_dir: pool)
+    scripted = _ScriptedLLM(['{"question": "What is used?", "answer": "latent attention"}'])
+    monkeypatch.setattr(cli_mod, "build_llm", lambda spec: scripted)
+
+    cli_mod.cmd_gen(_gen_args())  # genfilter=False, the default
+
+    fp = corpus_fingerprint(pool)
+    genfilter_path = cfg.root / "evals" / f"{fp}.genfilter.jsonl"
+    assert genfilter_path.exists()
+    assert genfilter_path.read_text() == ""  # present-but-empty, not missing
+
+    meta = json.loads((cfg.root / "evals" / f"{fp}.meta.json").read_text())
+    assert meta["genfilter"] == {"enabled": False, "match_threshold": 0.5, "n_filtered": 0}
