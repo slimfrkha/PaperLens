@@ -219,6 +219,12 @@ across both sides and the held-out guarantee would be fiction.
 | `paperlens-eval sweep [--max-tokens ...] [--candidates ...]` | Yes, per `max_tokens` | Staged grid over the two fixed mechanistic axes: `chunking.max_tokens × retrieval.candidates × reranker.enabled`. Independent of `screen` — reads no file it writes. |
 | `paperlens-eval confirm [--max-tokens N] [--candidates N] [--rerank/--no-rerank]` | Only if `--max-tokens` differs from the config's own value | Score one config once on the test split; print the `config.yaml` block. |
 
+Every per-item / per-cell loop (`gen`'s per-paper and per-section generation; `run`/`confirm`'s
+per-query scoring; `screen`/`sweep`'s per-arm re-index and per-query cache build) prints a
+[`tqdm`](https://github.com/tqdm/tqdm) progress bar to stderr — elapsed time, rate, and ETA —
+so a long chunking screen or sweep doesn't sit silent. Bars don't pollute a redirected report
+(`paperlens-eval run > report.txt` still gets a clean stdout).
+
 All commands take `--config <path>` (else discovery, same as `paperlens-serve`/
 `paperlens-ingest`) and `--limit N` (smoke-test a prefix of the pool; must match whatever
 `gen` used, since it changes the fingerprint).

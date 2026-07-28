@@ -24,8 +24,11 @@ one knob and is compared **paired vs default on the same queries** via
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field, replace
 from typing import Any, cast
+
+from tqdm import tqdm
 
 from rag.config import ChunkingCfg, Config, LLMRerankerCfg
 from rag.embedders import build_embedder
@@ -128,13 +131,16 @@ def build_cache(
     *,
     max_candidates: int,
     reranker: Reranker,
+    desc: str | None = None,
 ) -> list[QueryCache]:
     """Retrieve once per query at ``max_candidates`` depth and score the pool with ``reranker``.
 
     One dense query + one rerank pass per item; every arm reads from the returned cache.
+    ``desc`` labels a progress bar over ``items`` (this is the one expensive pass every
+    retrieval arm derives from); ``None`` (offline tests) runs silent.
     """
     caches: list[QueryCache] = []
-    for i, it in enumerate(items):
+    for i, it in enumerate(tqdm(items, desc=desc, disable=desc is None, leave=False)):
         embed_query = getattr(searcher.embedder, "embed_query", None)
         qvec = embed_query([it.query]) if embed_query else searcher.embedder([it.query])
         # Chroma's stubs narrow query_embeddings/results more tightly than runtime accepts;
@@ -203,10 +209,13 @@ def screen_retrieval(
     *,
     candidate_grid: list[int] | None = None,
     searcher: Searcher | None = None,
+    show_progress: bool = False,
 ) -> ScreenReport:
     """Screen reranker on/off and candidates depth over the loaded pool, paired vs default.
 
     ``searcher`` is injectable for offline tests; production builds one from ``cfg``.
+    ``show_progress`` shows a bar over the one cache-build pass; off by default (offline
+    tests), the CLI opts in.
     """
     searcher = searcher or build_searcher(cfg)
     grid = candidate_grid or DEFAULT_CANDIDATE_GRID
@@ -218,7 +227,13 @@ def screen_retrieval(
     # `_reranker` is what build_searcher injected (set iff the config enabled it); when it's
     # None we build the config's actual variant, so the rerank-on arm always uses the right one.
     reranker = searcher._reranker or build_reranker_for_cfg(cfg)
-    cache = build_cache(searcher, items, max_candidates=max_candidates, reranker=reranker)
+    cache = build_cache(
+        searcher,
+        items,
+        max_candidates=max_candidates,
+        reranker=reranker,
+        desc="retrieval cache" if show_progress else None,
+    )
 
     def arm_scores(arm: Arm) -> list[QueryScore]:
         return [
@@ -279,6 +294,19 @@ def _delta_cell(d: DeltaResult | None) -> str:
     detectable = (d.ci_lo > 0 or d.ci_hi < 0) and abs(d.delta) >= d.mdd
     flag = "*" if detectable else " "
     return f"{d.delta:+.3f} [{d.ci_lo:+.3f},{d.ci_hi:+.3f}]{flag}"
+
+
+def _cell_eta_line(tag: str, idx: int, total: int, t0: float) -> str:
+    """``[i/n] tag: done (elapsed, ~remaining)`` — an aggregate ETA across re-index cells.
+
+    Not a fabricated up-front guess (the plan's Guard against that): it's a straight
+    extrapolation from cells *already measured* in this run, printed after each one
+    completes — the number a long ``screen --tier chunking``/``sweep`` needs and a
+    per-cell tqdm bar can't give, since that bar only knows the cell it's timing.
+    """
+    elapsed = time.monotonic() - t0
+    remaining = elapsed / idx * (total - idx)
+    return f"  {tag}: done ({elapsed:.0f}s elapsed, ~{remaining:.0f}s remaining)"
 
 
 # --- Shared screen rendering (retrieval + chunking) — the structs differ per screen, the table
@@ -410,6 +438,7 @@ def screen_chunking(
     grids: dict[str, list[float]] | None = None,
     embedder: Any = None,
     reranker: Reranker | None = None,
+    show_progress: bool = False,
 ) -> ChunkingReport:
     """OFAT screen over chunking knobs, each arm re-indexed into its own isolated collection.
 
@@ -420,7 +449,9 @@ def screen_chunking(
     (fixed across chunking arms) and the reranker load **once** and are reused for every cell.
 
     ``db_dir`` is a throwaway directory the caller owns; ``embedder`` is injectable so offline
-    tests skip the model download.
+    tests skip the model download. ``show_progress`` shows embed/score bars per cell (off by
+    default, the CLI opts in); the per-cell ``done (elapsed, ~remaining)`` line always prints —
+    it's one line per cell, not a bar, and is the aggregate-ETA number a long screen needs.
     """
     arms = chunking_arms(cfg, grids=grids)
     embedder = embedder if embedder is not None else build_embedder(cfg.embedding)
@@ -428,14 +459,32 @@ def screen_chunking(
         reranker = build_reranker_for_cfg(cfg)
     candidates, k, rerank = cfg.retrieval.candidates, cfg.retrieval.k, cfg.reranker.enabled
 
-    def arm_samples(arm: ChunkingArm):
+    n_arms = len(arms)
+    t0 = time.monotonic()
+
+    def arm_samples(arm: ChunkingArm, idx: int):
+        tag = f"[{idx}/{n_arms}] {arm.label}"
         searcher = build_isolated_searcher(
-            pool, arm.chunking, cfg.embedding, db_dir=db_dir, embedder=embedder, reranker=reranker
+            pool,
+            arm.chunking,
+            cfg.embedding,
+            db_dir=db_dir,
+            embedder=embedder,
+            reranker=reranker,
+            desc=f"{tag} embed" if show_progress else None,
         )
-        scores = score_items(searcher, items, candidates=candidates, k=k, rerank=rerank)
+        scores = score_items(
+            searcher,
+            items,
+            candidates=candidates,
+            k=k,
+            rerank=rerank,
+            desc=f"{tag} score" if show_progress else None,
+        )
+        print(_cell_eta_line(tag, idx, n_arms, t0))
         return success_samples(scores), mrr_samples(scores, k)
 
-    default_succ, default_mrr = arm_samples(arms[0])
+    default_succ, default_mrr = arm_samples(arms[0], 1)
     results = [
         ChunkingArmResult(
             label=arms[0].label,
@@ -445,8 +494,8 @@ def screen_chunking(
             mrr_delta=None,
         )
     ]
-    for arm in arms[1:]:
-        succ, mrr = arm_samples(arm)
+    for i, arm in enumerate(arms[1:], 2):
+        succ, mrr = arm_samples(arm, i)
         results.append(
             ChunkingArmResult(
                 label=arm.label,
@@ -532,12 +581,14 @@ def sweep(
     candidate_grid: list[int] | None = None,
     embedder: Any = None,
     reranker: Reranker | None = None,
+    show_progress: bool = False,
 ) -> ChunkingReport:
     """Staged chunking × retrieval grid: re-index once per ``max_tokens`` (the expensive axis),
     then derive every ``candidates × rerank`` slice of that cell from **one cached** dense +
     rerank pass (:func:`build_cache` / :func:`score_from_cache`'s exactness property).
     So cost is ``|max_tokens_grid|`` re-indexes, not the full grid. Reports each cell paired
-    vs the default via :func:`~eval.stats.paired_delta`.
+    vs the default via :func:`~eval.stats.paired_delta`. ``show_progress`` shows embed/cache
+    bars per cell (off by default, the CLI opts in); the per-cell ``done`` line always prints.
     """
     mt_grid = max_tokens_grid or DEFAULT_MAX_TOKENS_GRID
     cand_grid = candidate_grid or DEFAULT_CANDIDATE_GRID
@@ -550,7 +601,10 @@ def sweep(
 
     # One isolated cell + one cached dense/rerank pass per distinct max_tokens.
     caches: dict[int, list[QueryCache]] = {}
-    for mt in sorted({cfg.chunking.max_tokens, *mt_grid}):
+    cells = sorted({cfg.chunking.max_tokens, *mt_grid})
+    t0 = time.monotonic()
+    for i, mt in enumerate(cells, 1):
+        tag = f"[{i}/{len(cells)}] max_tokens={mt}"
         searcher = build_isolated_searcher(
             pool,
             replace(cfg.chunking, max_tokens=mt),
@@ -558,8 +612,16 @@ def sweep(
             db_dir=db_dir,
             embedder=embedder,
             reranker=reranker,
+            desc=f"{tag} embed" if show_progress else None,
         )
-        caches[mt] = build_cache(searcher, items, max_candidates=max_c, reranker=reranker)
+        caches[mt] = build_cache(
+            searcher,
+            items,
+            max_candidates=max_c,
+            reranker=reranker,
+            desc=f"{tag} cache" if show_progress else None,
+        )
+        print(_cell_eta_line(tag, i, len(cells), t0))
 
     def arm_samples(arm: SweepArm):
         scores = [
