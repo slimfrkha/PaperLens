@@ -6,6 +6,7 @@
 
 - 📄 [Add papers](#add-papers)
 - 🏷️ [Re-tag papers](#re-tag-papers)
+- 🎛️ [Tune retrieval config for your pool (the eval harness)](#tune-retrieval-config-for-your-pool)
 - 🤖 [Switch the chat or tagging LLM](#switch-the-chat-or-tagging-llm)
 - 🧬 [Switch the embedder](#switch-the-embedder)
 - 🎯 [Use the LLM reranker (no extra model)](#use-the-llm-reranker)
@@ -54,6 +55,81 @@ all papers, so the tag filter isn't fragmented by spelling variants.
 
 ✅ Verify: the printed tags per paper change, the `X -> Y` merges are listed under
 `== Normalizing tags ==`, and the **Papers** page / tag filter reflect them.
+
+---
+
+## Tune retrieval config for your pool
+
+`paperlens-eval` (`src/eval/`) is a **per-pool config optimizer**: it generates an eval set from
+*your* ingested papers, sweeps `chunking` / `embedding` / `reranker` / `retrieval.candidates`
+against it, and prints a paste-ready `config.yaml` block. It never invents a corpus to study —
+whatever pool your `config.yaml` has ingested is what gets tuned; swap the pool and re-run `gen`
+to retune. See [Eval harness](harness.md) for why it's built this way (the two correctness
+guards, the resolution/MDD statistics, the cost model) — this section is just the steps.
+
+1. **Generate the eval set** (once per pool — regenerates automatically if the pool changes):
+
+   ```bash
+   uv run paperlens-eval gen --config configs/recent-oss-agentic-models.yaml
+   ```
+
+   Writes `evals/<fingerprint>.dev.jsonl` / `.test.jsonl` — one question per section, gold is a
+   character span in the paper's markdown (not a chunk id), so it survives a re-chunk.
+
+2. **See what the current config gets you:**
+
+   ```bash
+   uv run paperlens-eval run --config configs/recent-oss-agentic-models.yaml
+   ```
+
+   Prints the stage-1 recall ceiling and stage-2 `MRR@k` on the dev split, leading with the
+   pool's *resolution* (`n_clusters`, the minimum detectable difference) — read every later
+   number against that.
+
+3. **Screen which knobs matter for this pool:**
+
+   ```bash
+   uv run paperlens-eval screen --tier retrieval --config configs/recent-oss-agentic-models.yaml  # reranker/candidates, no re-index
+   uv run paperlens-eval screen --tier chunking --config configs/recent-oss-agentic-models.yaml   # chunking knobs, isolated re-index per cell
+   ```
+
+   Each knob is screened one-factor-at-a-time against the default, paired, with a CI. A knob
+   whose CI straddles zero isn't worth grid-searching *for this pool* — a different pool may
+   screen differently.
+
+4. **Grid-search the survivors:**
+
+   ```bash
+   uv run paperlens-eval sweep --config configs/recent-oss-agentic-models.yaml
+   ```
+
+   Stages the `chunking.max_tokens × retrieval.candidates × reranker.enabled` grid, re-indexing
+   into a throwaway collection per cell — your ingested collection is never touched or mutated.
+
+5. **Confirm the winner once, on data never used to pick it:**
+
+   ```bash
+   uv run paperlens-eval confirm --config configs/recent-oss-agentic-models.yaml \
+     --max-tokens 256 --candidates 50 --rerank
+   ```
+
+   Read `screen`/`sweep`'s report yourself and pass the config you want validated — `confirm`
+   doesn't auto-select a winner (the retrieval screen's own success/MRR trade-off needs a human
+   call). Omit a flag to keep the current config's value for that knob; running with no flags at
+   all confirms the as-shipped default as a baseline. Prints the held-out score, then a
+   `config.yaml`-ready block — paste the `chunking`/`embedding`/`reranker` sections directly, and
+   just the `candidates:` line under your existing `retrieval:` section (`retrieval.k` is a
+   product choice the harness deliberately leaves alone).
+
+**Stopping rule:** if a report says no delta clears the MDD, that's the honest answer — the
+default config is already fine for this pool, and tuning further won't measurably help. Don't
+chase noise.
+
+Before trusting a recommendation, read [Eval harness § Known limits](harness.md#️-known-limits-read-before-trusting-a-recommendation) —
+in short: the test split is meant to be touched once per pool (`confirm` warns, doesn't block,
+on a repeat), every number is scored on whole questions rather than the sub-queries production
+actually retrieves on, and `confirm` only covers the axes `sweep`'s grid enumerates
+(`max_tokens`/`candidates`/`rerank` — not `overlap_tokens`/`min_tokens`/`noise_ratio`).
 
 ---
 

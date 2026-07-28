@@ -34,6 +34,9 @@ llm:
     api_base: ${llm.tagging.api_base}
     api_key_env: ${llm.tagging.api_key_env}
 
+retrieval:
+  candidates: 50  # tuned via paperlens-eval confirm; default 20 measurably under-recalls on this pool
+
 ingestion:
   auto_start: true
 

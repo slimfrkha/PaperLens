@@ -29,8 +29,9 @@ here when you want to go deeper.
 |---|---|---|
 | 🚀 Get the app running and ask my first question | [Getting started](getting-started.md) | Tutorial |
 | ⚙️ Look up a `config.yaml` key, a command, or an API route | [Configuration & commands](configuration.md) | Reference |
-| 🧩 Add a paper, swap the LLM/embedder, use a cloud provider, re-tag | [How-to guides](how-to.md) | How-to |
+| 🧩 Add a paper, swap the LLM/embedder, use a cloud provider, re-tag, tune retrieval config | [How-to guides](how-to.md) | How-to |
 | 🏛️ Understand chunking, two-stage retrieval, and the agent loop | [Architecture](architecture.md) | Explanation |
+| 🎛️ Optimize config for your pool — why the eval harness works the way it does | [Eval harness](harness.md) | Explanation + Reference |
 | 🤝 Set up a dev environment and contribute | [CONTRIBUTING](../CONTRIBUTING.md) | Reference |
 | 📖 Learn the project's vocabulary | [CONTEXT (glossary)](../CONTEXT.md) | Reference |
 
