@@ -15,8 +15,11 @@ from __future__ import annotations
 import json
 import random
 import re
+import sys
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass
+
+from tqdm import tqdm
 
 # Reuse chunking's skip/numbering rules so generation samples the *same* substantive
 # sections chunking keeps in the index (references/TOC/etc. are dropped there too).
@@ -144,7 +147,9 @@ def _section_unit(sec: Section) -> str:
     return f"{sec.number} {sec.title}".strip() if sec.number else sec.title
 
 
-def iter_queryset(pool: dict[str, str], llm: LLMBackend, gen: GenConfig) -> Iterator[QAItem]:
+def iter_queryset(
+    pool: dict[str, str], llm: LLMBackend, gen: GenConfig, *, show_progress: bool = False
+) -> Iterator[QAItem]:
     """Yield one QA item per substantive section across the pool, streaming.
 
     Streaming (vs. buffering a list) lets the caller write to disk as questions are
@@ -152,14 +157,27 @@ def iter_queryset(pool: dict[str, str], llm: LLMBackend, gen: GenConfig) -> Iter
     server hiccup on a long serial run — is logged and skipped rather than losing
     the whole batch. ``KeyboardInterrupt`` is not caught, so Ctrl-C stops cleanly
     with everything generated so far already on disk.
+
+    ``show_progress`` gates the per-paper/per-section progress bars (off by default, so
+    offline tests that drive this directly stay quiet); the per-paper summary and
+    per-section error lines print unconditionally, as they always have. Both go through
+    ``tqdm.write(..., file=sys.stderr)`` rather than ``print`` so they interleave cleanly
+    with the bars above instead of racing them on a different stream.
     """
-    for i, (paper_id, md) in enumerate(pool.items(), 1):
+    papers = tqdm(pool.items(), total=len(pool), desc="gen (papers)", disable=not show_progress)
+    for i, (paper_id, md) in enumerate(papers, 1):
         n = 0
-        for sec in iter_sections(md, paper_id, min_tokens=gen.min_section_tokens):
+        sections = list(iter_sections(md, paper_id, min_tokens=gen.min_section_tokens))
+        for sec in tqdm(
+            sections,
+            desc=f"[{i}/{len(pool)}] {paper_id}",
+            leave=False,
+            disable=not show_progress,
+        ):
             try:
                 obj = generate_query(sec, llm, gen.max_section_chars)
             except Exception as e:  # one bad section must not sink the run
-                print(f"  ! {paper_id} :: {sec.title}: {e}")
+                tqdm.write(f"  ! {paper_id} :: {sec.title}: {e}", file=sys.stderr)
                 continue
             if obj is None:
                 continue
@@ -173,7 +191,7 @@ def iter_queryset(pool: dict[str, str], llm: LLMBackend, gen: GenConfig) -> Iter
                 section_title=sec.title,
                 answer=str(obj.get("answer", "")).strip(),
             )
-        print(f"  [{i}/{len(pool)}] {paper_id}: {n} questions")
+        tqdm.write(f"  [{i}/{len(pool)}] {paper_id}: {n} questions", file=sys.stderr)
 
 
 def build_queryset(pool: dict[str, str], llm: LLMBackend, gen: GenConfig) -> list[QAItem]:

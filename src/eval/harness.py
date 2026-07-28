@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, cast
 
+from tqdm import tqdm
+
 from rag.config import Config, LLMRerankerCfg
 from rag.llm import build_llm
 from rag.reranker import build_reranker
@@ -99,11 +101,21 @@ def _retrieve(
 
 
 def score_items(
-    searcher: Searcher, items: list[QAItem], *, candidates: int, k: int, rerank: bool
+    searcher: Searcher,
+    items: list[QAItem],
+    *,
+    candidates: int,
+    k: int,
+    rerank: bool,
+    desc: str | None = None,
 ) -> list[QueryScore]:
-    """Retrieve for every item and pair it with its gold-section relevant set."""
+    """Retrieve for every item and pair it with its gold-section relevant set.
+
+    ``desc`` labels a progress bar over ``items`` (one dense query + optional rerank pass
+    each — the dominant per-arm cost in a screen/sweep); ``None`` (offline tests) runs silent.
+    """
     scores: list[QueryScore] = []
-    for i, it in enumerate(items):
+    for i, it in enumerate(tqdm(items, desc=desc, disable=desc is None, leave=False)):
         cand_ids, ranked = _retrieve(searcher, it.query, candidates=candidates, k=k, rerank=rerank)
         rel = relevant_ids(searcher.collection, it.paper_id, it.section_number, it.section_title)
         scores.append(
@@ -126,19 +138,21 @@ def run(
     candidates: int | None = None,
     k: int | None = None,
     rerank: bool | None = None,
+    desc: str | None = None,
 ) -> RunReport:
     """Score ``items`` at ``cfg``'s retrieval settings and return the report.
 
     ``searcher`` is injectable for offline tests; production builds one from ``cfg``.
     ``candidates``/``k``/``rerank`` override ``cfg``'s own values when given — this is what
     lets ``confirm`` score a different config than ``cfg`` carries (e.g. against an isolated,
-    re-chunked searcher) while reusing this function's stats/report plumbing.
+    re-chunked searcher) while reusing this function's stats/report plumbing. ``desc`` labels
+    a progress bar over ``items``; ``None`` (offline tests) runs silent.
     """
     searcher = searcher or build_searcher(cfg)
     candidates = cfg.retrieval.candidates if candidates is None else candidates
     k = cfg.retrieval.k if k is None else k
     rerank = cfg.reranker.enabled if rerank is None else rerank
-    scores = score_items(searcher, items, candidates=candidates, k=k, rerank=rerank)
+    scores = score_items(searcher, items, candidates=candidates, k=k, rerank=rerank, desc=desc)
     boot = cluster_bootstrap(success_samples(scores))
     # boot.point is the same quantity as success_at_candidates(scores) — read it off the
     # bootstrap rather than recomputing, so the point and its CI can never disagree.

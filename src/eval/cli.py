@@ -86,7 +86,7 @@ def cmd_gen(args: argparse.Namespace) -> None:
         open(test_path, "w", encoding="utf-8") as ftest,
         open(genfilter_path, "w", encoding="utf-8") as faudit,
     ):
-        for it in iter_queryset(pool, llm, gen):
+        for it in iter_queryset(pool, llm, gen, show_progress=True):
             if gfcfg.enabled:
                 check = check_leak(it, llm, gfcfg.match_threshold)
                 faudit.write(
@@ -174,7 +174,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     cfg, pool, fingerprint, items = _load_dev_set(args)
     print(f"Pool: {len(pool)} papers  fingerprint={fingerprint}  dev={len(items)} questions")
     print("Running default config on the dev split...")
-    print(format_report(run(cfg, items)))
+    print(format_report(run(cfg, items, desc="scoring dev set")))
 
 
 def _parse_grid(raw: str | None) -> list[int] | None:
@@ -224,7 +224,11 @@ def cmd_screen(args: argparse.Namespace) -> None:
     if args.tier == "retrieval":
         grid = _parse_grid(args.candidates)
         print("Screening retrieval knobs (reranker on/off, candidates depth) on the dev split...")
-        print(format_screen_report(screen_retrieval(cfg, items, candidate_grid=grid)))
+        print(
+            format_screen_report(
+                screen_retrieval(cfg, items, candidate_grid=grid, show_progress=True)
+            )
+        )
         return
     # Chunking: each arm is an isolated re-index — print the cell count up front (not a
     # fabricated ETA), then run in a throwaway temp dir (the prod collection is never touched).
@@ -237,7 +241,7 @@ def cmd_screen(args: argparse.Namespace) -> None:
     _print_index_sizes(pool, [(a.label, a.chunking) for a in arms])
     with tempfile.TemporaryDirectory(prefix="paperlens-eval-") as tmp:
         t0 = time.time()
-        report = screen_chunking(cfg, pool, items, db_dir=tmp, grids=grids)
+        report = screen_chunking(cfg, pool, items, db_dir=tmp, grids=grids, show_progress=True)
         print(format_chunking_report(report))
         print(f"  ({time.time() - t0:.1f}s wall)")
 
@@ -264,7 +268,13 @@ def cmd_sweep(args: argparse.Namespace) -> None:
     with tempfile.TemporaryDirectory(prefix="paperlens-eval-") as tmp:
         t0 = time.time()
         report = sweep(
-            cfg, pool, items, db_dir=tmp, max_tokens_grid=mt_grid, candidate_grid=cand_grid
+            cfg,
+            pool,
+            items,
+            db_dir=tmp,
+            max_tokens_grid=mt_grid,
+            candidate_grid=cand_grid,
+            show_progress=True,
         )
         print(format_chunking_report(report))
         print(f"  ({time.time() - t0:.1f}s wall)")
@@ -409,6 +419,7 @@ def cmd_confirm(
             candidates=candidates,
             k=cfg.retrieval.k,
             rerank=rerank,
+            desc="scoring test split",
         )
     else:
         # Chunking changed -> a fresh index is required; isolate it (Guard 1) so the prod
@@ -425,6 +436,7 @@ def cmd_confirm(
                     db_dir=tmp,
                     embedder=embedder,
                     reranker=active_reranker,
+                    desc=f"embed max_tokens={max_tokens}",
                 )
             )
             report = run(
@@ -434,6 +446,7 @@ def cmd_confirm(
                 candidates=candidates,
                 k=cfg.retrieval.k,
                 rerank=rerank,
+                desc="scoring test split",
             )
 
     print(format_report(report))

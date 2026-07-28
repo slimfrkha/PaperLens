@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import hashlib
 
+from tqdm import tqdm
+
 from rag.chunking import Chunk, chunk_markdown
 from rag.config import ChunkingCfg, EmbeddingCfg
 from rag.embedders import build_embedder
@@ -71,13 +73,16 @@ def build_isolated_searcher(
     db_dir: str,
     embedder=None,
     reranker: Reranker | None = None,
+    desc: str | None = None,
 ) -> Searcher:
     """Re-index ``pool`` at ``(chunking, embedding)`` into a fresh cell collection under
     ``db_dir`` and return a :class:`Searcher` over it.
 
     ``db_dir`` is a throwaway directory owned by the caller (a ``TemporaryDirectory`` in
     prod, ``tmp_path`` in tests) — never ``paths.rag_db``. ``embedder`` is injectable so
-    offline tests skip the model download; production builds it from ``embedding``.
+    offline tests skip the model download; production builds it from ``embedding``. ``desc``
+    labels a progress bar over the embed-and-upsert batches (``rag.index.upsert_chunks``'s
+    existing ``progress`` hook); ``None`` (offline tests) runs silent.
     """
     embedder = embedder or build_embedder(embedding)
     chunks = chunks_for(pool, chunking)
@@ -85,7 +90,10 @@ def build_isolated_searcher(
     # reset=True: a *fresh* collection every call, so a re-chunk can never pile up on a
     # previous cell's ids (Guard 1). The count assertion below then has exact ground truth.
     collection = open_collection(db_dir, name, embedder_name=embedder.name(), reset=True)
-    upsert_chunks(collection, embedder, chunks)
+    with tqdm(total=len(chunks), desc=desc, disable=desc is None, leave=False) as bar:
+        upsert_chunks(
+            collection, embedder, chunks, progress=lambda done, _total: bar.update(done - bar.n)
+        )
     if collection.count() != len(chunks):
         raise AssertionError(
             f"cell {name}: collection.count()={collection.count()} != {len(chunks)} chunks — "

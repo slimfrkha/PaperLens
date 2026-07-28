@@ -25,6 +25,7 @@ dependencies = [
     "python-dotenv>=1.0",   # load .env (API keys)
     "draccus>=0.11,<0.12",  # dataclass config + CLI (parse/decode/ChoiceRegistry); pinned: parse_config subclasses ArgumentParser._postprocessing
     "omegaconf>=2.3",       # ${...} interpolation in config.yaml
+    "tqdm>=4.68.3",
 ]
 
 [project.optional-dependencies]
