@@ -1,4 +1,4 @@
-"""Phase 2 harness: a single-config run end-to-end over a real temp Chroma (fake embedder).
+"""Harness: a single-config run end-to-end over a real temp Chroma (fake embedder).
 
 No reranker (make_config disables it), no network — the dense path is exercised against a
 seeded collection, and the report's two metrics are asserted from a known layout.
@@ -131,7 +131,7 @@ def test_load_queryset_round_trips(tmp_path):
     assert loaded[0].gold_span == (3, 9)  # list -> tuple on load
 
 
-def test_load_queryset_rejects_pre_phase2_sets(tmp_path):
+def test_load_queryset_rejects_sets_missing_section_identity(tmp_path):
     # A row without section_title predates section-identity scoring; must fail loudly.
     path = tmp_path / "fp.dev.jsonl"
     path.write_text(json.dumps({"query": "q", "paper_id": "p", "gold_span": [0, 1]}) + "\n")

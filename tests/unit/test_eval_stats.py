@@ -1,4 +1,4 @@
-"""Phase 3 stats: paper-clustered paired bootstrap, delta CIs, and MDD.
+"""Stats: paper-clustered paired bootstrap, delta CIs, and MDD.
 
 Pure numeric tests on hand-built ``Sample`` lists — no Chroma, no models. The properties
 that matter and are easy to get silently wrong: the bootstrap clusters on *papers* (not

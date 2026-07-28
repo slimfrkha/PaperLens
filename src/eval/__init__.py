@@ -4,13 +4,13 @@ The harness recalibrates ``config.yaml`` for whatever pool of papers is loaded �
 is not a study of any fixed corpus. It composes ``rag`` (Searcher, llm, chunking,
 config) behind a ``paperlens-eval`` CLI; ``rag`` never imports ``eval``.
 
-Phase 1: ``gen`` builds a span-anchored QA eval set from the loaded pool. Gold is a
-character span in the source markdown (config-independent), so the set survives a
-re-chunk and keeps chunking configs comparable.
+``gen`` builds a span-anchored QA eval set from the loaded pool. Gold is a character span
+in the source markdown (config-independent), so the set survives a re-chunk and keeps
+chunking configs comparable.
 
-Phase 2: ``run`` scores one config on the dev set — ``success@candidates`` (stage-1
-ceiling) and gold-conditioned ``MRR@k`` (stage-2). Relevance is section identity, and the
-section is one relevant unit, so both metrics are chunking-independent.
+``run`` scores one config on the dev set — ``success@candidates`` (stage-1 ceiling) and
+gold-conditioned ``MRR@k`` (stage-2). Relevance is section identity, and the section is one
+relevant unit, so both metrics are chunking-independent.
 """
 
 from __future__ import annotations

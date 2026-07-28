@@ -212,7 +212,7 @@ across both sides and the held-out guarantee would be fiction.
 
 | Command | Re-indexes? | What it does |
 |---|---|---|
-| `paperlens-eval gen [--config] [--limit N] [--genfilter] [--genfilter-threshold F]` | No | Build/refresh the eval set for the loaded pool. `--genfilter` (Phase 7, off by default, ~2x LLM calls when on) discards closed-book-answerable questions. |
+| `paperlens-eval gen [--config] [--limit N] [--genfilter] [--genfilter-threshold F]` | No | Build/refresh the eval set for the loaded pool. `--genfilter` (off by default, ~2x LLM calls when on) discards closed-book-answerable questions. |
 | `paperlens-eval run [--config] [--limit N]` | No | Score the current config on the dev split. |
 | `paperlens-eval screen --tier retrieval [--candidates 10,20,30,50]` | No | OFAT: `reranker.enabled`, `retrieval.candidates`. |
 | `paperlens-eval screen --tier chunking [--max-tokens 256,1024]` | Yes, per cell | OFAT over `chunking.*` (default grids: `max_tokens`, `overlap_tokens`, `min_tokens`, `noise_ratio`). |
