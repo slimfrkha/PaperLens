@@ -185,7 +185,8 @@ see [Configuration: project root](configuration.md#-how-the-config-is-found)):
 |---|---|---|
 | `<fingerprint>.dev.jsonl` | `gen` | One `QAItem` per line: `query`, `paper_id`, `gold_span`, `source_unit`, `section_number`, `section_title`. Swept and screened freely. |
 | `<fingerprint>.test.jsonl` | `gen` | Same shape, held-out papers. Touched only by `confirm`. |
-| `<fingerprint>.meta.json` | `gen` | `fingerprint`, `n_papers`, `n_dev`/`n_test`, the frozen `GenConfig` used, the generation model, `limit`. |
+| `<fingerprint>.meta.json` | `gen` | `fingerprint`, `n_papers`, `n_dev`/`n_test`, the frozen `GenConfig` used, the generation model, `limit`, and a `genfilter` block (`enabled`, `match_threshold`, `n_filtered`) — present even when `--genfilter` wasn't used. |
+| `<fingerprint>.genfilter.jsonl` | `gen --genfilter` | One line per **checked** item (leaked or not): `query`, `paper_id`, `gold_answer`, `closed_book_answer`, `score`, `leaked`, `error`. The audit/calibration trail, not just the discards — see [Known limits](#️-known-limits-read-before-trusting-a-recommendation). `error` is `null` for a real check, `"no_gold_answer"` when there was nothing to compare against, or `"llm_error: ..."` on a failed closed-book call — so a row with `score: 0.0` can be told apart from a skipped/failed one instead of both looking identical. Present but empty when `--genfilter` wasn't passed. |
 | `<fingerprint>.confirm.json` | `confirm` | `timestamp`, the confirmed `max_tokens`/`candidates`/`rerank`, and the resulting scores — checked before every `confirm` run and printed as a loud, non-blocking warning on a repeat, so re-touching the test split leaves a trace instead of happening silently. |
 
 **`fingerprint`** (`fingerprint.corpus_fingerprint`) is a SHA-256 over the sorted paper ids
@@ -211,7 +212,7 @@ across both sides and the held-out guarantee would be fiction.
 
 | Command | Re-indexes? | What it does |
 |---|---|---|
-| `paperlens-eval gen [--config] [--limit N]` | No | Build/refresh the eval set for the loaded pool. |
+| `paperlens-eval gen [--config] [--limit N] [--genfilter] [--genfilter-threshold F]` | No | Build/refresh the eval set for the loaded pool. `--genfilter` (Phase 7, off by default, ~2x LLM calls when on) discards closed-book-answerable questions. |
 | `paperlens-eval run [--config] [--limit N]` | No | Score the current config on the dev split. |
 | `paperlens-eval screen --tier retrieval [--candidates 10,20,30,50]` | No | OFAT: `reranker.enabled`, `retrieval.candidates`. |
 | `paperlens-eval screen --tier chunking [--max-tokens 256,1024]` | Yes, per cell | OFAT over `chunking.*` (default grids: `max_tokens`, `overlap_tokens`, `min_tokens`, `noise_ratio`). |
@@ -251,7 +252,14 @@ isn't directly confirmable — edit `config.yaml` by hand for those and re-run `
   penalizes every arm equally and cancels in the paired delta — so the harness stays fully
   automated rather than gating on a hand-audit. The safety net is the resolution reporting
   above: a dirtier set produces a *higher* MDD, and the tool says "can't distinguish these
-  configs on this pool," a visible failure, not a silently wrong one.
+  configs on this pool," a visible failure, not a silently wrong one. If a pool's MDD does come
+  out too high, `paperlens-eval gen --genfilter` adds an optional closed-book pre-check
+  (`genfilter.py`) that discards questions the model already answers without the section — off
+  by default, no judge call. **The match heuristic is a blunt token-overlap score and can
+  false-positive on shared ML jargon** (a generic-but-wrong closed-book guess can still overlap
+  a gold answer on words like "attention" or "cosine schedule") — hand-check a sample of
+  `<fingerprint>.genfilter.jsonl` (every checked item, not just the discards) before trusting
+  the default threshold on a new pool.
 
 ## 🧪 Scope
 

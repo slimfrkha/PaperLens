@@ -29,6 +29,7 @@ from rag.reranker import Reranker
 from rag.search import Searcher
 
 from .fingerprint import corpus_fingerprint, load_pool
+from .genfilter import GenFilterConfig, check_leak
 from .harness import format_report, run
 from .index_isolated import build_isolated_searcher, chunks_for
 from .optimizer import (
@@ -58,25 +59,54 @@ def cmd_gen(args: argparse.Namespace) -> None:
 
     fingerprint = corpus_fingerprint(pool)
     gen = GenConfig()
+    gfcfg = GenFilterConfig(enabled=args.genfilter)
+    if args.genfilter_threshold is not None:
+        gfcfg = replace(gfcfg, match_threshold=args.genfilter_threshold)
     test_ids = held_out_paper_ids(pool, gen)
     out_dir = Path(cfg.root) / "evals"
     out_dir.mkdir(parents=True, exist_ok=True)
     dev_path = out_dir / f"{fingerprint}.dev.jsonl"
     test_path = out_dir / f"{fingerprint}.test.jsonl"
+    genfilter_path = out_dir / f"{fingerprint}.genfilter.jsonl"
 
     smoke = "  [smoke: --limit]" if args.limit else ""
-    print(f"Pool: {len(pool)} papers  fingerprint={fingerprint}{smoke}")
+    flt = f"  [genfilter on, threshold={gfcfg.match_threshold}]" if gfcfg.enabled else ""
+    print(f"Pool: {len(pool)} papers  fingerprint={fingerprint}{smoke}{flt}")
     print(f"Generating with {cfg.llm.tagging.model} (one question per section)...")
 
     llm = build_llm(cfg.llm.tagging)
-    n_dev = n_test = 0
+    n_dev = n_test = n_filtered = 0
     # Stream to disk as questions are produced: a crash keeps partial progress, and a
     # per-section failure in iter_queryset is skipped rather than losing the batch.
+    # genfilter_path is opened unconditionally (simpler than an Optional-file dance) but
+    # only written to when gfcfg.enabled — an empty file when --genfilter is off is an
+    # honest "nothing was checked" signal, not a file that sometimes doesn't exist.
     with (
         open(dev_path, "w", encoding="utf-8") as fdev,
         open(test_path, "w", encoding="utf-8") as ftest,
+        open(genfilter_path, "w", encoding="utf-8") as faudit,
     ):
         for it in iter_queryset(pool, llm, gen):
+            if gfcfg.enabled:
+                check = check_leak(it, llm, gfcfg.match_threshold)
+                faudit.write(
+                    json.dumps(
+                        {
+                            "query": it.query,
+                            "paper_id": it.paper_id,
+                            "gold_answer": it.answer,
+                            "closed_book_answer": check.predicted,
+                            "score": check.score,
+                            "leaked": check.leaked,
+                            "error": check.error,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+                if check.leaked:
+                    n_filtered += 1
+                    continue
             line = json.dumps(item_to_dict(it), ensure_ascii=False) + "\n"
             if it.paper_id in test_ids:
                 ftest.write(line)
@@ -96,11 +126,21 @@ def cmd_gen(args: argparse.Namespace) -> None:
                 "gen_config": asdict(gen),
                 "gen_model": cfg.llm.tagging.model,
                 "limit": args.limit,
+                "genfilter": {
+                    "enabled": gfcfg.enabled,
+                    "match_threshold": gfcfg.match_threshold,
+                    "n_filtered": n_filtered,
+                },
             },
             indent=2,
         )
     )
-    print(f"Wrote {n_dev} dev / {n_test} test questions to {out_dir}")
+    filt_msg = (
+        f"  ({n_filtered} discarded as closed-book-answerable — see {genfilter_path.name})"
+        if gfcfg.enabled
+        else ""
+    )
+    print(f"Wrote {n_dev} dev / {n_test} test questions to {out_dir}{filt_msg}")
 
 
 def _load_dev_set(args: argparse.Namespace):
@@ -432,6 +472,23 @@ def main() -> None:
         type=int,
         default=None,
         help="smoke test: cap the pool to the first N papers (own fingerprint, no clobber)",
+    )
+    g.add_argument(
+        "--genfilter",
+        action="store_true",
+        help=(
+            "Phase 7: closed-book leakage filter — discard questions the model can already "
+            "answer without the section (rag.llm, no judge call). Roughly doubles gen's LLM "
+            "call volume. Off by default; add only if a screen/sweep report's MDD is too "
+            "high to be useful, and hand-check <fingerprint>.genfilter.jsonl before trusting "
+            "the default threshold on a new pool."
+        ),
+    )
+    g.add_argument(
+        "--genfilter-threshold",
+        type=float,
+        default=None,
+        help="override GenFilterConfig.match_threshold (token-F1 cutoff; default 0.5, unvalidated)",
     )
     g.set_defaults(func=cmd_gen)
 
