@@ -6,11 +6,11 @@ internal detail and may change.
 
 Module layering — imports flow one way (top -> bottom); there are no cycles::
 
-    config  chunking  extract  manifest              (leaves: no intra-rag deps)
-       |        |         |         |
+    config  chunking  extract  manifest  sparse       (leaves: no intra-rag deps)
+       |        |         |         |        |
     embedders(config)   llm(config)   index(chunking, embedders)   reranker(config, llm)
        |                                              |
-    tagger(llm)   search(embedders, reranker)   pipeline(extract, index, manifest, tagger)
+    tagger(llm)   search(embedders, reranker, sparse)   pipeline(extract, index, manifest, tagger)
                               |
                          ingest(pipeline, index, manifest, tagger)
 
@@ -25,6 +25,7 @@ from __future__ import annotations
 from .chunking import Chunk, chunk_markdown
 from .config import (
     AnthropicSpec,
+    BM25Cfg,
     ChunkingCfg,
     Config,
     EmbeddingCfg,
@@ -42,6 +43,7 @@ from .config import (
     Paper,
     RerankerCfg,
     SGLangSpec,
+    SparseCfg,
     VLLMSpec,
     load_config,
     parse_config,
@@ -60,10 +62,13 @@ from .manifest import Manifest
 from .pipeline import build_embedder_from_config, ingest_paper, pending_papers
 from .reranker import Reranker, build_reranker
 from .search import Result, Searcher
+from .sparse import BM25Index, build_sparse_index, reciprocal_rank_fusion, rrf_scores
 from .tagger import generate_tags
 
 __all__ = [
     "AnthropicSpec",
+    "BM25Cfg",
+    "BM25Index",
     "Chunk",
     "ChunkingCfg",
     "Config",
@@ -92,11 +97,13 @@ __all__ = [
     "Result",
     "SGLangSpec",
     "Searcher",
+    "SparseCfg",
     "VLLMSpec",
     "build_embedder",
     "build_embedder_from_config",
     "build_llm",
     "build_reranker",
+    "build_sparse_index",
     "chunk_markdown",
     "generate_tags",
     "index_markdown",
@@ -105,4 +112,6 @@ __all__ = [
     "open_collection",
     "parse_config",
     "pending_papers",
+    "reciprocal_rank_fusion",
+    "rrf_scores",
 ]

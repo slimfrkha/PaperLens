@@ -12,6 +12,7 @@ import pytest
 
 from eval.harness import run, score_items
 from eval.queryset import QAItem, load_queryset
+from rag.search import Searcher
 
 
 class _FakeReranker:
@@ -95,6 +96,55 @@ def test_run_overrides_win_over_cfg_and_omitting_them_reproduces_cfg_behavior(
     assert override_report.candidates == 1
     assert override_report.k == 1
     assert override_report.rerank is True
+
+
+def test_retrieve_respects_searcher_sparse_enabled(make_config, seed_chunks):
+    # Regression: _retrieve used to bypass Searcher.sparse_enabled entirely (dense-only always),
+    # so `run`/`confirm` silently ignored a config's `sparse.enabled: true`. A deterministic
+    # embedder (FakeEmbedder is itself lexical — shared words land close — which makes "dense
+    # misses it" hard to construct reliably; see tests/integration/test_search.py) decouples
+    # dense closeness from BM25-relevant content, so this isolates the wiring being tested.
+    from rag.index import open_collection
+
+    class _DirectionalEmbedder:
+        def _vec(self, text: str) -> list[float]:
+            return [0.0, 1.0] if "FAR_MARKER" in text else [1.0, 0.0]
+
+        def __call__(self, input: list[str]) -> list[list[float]]:
+            return [self._vec(t) for t in input]
+
+    embedder = _DirectionalEmbedder()
+    cfg = make_config()
+    collection = open_collection(cfg.paths.rag_db, cfg.collection, embedder_name="directional")
+    docs = [
+        seed_chunks("target", "Method", "FAR_MARKER zzflorble appears once here", doc_id="target"),
+        seed_chunks("close-0", "Other", "totally unrelated content number 0", doc_id="close-0"),
+        seed_chunks("close-1", "Other", "totally unrelated content number 1", doc_id="close-1"),
+    ]
+    texts = [text for _, text, _ in docs]
+    collection.upsert(
+        ids=[doc_id for doc_id, _, _ in docs],
+        embeddings=embedder(texts),
+        documents=texts,
+        metadatas=[meta for _, _, meta in docs],
+    )
+    items = [_item("zzflorble", "target", "Method")]
+
+    dense_only = Searcher(
+        db_dir=cfg.paths.rag_db, collection=cfg.collection, embedder=embedder, sparse_enabled=False
+    )
+    assert (
+        score_items(dense_only, items, candidates=1, k=1, rerank=False)[0].ranked[0][0] != "target"
+    )
+
+    hybrid = Searcher(
+        db_dir=cfg.paths.rag_db,
+        collection=cfg.collection,
+        embedder=embedder,
+        sparse_enabled=True,
+        fetch_multiplier=3,
+    )
+    assert score_items(hybrid, items, candidates=1, k=1, rerank=False)[0].ranked[0][0] == "target"
 
 
 def test_score_items_pairs_each_query_with_its_relevant_set(

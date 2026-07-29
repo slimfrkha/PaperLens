@@ -105,6 +105,22 @@ one. (Changing the embedder alone likewise invalidates the index; see the embedd
 | `max_length` | int | `512` | **`hf` only.** Cross-encoder input token cap — raise it if `chunking.max_tokens` grows, or passages get silently truncated before scoring. |
 | `max_chars` | int | `600` | **`llm` only.** Per-passage excerpt length sent to the judge LLM. |
 
+### 🔀 `sparse`
+
+Opt-in hybrid dense+BM25 retrieval: a lexical (BM25) search runs alongside dense recall and
+the two rankings are fused via reciprocal rank fusion (RRF) before reranking. Unproven until
+screened — `enabled` defaults to `false`; use `paperlens-eval screen --tier retrieval --hybrid`
+to measure it on your pool before flipping it on (see [harness](harness.md)).
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `type` | string | `bm25` | Sparse backend variant (only `bm25` today). |
+| `enabled` | bool | `false` | Turn hybrid fusion on/off. Opt-in, unlike `reranker.enabled` — this needs a harness screen first. |
+| `rrf_k` | int | `60` | Reciprocal-rank-fusion constant (`score = Σ 1/(k + rank)`); shared across sparse variants. |
+| `fetch_multiplier` | int | `3` | Each system (dense, BM25) over-fetches `fetch_multiplier × retrieval.candidates` before fusing, then truncates to `candidates` — gives RRF margin to promote a hit either side ranked outside its own top-`candidates`. Must be `>= 1`. |
+| `k1` | float | `1.5` | **`bm25` only.** BM25 term-frequency saturation constant (`rank_bm25` default). |
+| `b` | float | `0.75` | **`bm25` only.** BM25 length-normalization constant (`rank_bm25` default). |
+
 ### 🤖 `llm`
 
 Two LLM specs share one schema. `llm.tagging` labels papers at ingestion (cheap/fast is

@@ -108,6 +108,19 @@ reranker can even be the chat LLM (`reranker.type: llm`), scoring passages 0–1
 batched call — and if its response can't be parsed it falls back to the dense order rather
 than injecting noise. A `paper`/`paper_ids` filter (used by the tag filter) scopes recall.
 
+**Hybrid dense+sparse retrieval** (`sparse.enabled`, opt-in, off by default) inserts a fusion
+step before reranking: a BM25 lexical search (`src/rag/sparse.py`) runs alongside dense recall
+— each side over-fetching `sparse.fetch_multiplier × candidates` first — and the two rankings
+merge via reciprocal rank fusion (RRF), truncated back to `candidates` before reranking
+proceeds unchanged. BM25 catches exact lexical tokens (model IDs, acronyms) a bi-encoder can
+smear into semantic space. Unlike the reranker, a BM25 index is a **snapshot** of the corpus at
+build time (its IDF needs global corpus stats) — `Searcher.sparse` is a lazy property that
+rebuilds whenever the collection has grown since the snapshot was taken, so a live
+`/api/admin/rescan` can't leave it silently stale. Ship-worthiness is measured, not assumed:
+`paperlens-eval screen --tier retrieval --hybrid` (see [harness](harness.md)) adds a
+`"hybrid=on"` arm to the retrieval screen so the config change is proposed with evidence before
+`sparse.enabled` flips to `true`.
+
 ## 🤖 The agent: retrieval as a tool
 
 Chat is **agentic RAG** (`src/server/agent.py`): a ReAct loop over the model's native tool
@@ -145,10 +158,10 @@ Why a tool instead of always retrieving:
 
 ## 🗂️ Swappable backends: the ChoiceRegistry pattern
 
-Embedders, rerankers, and LLM backends are selected by a config `type` string and modelled
-as `draccus.ChoiceRegistry` tagged unions (`EmbeddingCfg`, `RerankerCfg`, `LLMSpec` in
-`config.py`): the `type` decodes straight to a variant dataclass carrying only that
-backend's fields. Adding a backend is one `@Base.register_subclass("name")` dataclass plus a
+Embedders, rerankers, sparse backends, and LLM backends are selected by a config `type`
+string and modelled as `draccus.ChoiceRegistry` tagged unions (`EmbeddingCfg`, `RerankerCfg`,
+`SparseCfg`, `LLMSpec` in `config.py`): the `type` decodes straight to a variant dataclass
+carrying only that backend's fields. Adding a backend is one `@Base.register_subclass("name")` dataclass plus a
 `match` arm in `build_embedder` / `build_reranker` / `build_llm` — no `if/elif` on strings,
 and an unknown `type` or stray field fails loudly at load. See
 [How-to: add a backend](how-to.md#add-a-new-llm-backend). This is what lets "the LLM is an
@@ -162,7 +175,7 @@ The full `Config` is the single decode target, but the ingestion core (`pipeline
 the server's `worker`) is typed to `IngestConfig` — a frozen, read-only *projection* of
 `Config` (`Config.for_ingest()`) exposing only the fields ingestion consumes (`paths`,
 `collection`, `embedding`, `tagging`, `chunking`, `extraction`, `tagger`, `papers`). It
-cannot express `server` / `reranker` / `retrieval` / `llm.chat`, so the ingest/serve
+cannot express `server` / `reranker` / `sparse` / `retrieval` / `llm.chat`, so the ingest/serve
 boundary is enforced by the type checker. There is deliberately **no** `ServeConfig`: serve
 uses the full `Config`, because `create_app` hosts the ingestion worker and therefore reads
 every field.

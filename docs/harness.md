@@ -214,7 +214,7 @@ across both sides and the held-out guarantee would be fiction.
 |---|---|---|
 | `paperlens-eval gen [--config] [--limit N] [--genfilter] [--genfilter-threshold F]` | No | Build/refresh the eval set for the loaded pool. `--genfilter` (off by default, ~2x LLM calls when on) discards closed-book-answerable questions. |
 | `paperlens-eval run [--config] [--limit N]` | No | Score the current config on the dev split. |
-| `paperlens-eval screen --tier retrieval [--candidates 10,20,30,50]` | No | OFAT: `reranker.enabled`, `retrieval.candidates`. |
+| `paperlens-eval screen --tier retrieval [--candidates 10,20,30,50] [--hybrid]` | No | OFAT: `reranker.enabled`, `retrieval.candidates`. `--hybrid` adds a `"hybrid=on"` arm (BM25 fused via RRF) — independent of `sparse.enabled` in config.yaml, so this is how you measure hybrid retrieval *before* deciding whether to turn it on (see [configuration](configuration.md)). |
 | `paperlens-eval screen --tier chunking [--max-tokens 256,1024]` | Yes, per cell | OFAT over `chunking.*` (default grids: `max_tokens`, `overlap_tokens`, `min_tokens`, `noise_ratio`). |
 | `paperlens-eval sweep [--max-tokens ...] [--candidates ...]` | Yes, per `max_tokens` | Staged grid over the two fixed mechanistic axes: `chunking.max_tokens × retrieval.candidates × reranker.enabled`. Independent of `screen` — reads no file it writes. |
 | `paperlens-eval confirm [--max-tokens N] [--candidates N] [--rerank/--no-rerank]` | Only if `--max-tokens` differs from the config's own value | Score one config once on the test split; print the `config.yaml` block. |

@@ -145,6 +145,31 @@ class LLMRerankerCfg(RerankerCfg):
     max_chars: int = 600  # per-passage excerpt sent to the judge LLM
 
 
+# --- Sparse: opt-in lexical retrieval, fused with dense recall via RRF ---
+@dataclass
+class SparseCfg(draccus.ChoiceRegistry):
+    enabled: bool = False  # opt-in — unlike reranker.enabled=True, this is unproven until screened
+    rrf_k: int = 60  # reciprocal-rank-fusion constant; shared across sparse variants
+    fetch_multiplier: int = 3  # each system over-fetches fetch_multiplier * candidates pre-fusion
+
+    def __post_init__(self) -> None:
+        # fetch_multiplier feeds n_results on the dense Chroma query too (search.py) whenever
+        # sparse is enabled — a value < 1 would silently zero out dense recall, not just sparse.
+        if self.fetch_multiplier < 1:
+            raise ValueError("sparse.fetch_multiplier must be >= 1")
+
+    @classmethod
+    def default_choice_name(cls) -> str:
+        return "bm25"
+
+
+@SparseCfg.register_subclass("bm25")
+@dataclass
+class BM25Cfg(SparseCfg):
+    k1: float = 1.5
+    b: float = 0.75
+
+
 # --- LLM backends: a `type` string selects the provider variant ---
 @dataclass
 class LLMSpec(draccus.ChoiceRegistry):
@@ -270,6 +295,7 @@ class Config:
     data_path: str = "data"
     embedding: EmbeddingCfg = field(default_factory=HFEmbeddingCfg)
     reranker: RerankerCfg = field(default_factory=HFRerankerCfg)
+    sparse: SparseCfg = field(default_factory=BM25Cfg)
     llm: LLMCfg = field(default_factory=LLMCfg)
     chunking: ChunkingCfg = field(default_factory=ChunkingCfg)
     extraction: ExtractionCfg = field(default_factory=ExtractionCfg)

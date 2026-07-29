@@ -14,6 +14,7 @@ dependencies = [
     # RAG indexing stack
     "chromadb>=1.5",
     "sentence-transformers>=3.0",   # default `hf` embedder + reranker
+    "rank-bm25>=0.2",       # sparse (BM25) retrieval for hybrid dense+sparse search
     "openai>=1.0",          # OpenAI-compatible embedding + LLM backend
     "tiktoken>=0.7",
     # App backend (FastAPI server + ingestion worker)

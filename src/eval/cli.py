@@ -223,10 +223,13 @@ def cmd_screen(args: argparse.Namespace) -> None:
     print(f"Pool: {len(pool)} papers  fingerprint={fingerprint}  dev={len(items)} questions")
     if args.tier == "retrieval":
         grid = _parse_grid(args.candidates)
-        print("Screening retrieval knobs (reranker on/off, candidates depth) on the dev split...")
+        hybrid_msg = " + hybrid=on" if args.hybrid else ""
+        print(f"Screening retrieval knobs (reranker/candidates{hybrid_msg}) on the dev split...")
         print(
             format_screen_report(
-                screen_retrieval(cfg, items, candidate_grid=grid, show_progress=True)
+                screen_retrieval(
+                    cfg, items, candidate_grid=grid, show_progress=True, hybrid=args.hybrid
+                )
             )
         )
         return
@@ -537,6 +540,12 @@ def main() -> None:
         "--candidates",
         default=None,
         help="--tier retrieval: comma-separated candidates grid (default 10,20,30,50)",
+    )
+    s.add_argument(
+        "--hybrid",
+        action="store_true",
+        help="--tier retrieval: add a 'hybrid=on' arm (BM25 fused via RRF) — independent of "
+        "config.yaml's sparse.enabled, so this is how you measure hybrid before turning it on",
     )
     s.add_argument(
         "--max-tokens",

@@ -30,11 +30,12 @@ from typing import Any, cast
 
 from tqdm import tqdm
 
-from rag.config import ChunkingCfg, Config, LLMRerankerCfg
+from rag.config import BM25Cfg, ChunkingCfg, Config, LLMRerankerCfg
 from rag.embedders import build_embedder
 from rag.llm import build_llm
 from rag.reranker import Reranker, build_reranker
 from rag.search import Searcher
+from rag.sparse import BM25Index, build_sparse_index, reciprocal_rank_fusion
 
 from .harness import build_searcher, score_items
 from .index_isolated import build_isolated_searcher
@@ -77,11 +78,12 @@ DEFAULT_MAX_TOKENS_GRID = [256, 512, 1024]  # chunking re-index axis of the swee
 
 @dataclass
 class Arm:
-    """One config point in the screen: a candidates depth and a reranker on/off."""
+    """One config point in the screen: a candidates depth, a reranker on/off, and hybrid on/off."""
 
     label: str
     candidates: int
     rerank: bool
+    sparse: bool = False
 
 
 @dataclass
@@ -89,8 +91,11 @@ class QueryCache:
     """Everything retrieved once per query, reused by every arm.
 
     ``candidate_ids`` is the dense pool ordered by ascending cosine distance (Chroma's own
-    order) at ``max(grid)`` depth; ``rerank_scores`` maps each of those ids to its
-    cross-encoder score over the full pool; ``relevant_ids`` is the gold-section set.
+    order) at ``max(grid)`` depth (or ``max(grid) * fetch_multiplier`` when a hybrid arm widened
+    it — see :func:`build_cache`); ``rerank_scores`` maps each of those ids, plus every id in
+    ``sparse_ids``, to its cross-encoder score over the full unioned pool; ``relevant_ids`` is
+    the gold-section set. ``sparse_ids`` is the BM25 pool at the same depth, empty when no
+    ``sparse`` index was passed to :func:`build_cache`.
     """
 
     qid: str
@@ -98,6 +103,7 @@ class QueryCache:
     candidate_ids: list[str]
     rerank_scores: dict[str, float]
     relevant_ids: set[str]
+    sparse_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -117,6 +123,7 @@ class ScreenReport:
     n_queries: int
     n_clusters: int
     results: list[ArmResult]
+    caveats: list[str] = field(default_factory=list)
 
 
 def build_reranker_for_cfg(cfg: Config) -> Reranker:
@@ -132,13 +139,25 @@ def build_cache(
     max_candidates: int,
     reranker: Reranker,
     desc: str | None = None,
+    sparse: BM25Index | None = None,
+    fetch_multiplier: int = 3,
 ) -> list[QueryCache]:
-    """Retrieve once per query at ``max_candidates`` depth and score the pool with ``reranker``.
+    """Retrieve once per query and score the pool with ``reranker``.
 
-    One dense query + one rerank pass per item; every arm reads from the returned cache.
-    ``desc`` labels a progress bar over ``items`` (this is the one expensive pass every
-    retrieval arm derives from); ``None`` (offline tests) runs silent.
+    At ``max_candidates`` depth when ``sparse`` is ``None``. When ``sparse`` is given, both the
+    dense query and the BM25 query widen to ``max_candidates * fetch_multiplier`` — the same
+    over-fetch-before-fusion margin ``Searcher.search`` uses (Revision note 2 in
+    ``hybrid_retrieval_plan.md``) — so a hybrid arm's cache has the same fusion margin the real
+    ``Searcher`` would give it, not an artificially narrowed one.
+
+    One dense query (+ one BM25 query when ``sparse`` is given) + one rerank pass per item over
+    the **union** of both pools; every arm reads from the returned cache. The default (non-
+    hybrid) arm stays exact: its ``candidate_ids`` are the dense pool alone, unaffected by
+    whether ``sparse`` widened the cache underneath it. ``desc`` labels a progress bar over
+    ``items`` (this is the one expensive pass every retrieval arm derives from); ``None``
+    (offline tests) runs silent.
     """
+    fetch_n = max_candidates * fetch_multiplier if sparse is not None else max_candidates
     caches: list[QueryCache] = []
     for i, it in enumerate(tqdm(items, desc=desc, disable=desc is None, leave=False)):
         embed_query = getattr(searcher.embedder, "embed_query", None)
@@ -149,38 +168,66 @@ def build_cache(
             dict[str, Any],
             searcher.collection.query(
                 query_embeddings=qvec,  # ty: ignore[invalid-argument-type]  # list invariance vs Chroma's Sequence param
-                n_results=max_candidates,
+                n_results=fetch_n,
                 include=["documents", "distances"],
             ),
         )
         ids: list[str] = res["ids"][0]
-        scores = reranker.score(it.query, res["documents"][0]) if ids else []
+        union_ids, union_docs = list(ids), list(res["documents"][0])
+        sparse_ids: list[str] = sparse.search(it.query, n=fetch_n) if sparse is not None else []
+        missing = [cid for cid in sparse_ids if cid not in ids]
+        if missing:
+            got = cast(dict[str, Any], searcher.collection.get(ids=missing, include=["documents"]))
+            union_ids.extend(got["ids"])
+            union_docs.extend(got["documents"])
+        scores = reranker.score(it.query, union_docs) if union_ids else []
         caches.append(
             QueryCache(
                 qid=str(i),
                 paper_id=it.paper_id,
                 candidate_ids=ids,
-                rerank_scores=dict(zip(ids, scores, strict=True)),
+                rerank_scores=dict(zip(union_ids, scores, strict=True)),
                 relevant_ids=relevant_ids(
                     searcher.collection, it.paper_id, it.section_number, it.section_title
                 ),
+                sparse_ids=sparse_ids,
             )
         )
     return caches
 
 
-def score_from_cache(cache: QueryCache, *, candidates: int, k: int, rerank: bool) -> QueryScore:
+def score_from_cache(
+    cache: QueryCache,
+    *,
+    candidates: int,
+    k: int,
+    rerank: bool,
+    sparse: bool = False,
+    rrf_k: int = 60,
+    fetch_multiplier: int = 3,
+) -> QueryScore:
     """Derive one arm's :class:`QueryScore` by slicing the cache — no retrieval.
 
-    Slices the distance-ordered pool to top-``candidates``, then either sorts that slice by
-    cached rerank score (on) or keeps the distance order (off), and takes the top ``k``.
+    Non-hybrid arms (the default and every existing OFAT arm) slice the dense pool to
+    top-``candidates`` — unaffected by whether the cache was built wide for a hybrid arm
+    elsewhere, since list slicing truncates the same either way. Hybrid arms RRF-fuse an
+    over-fetched slice of both pools first — the same over-fetch-then-truncate shape
+    ``Searcher.search`` uses — then either sort the fused pool by cached rerank score (on) or
+    keep fused order (off), and take the top ``k``.
     """
-    cand = cache.candidate_ids[:candidates]
+    if sparse:
+        fetch_n = candidates * fetch_multiplier
+        cand = reciprocal_rank_fusion(
+            [cache.candidate_ids[:fetch_n], cache.sparse_ids[:fetch_n]], k=rrf_k
+        )[:candidates]
+    else:
+        cand = cache.candidate_ids[:candidates]
     if rerank:
         ordered = sorted(cand, key=lambda cid: cache.rerank_scores[cid], reverse=True)
         ranked = [(cid, cache.rerank_scores[cid]) for cid in ordered[:k]]
     else:
-        # Chroma returned candidate_ids in ascending-distance (descending-similarity) order.
+        # Non-hybrid: Chroma returned candidate_ids in ascending-distance order. Hybrid: `cand`
+        # is already RRF-fused order.
         ranked = [(cid, 0.0) for cid in cand[:k]]
     return QueryScore(
         qid=cache.qid,
@@ -210,17 +257,37 @@ def screen_retrieval(
     candidate_grid: list[int] | None = None,
     searcher: Searcher | None = None,
     show_progress: bool = False,
+    hybrid: bool = False,
 ) -> ScreenReport:
     """Screen reranker on/off and candidates depth over the loaded pool, paired vs default.
 
     ``searcher`` is injectable for offline tests; production builds one from ``cfg``.
     ``show_progress`` shows a bar over the one cache-build pass; off by default (offline
-    tests), the CLI opts in.
+    tests), the CLI opts in. ``hybrid`` adds one more arm, ``"hybrid=on"``, that RRF-fuses BM25
+    into the default arm's candidates/rerank settings — gated on this explicit flag, **not** on
+    ``cfg.sparse.enabled``: the harness's whole purpose is proposing config changes before
+    they're committed, so requiring ``sparse.enabled: true`` first would make it impossible to
+    measure the one case that matters (deciding whether to turn it on).
     """
     searcher = searcher or build_searcher(cfg)
     grid = candidate_grid or DEFAULT_CANDIDATE_GRID
     k = cfg.retrieval.k
     arms = _arms(cfg, grid)
+    rrf_k, fetch_multiplier = cfg.sparse.rrf_k, cfg.sparse.fetch_multiplier
+    sparse_index: BM25Index | None = None
+    caveats: list[str] = []
+    if hybrid:
+        c0, r0 = cfg.retrieval.candidates, cfg.reranker.enabled
+        arms = [*arms, Arm(label="hybrid=on", candidates=c0, rerank=r0, sparse=True)]
+        k1 = cfg.sparse.k1 if isinstance(cfg.sparse, BM25Cfg) else 1.5
+        b = cfg.sparse.b if isinstance(cfg.sparse, BM25Cfg) else 0.75
+        sparse_index = build_sparse_index(searcher.collection, k1=k1, b=b)
+        caveats.append(
+            f"hybrid=on uses rrf_k={rrf_k} and fetch_multiplier={fetch_multiplier} as-is from "
+            "config — neither is OFAT-screened in this pass (RRF is fairly insensitive to k in "
+            "the 10-100 range; fetch_multiplier's shipped default, 3, is the "
+            "peer-implementation reference value, not something screened here)"
+        )
     max_candidates = max(a.candidates for a in arms)
     # Reach past Searcher's public `.reranker` property on purpose: that property lazily builds
     # the default hf cross-encoder, which is the WRONG reranker for an `llm`-type config.
@@ -233,11 +300,22 @@ def screen_retrieval(
         max_candidates=max_candidates,
         reranker=reranker,
         desc="retrieval cache" if show_progress else None,
+        sparse=sparse_index,
+        fetch_multiplier=fetch_multiplier,
     )
 
     def arm_scores(arm: Arm) -> list[QueryScore]:
         return [
-            score_from_cache(c, candidates=arm.candidates, k=k, rerank=arm.rerank) for c in cache
+            score_from_cache(
+                c,
+                candidates=arm.candidates,
+                k=k,
+                rerank=arm.rerank,
+                sparse=arm.sparse,
+                rrf_k=rrf_k,
+                fetch_multiplier=fetch_multiplier,
+            )
+            for c in cache
         ]
 
     default_scores = arm_scores(arms[0])
@@ -266,6 +344,7 @@ def screen_retrieval(
         n_queries=len(items),
         n_clusters=_min_report_clusters(results),
         results=results,
+        caveats=caveats,
     )
 
 
@@ -364,6 +443,8 @@ def format_screen_report(report: ScreenReport) -> str:
         lines.append(f"  ⚠ {saturated}")
     for r in report.results:
         lines.append(_arm_row(r.arm.label, r.success, r.success_delta, r.mrr, r.mrr_delta))
+    for caveat in report.caveats:
+        lines.append(f"  · {caveat}")
     return "\n".join(lines)
 
 

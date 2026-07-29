@@ -14,10 +14,11 @@ from typing import Any, cast
 
 from tqdm import tqdm
 
-from rag.config import Config, LLMRerankerCfg
+from rag.config import BM25Cfg, Config, LLMRerankerCfg
 from rag.llm import build_llm
 from rag.reranker import build_reranker
 from rag.search import Searcher
+from rag.sparse import reciprocal_rank_fusion, rrf_scores
 
 from .metrics import (
     QueryScore,
@@ -63,6 +64,11 @@ def build_searcher(cfg: Config) -> Searcher:
         collection=cfg.collection,
         embedder_model=cfg.embedding.model,
         reranker=reranker,
+        sparse_enabled=cfg.sparse.enabled,
+        bm25_k1=cfg.sparse.k1 if isinstance(cfg.sparse, BM25Cfg) else 1.5,
+        bm25_b=cfg.sparse.b if isinstance(cfg.sparse, BM25Cfg) else 0.75,
+        rrf_k=cfg.sparse.rrf_k,
+        fetch_multiplier=cfg.sparse.fetch_multiplier,
     )
 
 
@@ -71,30 +77,51 @@ def _retrieve(
 ) -> tuple[list[str], list[tuple[str, float]]]:
     """Return ``(candidate_ids, ranked_top_k)`` for one query.
 
-    ``candidate_ids`` is the full pre-rerank dense pool (for stage-1 recall); ``ranked`` is
-    the reranked top-k as ``(chunk_id, score)`` (for stage-2 nDCG). Mirrors ``Searcher``'s
-    own embed → query → rerank path but keeps the chunk ids ``search`` throws away.
+    ``candidate_ids`` is the full pre-rerank pool (for stage-1 recall) — dense alone, or
+    RRF-fused with BM25 when ``searcher.sparse_enabled`` (``build_searcher`` sets this from
+    ``cfg.sparse.enabled``, so ``run``/``confirm`` genuinely reflect a config that has hybrid
+    turned on, not just the dense-only reading the pre-hybrid version of this function gave).
+    ``ranked`` is the reranked top-k as ``(chunk_id, score)`` (for stage-2 nDCG). Mirrors
+    ``Searcher``'s own embed → query → (fuse) → rerank path but keeps the chunk ids ``search``
+    throws away.
     """
     embed_query = getattr(searcher.embedder, "embed_query", None)
     qvec = embed_query([query]) if embed_query else searcher.embedder([query])
+    fetch_n = candidates * searcher._fetch_multiplier if searcher.sparse_enabled else candidates
     # Chroma's stubs narrow query_embeddings/results more tightly than runtime accepts;
     # the requested include= keys are always present and non-None here (mirrors search.py).
     res = cast(
         dict[str, Any],
         searcher.collection.query(
             query_embeddings=qvec,  # ty: ignore[invalid-argument-type]  # list invariance vs Chroma's Sequence param
-            n_results=candidates,
+            n_results=fetch_n,
             include=["documents", "distances"],
         ),
     )
-    ids: list[str] = res["ids"][0]
-    if not ids:
+    dense_ids: list[str] = res["ids"][0]
+    if not dense_ids:
         return [], []
+    docs_by_id = dict(zip(dense_ids, res["documents"][0], strict=True))
+
+    if searcher.sparse_enabled:
+        sparse_ids = searcher.sparse.search(query, n=fetch_n)
+        ids = reciprocal_rank_fusion([dense_ids, sparse_ids], k=searcher._rrf_k)[:candidates]
+        missing = [cid for cid in ids if cid not in docs_by_id]
+        if missing:
+            got = cast(dict[str, Any], searcher.collection.get(ids=missing, include=["documents"]))
+            docs_by_id.update(zip(got["ids"], got["documents"], strict=True))
+    else:
+        ids = dense_ids
+
     if not rerank:
-        dists = res["distances"][0]
-        ranked = [(i, 1 - d) for i, d in zip(ids, dists, strict=True)][:k]
+        if searcher.sparse_enabled:
+            scores = rrf_scores([dense_ids, sparse_ids], k=searcher._rrf_k)
+            ranked = [(i, scores[i]) for i in ids][:k]
+        else:
+            dists = res["distances"][0]
+            ranked = [(i, 1 - d) for i, d in zip(ids, dists, strict=True)][:k]
         return ids, ranked
-    docs = res["documents"][0]
+    docs = [docs_by_id[i] for i in ids]
     scores = searcher.reranker.score(query, docs)
     ranked = sorted(zip(ids, scores, strict=True), key=lambda t: t[1], reverse=True)[:k]
     return ids, ranked

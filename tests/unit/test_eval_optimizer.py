@@ -12,6 +12,7 @@ from eval.harness import score_items
 from eval.optimizer import _arms, _delta_cell, build_cache, score_from_cache, screen_retrieval
 from eval.queryset import QAItem
 from eval.stats import DeltaResult
+from rag.sparse import build_sparse_index
 
 
 def _item(query: str, paper_id: str, section_title: str) -> QAItem:
@@ -152,6 +153,119 @@ def test_parse_grid_tolerates_junk_and_rejects_bad_values():
     for bad in ("10,x", "0,10", "-5,10"):
         with pytest.raises(SystemExit):
             _parse_grid(bad)
+
+
+# --- Hybrid: build_cache(sparse=...), score_from_cache(sparse=True), the "hybrid=on" arm ---
+
+
+def test_build_cache_with_sparse_preserves_default_arm_exactness(make_searcher, seed_chunks):
+    # Widening the cache for a hybrid arm must not change what the *default* (non-hybrid) arm
+    # reads back — score_from_cache(sparse=False) has to be bit-identical whether or not the
+    # cache underneath it was built wide for a hybrid arm elsewhere.
+    docs = [
+        seed_chunks("p1", "Method", "latent attention compresses the cache", doc_id="p1-method"),
+        seed_chunks("p1", "Training", "fp8 mixed precision schedule", doc_id="p1-train"),
+        seed_chunks("p2", "Results", "benchmark accuracy evaluation", doc_id="p2-results"),
+    ]
+    ctx = make_searcher(docs)
+    items = [
+        _item("latent attention compresses the cache", "p1", "Method"),
+        _item("fp8 mixed precision schedule", "p1", "Training"),
+    ]
+    sparse_index = build_sparse_index(ctx.collection)
+    plain = build_cache(ctx.searcher, items, max_candidates=2, reranker=FakeReranker(set()))
+    widened = build_cache(
+        ctx.searcher,
+        items,
+        max_candidates=2,
+        reranker=FakeReranker(set()),
+        sparse=sparse_index,
+        fetch_multiplier=2,
+    )
+    assert all(c.sparse_ids for c in widened)  # the whole point of passing `sparse`
+    for w, p in zip(widened, plain, strict=True):
+        from_widened = score_from_cache(w, candidates=2, k=5, rerank=False)
+        from_plain = score_from_cache(p, candidates=2, k=5, rerank=False)
+        assert from_widened.candidate_ids == from_plain.candidate_ids
+        assert [cid for cid, _ in from_widened.ranked] == [cid for cid, _ in from_plain.ranked]
+
+
+def test_score_from_cache_sparse_fuses_bm25_into_the_pool(make_searcher, seed_chunks):
+    # score_from_cache(sparse=True) RRF-fuses candidate_ids with sparse_ids rather than just
+    # reading the dense pool — the plumbing test_hybrid_surfaces_a_lexical_match_dense_only_misses
+    # (tests/integration/test_search.py) covers at the Searcher level.
+    docs = [
+        seed_chunks("p1", "Method", "zzflorble is a rare made-up term", doc_id="p1-rare"),
+        seed_chunks("p2", "Other", "completely unrelated filler content", doc_id="p2-noise"),
+        # A 3rd doc: with only 2, a term in exactly one of them always gets idf=0
+        # (log(1.5)-log(1.5)) — a degenerate BM25 property of tiny corpora (see test_sparse.py).
+        seed_chunks("p3", "Other", "yet more unrelated filler content here", doc_id="p3-noise"),
+    ]
+    ctx = make_searcher(docs)
+    items = [_item("zzflorble", "p1", "Method")]
+    sparse_index = build_sparse_index(ctx.collection)
+    cache = build_cache(
+        ctx.searcher,
+        items,
+        max_candidates=1,
+        reranker=FakeReranker(set()),
+        sparse=sparse_index,
+        fetch_multiplier=2,
+    )[0]
+    assert cache.sparse_ids == ["p1-rare"]  # the only doc BM25 finds any relevance in
+    hybrid = score_from_cache(cache, candidates=2, k=2, rerank=False, sparse=True)
+    assert "p1-rare" in hybrid.candidate_ids  # RRF-fused in via sparse_ids, not just dense
+
+
+def test_screen_retrieval_hybrid_arm_plumbs_through_paired_delta(make_config, seed_chunks):
+    from types import SimpleNamespace
+
+    from rag.index import open_collection
+    from rag.search import Searcher
+
+    class _DirectionalEmbedder:
+        """See tests/integration/test_search.py — decouples dense closeness from lexical
+        content so a hybrid-only hit can be constructed deterministically."""
+
+        def _vec(self, text: str) -> list[float]:
+            return [0.0, 1.0] if "FAR_MARKER" in text else [1.0, 0.0]
+
+        def __call__(self, input: list[str]) -> list[list[float]]:
+            return [self._vec(t) for t in input]
+
+    embedder = _DirectionalEmbedder()
+    cfg = make_config()
+    collection = open_collection(cfg.paths.rag_db, cfg.collection, embedder_name="directional")
+    docs = [
+        seed_chunks("target", "S", "FAR_MARKER zzflorble appears once here"),
+        seed_chunks("mid-0", "S", "zzflorble zzflorble zzflorble midtier document"),
+        seed_chunks("mid-1", "S", "zzflorble zzflorble zzflorble another midtier document"),
+        seed_chunks("dis-0", "S", "totally unrelated content number 0"),
+        seed_chunks("dis-1", "S", "totally unrelated content number 1"),
+        seed_chunks("dis-2", "S", "totally unrelated content number 2"),
+        seed_chunks("dis-3", "S", "totally unrelated content number 3"),
+    ]
+    texts = [text for _, text, _ in docs]
+    collection.upsert(
+        ids=[doc_id for doc_id, _, _ in docs],
+        embeddings=embedder(texts),
+        documents=texts,
+        metadatas=[meta for _, _, meta in docs],
+    )
+    searcher = Searcher(db_dir=cfg.paths.rag_db, collection=cfg.collection, embedder=embedder)
+    searcher._reranker = FakeReranker(set())  # the rerank=on toggle arm needs one; no model
+    ctx = SimpleNamespace(searcher=searcher, cfg=cfg, collection=collection)
+
+    cfg.retrieval.candidates = 3
+    cfg.sparse.fetch_multiplier = 3
+    items = [_item("zzflorble", "target", "S")]
+
+    report = screen_retrieval(cfg, items, searcher=ctx.searcher, hybrid=True)
+    labels = [r.arm.label for r in report.results]
+    assert "hybrid=on" in labels
+    hybrid_result = next(r for r in report.results if r.arm.label == "hybrid=on")
+    assert hybrid_result.success_delta is not None
+    assert any("fetch_multiplier" in c for c in report.caveats)
 
 
 # --- Chunking: isolated re-index screen + sweep, offline over a temp Chroma ---------------

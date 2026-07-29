@@ -79,6 +79,37 @@ The second retrieval stage: rescores candidate chunks against the query. Selecte
 - Code: `Reranker` ABC + `build_reranker` in `src/rag/reranker.py`.
 - `_Avoid_:` re-ranker (no hyphen), scorer, second-pass.
 
+### 🔀 Hybrid retrieval
+
+Opt-in fusion of dense recall with a **BM25** lexical search before reranking, via **RRF**.
+Toggled by `sparse.enabled` (off by default — unproven until screened, see
+[harness](docs/harness.md)'s `--hybrid` screen). Catches exact lexical tokens (model IDs,
+acronyms) a bi-encoder can smear into semantic space.
+
+- Code: the fusion branch in `Searcher.search` (`src/rag/search.py`); `SparseCfg`/`BM25Cfg`
+  in `src/rag/config.py`.
+- `_Avoid_:` sparse retrieval alone (that's just the BM25 half); hybrid search (ambiguous —
+  say "hybrid retrieval").
+
+### 🔡 BM25
+
+The lexical (term-frequency/IDF) retrieval algorithm that supplies the sparse half of
+**hybrid retrieval**. Indexes the same chunk text already stored in Chroma — no separate
+storage. A **snapshot** of the corpus at build time (its IDF needs global corpus stats), so
+`Searcher.sparse` rebuilds it whenever the collection has grown since the snapshot was taken.
+
+- Code: `BM25Index` / `build_sparse_index` in `src/rag/sparse.py` (wraps `rank_bm25.BM25Okapi`).
+- `_Avoid_:` keyword search, full-text search, lexical index (say "BM25").
+
+### 🔗 RRF (reciprocal rank fusion)
+
+The formula that merges the dense and BM25 rankings into one: `score(d) = Σ 1/(k + rank_i(d))`
+per ranking `i`, summed over every ranking `d` appears in. `sparse.rrf_k` is the constant `k`
+(default 60); `sparse.fetch_multiplier` controls how far each side over-fetches before fusing.
+
+- Code: `reciprocal_rank_fusion` / `rrf_scores` in `src/rag/sparse.py`.
+- `_Avoid_:` score fusion, rank merging, ensemble (say "RRF").
+
 ### 🔎 Searcher
 
 The object that runs two-stage retrieval: dense **embedder** recall of `candidates`, then

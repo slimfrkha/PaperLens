@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from sse_starlette.sse import EventSourceResponse
 
-from rag.config import Config, parse_config
+from rag.config import BM25Cfg, Config, parse_config
 from rag.index import open_collection
 from rag.llm import build_llm
 from rag.manifest import Manifest
@@ -52,6 +52,11 @@ def create_app(cfg: Config) -> FastAPI:
                         collection=cfg.collection,
                         embedder_model=cfg.embedding.model,
                         reranker=build_reranker(cfg.reranker, llm=build_llm(cfg.llm.chat)),
+                        sparse_enabled=cfg.sparse.enabled,
+                        bm25_k1=cfg.sparse.k1 if isinstance(cfg.sparse, BM25Cfg) else 1.5,
+                        bm25_b=cfg.sparse.b if isinstance(cfg.sparse, BM25Cfg) else 0.75,
+                        rrf_k=cfg.sparse.rrf_k,
+                        fetch_multiplier=cfg.sparse.fetch_multiplier,
                     )
                     lazy["agent"] = ChatAgent(cfg, searcher, manifest)
         return lazy["agent"]

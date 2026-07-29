@@ -54,6 +54,17 @@ reranker:
   max_length: 512         # hf only; cross-encoder input token cap — raise if chunking.max_tokens grows
   # max_chars: 600        # llm only (not valid on type: hf); per-passage excerpt sent to the judge LLM
 
+# --- Sparse: opt-in hybrid dense+BM25 retrieval, fused via RRF before reranking ---
+# Unproven until screened: `enabled: false` by default — measure it first with
+# `paperlens-eval screen --tier retrieval --hybrid` (docs/harness.md), then flip it on.
+sparse:
+  type: bm25              # bm25 only, today
+  enabled: false           # opt-in — unlike reranker.enabled, this needs a harness screen first
+  rrf_k: 60                # reciprocal-rank-fusion constant; shared across sparse variants
+  fetch_multiplier: 3      # each system over-fetches fetch_multiplier * candidates before fusing
+  k1: 1.5                  # bm25 only; term-frequency saturation constant (rank_bm25 default)
+  b: 0.75                  # bm25 only; length-normalization constant (rank_bm25 default)
+
 # --- LLMs: two specs (tagging + chat), each a tagged union on `type` ---
 #   tagging -> labels papers at ingestion (cheap + fast is fine)
 #   chat    -> powers the agentic-RAG loop; MUST support tool/function calling
