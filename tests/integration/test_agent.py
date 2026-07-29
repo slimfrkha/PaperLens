@@ -72,6 +72,26 @@ def test_small_talk_answers_without_searching(make_agent, fake_llm):
     assert llm.executed == []
 
 
+def test_ref_start_continues_numbering_across_turns(make_agent, fake_llm):
+    # A second /api/chat call in the same conversation must not restart ref
+    # numbering at r1 — main.py passes the count of already-used refs as ref_start.
+    llm = fake_llm(
+        answer="See [r2].",
+        tool_calls=[("search_papers", {"query": "latent attention kv cache", "top_k": 1})],
+    )
+    agent = make_agent(llm)
+
+    _text, citations = agent.run(
+        [{"role": "user", "content": "follow-up question"}],
+        tags=[],
+        papers=[],
+        on_text=lambda _t: None,
+        ref_start=1,
+    )
+    assert len(citations) == 1
+    assert citations[0]["ref"] == "r2"
+
+
 def test_tag_filter_scopes_search_to_matching_papers(make_agent, fake_llm):
     # tags=["rl"] -> only paper-b; a query is restricted to that paper.
     llm = fake_llm(

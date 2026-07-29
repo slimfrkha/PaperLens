@@ -84,7 +84,7 @@ def test_chat_streams_token_citations_done(make_config, monkeypatch):
         def __init__(self, *a, **k):
             pass
 
-        def run(self, messages, tags, papers, on_text, on_trace=None):
+        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0):
             on_text("foo")
             on_text("bar")
             if on_trace:
@@ -113,3 +113,54 @@ def test_chat_streams_token_citations_done(make_config, monkeypatch):
     assert tokens == "foobar"
     cits = json.loads(next(e["data"] for e in events if e["event"] == "citations"))
     assert cits[0]["ref"] == "r1"
+
+
+def test_chat_continues_citation_numbering_across_turns(make_config, monkeypatch):
+    # Reproduces the reported bug: a second question in the same chat must not
+    # restart citation numbering at r1 — main.py must offset ref numbering by
+    # what's already stored for this chat_id.
+    import importlib
+
+    main_mod = importlib.import_module("server.main")
+
+    class FakeAgent:
+        def __init__(self, *a, **k):
+            pass
+
+        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0):
+            ref = f"r{ref_start + 1}"
+            text = f"See [{ref}]."
+            on_text(text)
+            return text, [{"ref": ref, "paper_id": "p", "title": "P"}]
+
+    monkeypatch.setattr(main_mod, "build_llm", lambda *a, **k: object())
+    monkeypatch.setattr(main_mod, "build_reranker", lambda *a, **k: object())
+    monkeypatch.setattr(main_mod, "Searcher", lambda *a, **k: object())
+    monkeypatch.setattr(main_mod, "ChatAgent", FakeAgent)
+
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    client = TestClient(create_app(cfg))
+
+    chat_id = client.post("/api/chats").json()["id"]
+
+    resp1 = client.post(
+        "/api/chat",
+        json={"messages": [{"role": "user", "content": "q1"}], "chat_id": chat_id},
+    )
+    cits1 = json.loads(next(e["data"] for e in _parse_sse(resp1.text) if e["event"] == "citations"))
+    assert cits1[0]["ref"] == "r1"
+
+    resp2 = client.post(
+        "/api/chat",
+        json={
+            "messages": [
+                {"role": "user", "content": "q1"},
+                {"role": "assistant", "content": "See [r1]."},
+                {"role": "user", "content": "q2"},
+            ],
+            "chat_id": chat_id,
+        },
+    )
+    cits2 = json.loads(next(e["data"] for e in _parse_sse(resp2.text) if e["event"] == "citations"))
+    assert cits2[0]["ref"] == "r2"

@@ -110,7 +110,7 @@ class ChatAgent:
             note = "No paper/tag filter is active; all papers are searchable."
         return SYSTEM_PROMPT.format(filter_note=note, papers=papers)
 
-    def run(self, messages, tags, papers, on_text, on_trace=None):
+    def run(self, messages, tags, papers, on_text, on_trace=None, ref_start: int = 0):
         """Returns (answer_text, citations[]).
 
         `tags` and `papers` are two optional scoping filters the user can set: a
@@ -120,6 +120,11 @@ class ChatAgent:
         `on_trace(entry)` fires for each reasoning/tool step, where entry.type is
         "thought" (model reasoning), "action" (a search call), or "observation"
         (its results) — enough to render the full Thought→Action→Observation trace.
+
+        `ref_start` offsets the r1, r2, ... ref numbering — the caller passes the
+        count of refs already used earlier in the same chat, so a follow-up
+        question continues the numbering (r4, r5, ...) instead of restarting at
+        r1 and colliding with refs already shown for a different paper.
         """
         tag_ids = self.manifest.paper_ids_for_tags(tags) if tags else None
         selected = list(papers) if papers else None
@@ -132,7 +137,7 @@ class ChatAgent:
             paper_ids = [p for p in tag_ids if p in wanted]
         registry: dict[str, dict] = {}
         bodies: dict[str, str] = {}
-        counter = {"n": 0}
+        counter = {"n": ref_start}
 
         def trace(entry: dict):
             if on_trace:

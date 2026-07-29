@@ -163,17 +163,25 @@ def create_app(cfg: Config) -> FastAPI:
                 emit("trace", json.dumps(e))
 
             try:
+                # Existing chats already carry ref-numbered citations for prior turns —
+                # offset this turn's numbering past them so a follow-up question
+                # continues (r4, r5, ...) instead of restarting at r1 and colliding
+                # with refs already shown for a different paper earlier in the chat.
+                existing = chats.get(req.chat_id) if req.chat_id else None
+                ref_start = (
+                    sum(len(c) for c in existing.get("citations", []) if c) if existing else 0
+                )
                 text, citations = agent.run(
                     [m.model_dump() for m in req.messages],
                     req.tags,
                     req.papers,
                     on_text=lambda t: emit("token", t),
                     on_trace=on_trace,
+                    ref_start=ref_start,
                 )
                 emit("citations", json.dumps(citations))
                 # Persist the turn (append user + assistant) and name new sessions.
                 if req.chat_id and req.messages:
-                    existing = chats.get(req.chat_id)
                     name = None
                     if not existing or not existing.get("name"):
                         name = generate_name(req.messages[0].content, cfg.llm.tagging)
