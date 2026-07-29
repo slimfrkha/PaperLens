@@ -55,7 +55,7 @@ branch = true
 source = ["rag", "server", "eval"]
 
 [tool.ruff]
-src = ["src"]
+src = ["src", "scripts"]
 line-length = 100
 
 [tool.ruff.lint]

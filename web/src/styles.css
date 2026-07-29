@@ -174,6 +174,35 @@ body {
   color: var(--mantine-color-accent-9);
 }
 
+/* Faithfulness-flagged citation markers — only neutral/contradiction ever get
+   these; entailment stays the plain accent-colored .cite above. Mantine's stock
+   red/orange scales are already scheme-aware, unlike the hand-tuned accent
+   palette above, so no explicit dark-mode override is needed here — but the
+   selector must be compound (.cite.cite-neutral, not .cite-neutral alone) to
+   out-specificity `[data-mantine-color-scheme="dark"] .cite` above (an
+   attribute selector + a class beats a lone class regardless of source order),
+   or the dark override silently wins and these colors never show. */
+.cite.cite-neutral {
+  background: var(--mantine-color-orange-light);
+  color: var(--mantine-color-orange-light-color);
+}
+.cite.cite-neutral:hover {
+  background: var(--mantine-color-orange-filled);
+  color: var(--mantine-color-white);
+}
+.cite.cite-contradiction {
+  background: var(--mantine-color-red-light);
+  color: var(--mantine-color-red-light-color);
+}
+.cite.cite-contradiction:hover {
+  background: var(--mantine-color-red-filled);
+  color: var(--mantine-color-white);
+}
+.cite-flag {
+  margin-left: 2px;
+  font-weight: 700;
+}
+
 /* Tabular figures for stats that update in place (no jitter). */
 .tnum {
   font-variant-numeric: tabular-nums;

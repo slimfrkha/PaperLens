@@ -7,6 +7,7 @@
 - 📄 [Add papers](#add-papers)
 - 🏷️ [Re-tag papers](#re-tag-papers)
 - 🎛️ [Tune retrieval config for your pool (the eval harness)](#tune-retrieval-config-for-your-pool)
+- 🧪 [Calibrate the faithfulness checker](#calibrate-the-faithfulness-checker)
 - 🤖 [Switch the chat or tagging LLM](#switch-the-chat-or-tagging-llm)
 - 🧬 [Switch the embedder](#switch-the-embedder)
 - 🎯 [Use the LLM reranker (no extra model)](#use-the-llm-reranker)
@@ -130,6 +131,48 @@ in short: the test split is meant to be touched once per pool (`confirm` warns, 
 on a repeat), every number is scored on whole questions rather than the sub-queries production
 actually retrieves on, and `confirm` only covers the axes `sweep`'s grid enumerates
 (`max_tokens`/`candidates`/`rerank` — not `overlap_tokens`/`min_tokens`/`noise_ratio`).
+
+---
+
+## Calibrate the faithfulness checker
+
+`faithfulness.enabled` (off by default) attaches an entailment/neutral/contradiction verdict
+to each `[rN]`-cited sentence, derived from two thresholds — `contradiction_max` and
+`entailment_min` — on the checker's raw `[0, 1]` consistency score (see
+[Architecture § Post-generation faithfulness check](architecture.md#-post-generation-faithfulness-check)).
+`scripts/calibrate_faithfulness.py` checks whether those thresholds are well-placed, against
+a hand-labeled golden set. It's a standalone tool, not part of the `pytest` gate — it loads
+the real checker model, and this repo's tests stay offline.
+
+1. Add or extend labeled pairs in `tests/data/faithfulness_pairs.jsonl` — one JSON object per
+   line:
+
+   ```json
+   {"premise": "<passage sentence>", "hypothesis": "<citing sentence>", "label": "entailment"}
+   ```
+
+   `label` is your judgment of whether `hypothesis` is supported by `premise`: one of
+   `entailment` / `neutral` / `contradiction`.
+
+2. Run it:
+
+   ```bash
+   uv run python scripts/calibrate_faithfulness.py
+   ```
+
+   `--config path/to/config.yaml` calibrates against a non-default config's `faithfulness`
+   section; `--fixture path/to/pairs.jsonl` points at a different golden set.
+
+3. Read the report: a confusion matrix and precision/recall/F1 per label at the *currently
+   configured* thresholds, then the top combos by macro F1 from a coarse threshold sweep
+   (computed over the same scores — no extra model calls) — compare against the checked-in
+   `contradiction_max`/`entailment_min` in `HFFaithfulnessCfg` (`src/rag/config.py`) to see
+   whether they're still well-placed.
+
+✅ Verify: the printed golden-set size matches what you added, and macro F1 at the current
+thresholds is in a range you trust before relying on the faithfulness verdict in the UI. The
+golden set here is a proxy, not ground truth on real hallucinations — see the caveat in
+[Architecture](architecture.md#-post-generation-faithfulness-check).
 
 ---
 

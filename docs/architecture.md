@@ -22,19 +22,25 @@ flowchart LR
     q([user question]) -->|1 · ask| agent
     agent[ChatAgent · ReAct loop] <-->|2 · reason · decide| llm[LLM backend]
     agent -->|3 · search_papers| searcher[Searcher]
-    searcher -->|4 · dense recall → candidates| ix
-    searcher -->|5 · rerank → top-k| rr[Reranker]
+    searcher -->|4a · dense recall| ix
+    searcher -.->|4b · lexical recall, opt-in| bm25[(BM25)]
+    searcher -->|5 · fuse RRF → rerank → top-k| rr[Reranker]
     searcher -.->|6 · passages| agent
-    agent -.->|7 · answer + citations · SSE| ui([web UI])
+    agent -->|7 · answer + [rN] citations| fc{{faithfulness check, opt-in}}
+    fc -.->|8 · verdicts| agent
+    agent -.->|9 · answer + citations + verdicts · SSE| ui([web UI])
   end
 ```
 
 Reading the read path: a **question** enters the **ChatAgent**, which loops with the **LLM
 backend** (each turn a **Thought**) and, when it needs evidence, calls its one tool
-`search_papers` (an **Action**). The **Searcher** runs two stages — dense **recall** of
-`candidates` from the index, then **rerank** to the top `k` — and returns the **passages**
-(the **Observation**). The agent threads them into a streamed answer with `[rN]`
-**citations** over SSE. Solid arrows are calls; dotted arrows are what comes back.
+`search_papers` (an **Action**). The **Searcher** runs dense **recall** of `candidates` from
+the index — plus, when **hybrid retrieval** is on, BM25 lexical recall fused in via **RRF** —
+then **rerank**s to the top `k`, returning the **passages** (the **Observation**). The agent
+threads them into an answer with `[rN]` **citations**; when the **faithfulness check** is on,
+each cited sentence is verified against its passage and gets a **verdict** before the answer
+streams to the UI over SSE. Solid arrows are calls; dotted arrows are what comes back or are
+opt-in.
 
 **Ingestion** fills the index; **retrieval** reads it. They share only the on-disk index
 and manifest, so you can re-ingest without touching the server and vice versa.
@@ -133,6 +139,7 @@ sequenceDiagram
   participant A as ChatAgent
   participant L as LLM backend
   participant S as Searcher
+  participant F as FaithfulnessChecker
   U->>A: question
   A->>L: run_tools(system, messages, [search_papers])
   loop until answered
@@ -142,7 +149,11 @@ sequenceDiagram
     A->>L: tool result
   end
   L-->>A: answer with [rN] citations
-  A-->>U: streamed answer + trace
+  opt faithfulness.enabled
+    A->>F: verify cited sentences vs cited passages
+    F-->>A: verdict per citation
+  end
+  A-->>U: streamed answer + trace (+ verdicts)
 ```
 
 Why a tool instead of always retrieving:
@@ -156,12 +167,74 @@ Why a tool instead of always retrieving:
   `r2`, …); the agent must cite the refs it received, and the frontend turns each into a
   clickable **citation** that opens the paper at that passage.
 
+## ✅ Post-generation faithfulness check
+
+Opt-in (`faithfulness.enabled`, off by default): after the agent answers, `ChatAgent.run`
+verifies each `[rN]`-cited sentence against the passage it cites (`src/rag/faithfulness.py`),
+and attaches the result as a `faithfulness` verdict on that citation — a signal, not a gate.
+The answer text, streaming, and control flow are unchanged either way, mirroring the eval
+harness's own philosophy (report resolution honestly, don't gate on it — see
+[harness](harness.md)); a log line marks a contradicted citation server-side, and the
+`citations` SSE payload carries the verdict through to the UI, which renders it on
+`neutral`/`contradiction` citations only (`web/src/faithfulness.ts`, and the render sites in
+`Answer.tsx`/`SourceCards.tsx`) — `entailment` stays visually silent, since the thresholds
+behind it are a starting calibration, not a validated guarantee.
+
+Two design choices worth knowing the *why* of:
+
+- **Reuses `[rN]` markers instead of decomposing claims with an LLM.** The agent already
+  threads citation markers into its answer; splitting the answer into sentences and
+  attributing each to the refs it cites costs nothing extra, versus a second LLM call to
+  segment "atomic claims." The known cost: a claim split across two sentences (a headline
+  claim, then a citation on the explanatory sentence after it) only checks the second
+  sentence — documented as a known limitation, not solved, the same way
+  [harness](harness.md)'s own upper-bound metrics document what they don't capture.
+- **A consistency-scoring cross-encoder, not a generic NLI model.** The obvious choice — a
+  3-way entailment/neutral/contradiction classifier like `cross-encoder/nli-deberta-v3-base`
+  — was tried first and rejected: validated against real (passage sentence, claim sentence)
+  pairs, it badly under-detects entailment whenever a claim paraphrases its source instead of
+  near-quoting it (the failure mode generalized across two different NLI checkpoints tried).
+  `vectara/hallucination_evaluation_model` (pinned at `revision: hhem-1.0-open` — the current
+  default revision needs `trust_remote_code` and doesn't load against this repo's
+  `transformers` version) is trained on summarization-consistency data instead of generic NLI
+  corpora and separated the same validation pairs cleanly. It outputs one `[0, 1]` score, not
+  a 3-way label, so `contradiction_max`/`entailment_min` thresholds derive the label — a
+  necessary knob this model's output shape requires, calibrated on a small sample and not a
+  universal constant. Scoring is sentence-vs-sentence (the citing sentence against every
+  sentence of the cited passage, keeping the strongest-supporting pair — SummaC's technique),
+  not whole-passage-vs-sentence, since a sentence-pair classifier is out of distribution
+  against a multi-hundred-token passage and would otherwise need silent `max_length`
+  truncation.
+
+**Cost**: one batched NLI call per answer, but scoring `refs × citing_sentences ×
+passage_sentences` pairs — bounded in practice by `retrieval.max_rounds`/`retrieval.k` (how
+many refs one run can accumulate) and `chunking.max_tokens` (how many sentences one passage
+has), but nothing enforces an explicit ceiling, so a chatty multi-round answer citing several
+refs adds real, synchronous latency before the `citations` event.
+
+**Calibrating the thresholds** is a separate, smaller problem from the retrieval eval: it's
+"does `contradiction_max`/`entailment_min` correctly separate the checker's raw score into
+the right label," checked against a static hand-labeled golden set
+(`tests/data/faithfulness_pairs.jsonl`) with `scripts/calibrate_faithfulness.py` — see
+[How-to: calibrate the faithfulness checker](how-to.md#calibrate-the-faithfulness-checker).
+It's deliberately not part of `paperlens-eval`: that harness regenerates its eval set per
+pool ([harness](harness.md)), while threshold calibration is corpus-independent by design —
+`paperlens-eval` scoring faithfulness *end-to-end* across a pool remains a natural extension,
+not built here.
+
+**Caveat:** a golden set authored from general knowledge (not mined from real passages or
+real agent output) skews toward clean, lexically obvious contradictions — the same
+circularity risk [harness](harness.md) documents for synthetic query generation. Treat a
+macro-F1 number from such a set as an upper bound on real-world accuracy, not a validated
+guarantee; the fix is folding in pairs mined from real citations over time.
+
 ## 🗂️ Swappable backends: the ChoiceRegistry pattern
 
-Embedders, rerankers, sparse backends, and LLM backends are selected by a config `type`
-string and modelled as `draccus.ChoiceRegistry` tagged unions (`EmbeddingCfg`, `RerankerCfg`,
-`SparseCfg`, `LLMSpec` in `config.py`): the `type` decodes straight to a variant dataclass
-carrying only that backend's fields. Adding a backend is one `@Base.register_subclass("name")` dataclass plus a
+Embedders, rerankers, sparse backends, faithfulness backends, and LLM backends are selected by
+a config `type` string and modelled as `draccus.ChoiceRegistry` tagged unions (`EmbeddingCfg`,
+`RerankerCfg`, `SparseCfg`, `FaithfulnessCfg`, `LLMSpec` in `config.py`): the `type` decodes
+straight to a variant dataclass carrying only that backend's fields. Adding a backend is one
+`@Base.register_subclass("name")` dataclass plus a
 `match` arm in `build_embedder` / `build_reranker` / `build_llm` — no `if/elif` on strings,
 and an unknown `type` or stray field fails loudly at load. See
 [How-to: add a backend](how-to.md#add-a-new-llm-backend). This is what lets "the LLM is an
@@ -185,11 +258,15 @@ every field.
 The Python packages import in one direction only — no cycles:
 
 ```text
-config  chunking  extract  manifest      (leaves: no intra-rag deps)
-  embedders(config)   llm(config)   index   reranker
-  tagger   search   pipeline
+config  chunking  extract  manifest  sparse       (leaves: no intra-rag deps)
+  embedders(config)   llm(config)   index   reranker(llm)
+  tagger   search(embedders, reranker, sparse)   pipeline
   ingest
 ```
+
+`faithfulness(config)` is a sibling leaf-plus-config module (depends only on `config`, like
+`embedders`/`llm`) but sits outside this flow — it's composed directly by `server.agent`, not
+by `search`/`pipeline`.
 
 `rag` is the config-driven core (ingestion + retrieval). `server` composes it behind a
 FastAPI app and the in-process ingestion worker, and **never** the reverse. The full graph

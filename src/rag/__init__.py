@@ -14,6 +14,10 @@ Module layering — imports flow one way (top -> bottom); there are no cycles::
                               |
                          ingest(pipeline, index, manifest, tagger)
 
+``faithfulness(config)`` is a sibling leaf-plus-config module like ``embedders``/
+``llm`` (depends only on ``config``), but isn't part of the retrieval flow above —
+it's composed directly by ``server.agent``, not by ``search``/``pipeline``.
+
 The embedder/reranker/llm backends are selected by ``draccus.ChoiceRegistry``
 config variants (``embedding.type`` / ``reranker.type`` / ``llm.*.type``); the
 ``build_*`` functions match on the variant. ``server`` composes ``rag``; ``rag``
@@ -29,9 +33,11 @@ from .config import (
     ChunkingCfg,
     Config,
     EmbeddingCfg,
+    FaithfulnessCfg,
     GeminiEmbeddingCfg,
     GeminiSpec,
     HFEmbeddingCfg,
+    HFFaithfulnessCfg,
     HFRerankerCfg,
     IngestConfig,
     LLMCfg,
@@ -56,6 +62,13 @@ from .embedders import (
     OpenAIEmbedder,
     build_embedder,
 )
+from .faithfulness import (
+    FaithfulnessChecker,
+    HFFaithfulnessChecker,
+    Verdict,
+    best_support,
+    build_faithfulness_checker,
+)
 from .index import index_markdown, open_collection
 from .llm import LLMBackend, build_llm
 from .manifest import Manifest
@@ -74,11 +87,15 @@ __all__ = [
     "Config",
     "Embedder",
     "EmbeddingCfg",
+    "FaithfulnessCfg",
+    "FaithfulnessChecker",
     "GeminiEmbedder",
     "GeminiEmbeddingCfg",
     "GeminiSpec",
     "HFEmbedder",
     "HFEmbeddingCfg",
+    "HFFaithfulnessCfg",
+    "HFFaithfulnessChecker",
     "HFRerankerCfg",
     "IngestConfig",
     "LLMBackend",
@@ -99,8 +116,11 @@ __all__ = [
     "Searcher",
     "SparseCfg",
     "VLLMSpec",
+    "Verdict",
+    "best_support",
     "build_embedder",
     "build_embedder_from_config",
+    "build_faithfulness_checker",
     "build_llm",
     "build_reranker",
     "build_sparse_index",

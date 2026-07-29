@@ -1,13 +1,24 @@
-import { Group, Stack, Text, UnstyledButton } from "@mantine/core";
+import { Badge, Group, Stack, Text, Tooltip, UnstyledButton } from "@mantine/core";
 import { useNavigate } from "react-router-dom";
-import type { Citation } from "../api";
+import type { Citation, FaithfulnessLabel } from "../api";
+import {
+  faithfulnessColor,
+  faithfulnessMessage,
+  summarizeFaithfulness,
+  worstLabel,
+} from "../faithfulness";
+
+interface SourceNum {
+  num: string; // citation number, matching the inline [n] markers
+  label: FaithfulnessLabel | undefined; // worst-of-per-ref verdict; undefined = unchecked
+}
 
 interface Source {
   paper_id: string;
   title: string;
   section_title: string;
   snippet: string;
-  nums: string[]; // citation numbers into this paper, matching the inline [n] markers
+  nums: SourceNum[];
 }
 
 /** Groups an answer's citations by paper and renders one compact, clickable card
@@ -20,25 +31,43 @@ export default function SourceCards({ citations }: { citations: Citation[] }) {
   // Group by paper, preserving first-seen order; several [n] can hit one paper.
   const byPaper = new Map<string, Source>();
   for (const c of citations) {
-    const num = c.ref.replace(/^r/, "");
+    const n = { num: c.ref.replace(/^r/, ""), label: worstLabel(c.faithfulness) };
     const s = byPaper.get(c.paper_id);
-    if (s) s.nums.push(num);
+    if (s) s.nums.push(n);
     else
       byPaper.set(c.paper_id, {
         paper_id: c.paper_id,
         title: c.title,
         section_title: c.section_title,
         snippet: c.snippet,
-        nums: [num],
+        nums: [n],
       });
   }
   const sources = [...byPaper.values()];
+  const summary = summarizeFaithfulness(citations);
+  const flagged = summary ? summary.total - summary.counts.entailment : 0;
 
   return (
     <Stack gap={8} mt="lg">
-      <Text size="xs" c="dimmed" fw={600} tt="uppercase" style={{ letterSpacing: "0.04em" }}>
-        Sources
-      </Text>
+      <Group gap={8}>
+        <Text size="xs" c="dimmed" fw={600} tt="uppercase" style={{ letterSpacing: "0.04em" }}>
+          Sources
+        </Text>
+        {summary && flagged > 0 && (
+          <Tooltip
+            multiline
+            w={240}
+            label="Some citations don't clearly support (or may contradict) the claim they're attached to — an automated check, not a guarantee. Hover a flagged number below for detail."
+          >
+            <Badge size="xs" variant="light" radius="sm" color={faithfulnessColor(summary.worst)}>
+              {flagged}/{summary.total}{" "}
+              {summary.worst === "contradiction"
+                ? "may contradict source"
+                : "not clearly supported"}
+            </Badge>
+          </Tooltip>
+        )}
+      </Group>
       <Group gap="sm" align="stretch">
         {sources.map((s) => (
           <UnstyledButton
@@ -59,11 +88,29 @@ export default function SourceCards({ citations }: { citations: Citation[] }) {
             }}
           >
             <Group gap={4} mb={6}>
-              {s.nums.map((n) => (
-                <Text key={n} span className="cite" style={{ cursor: "inherit" }}>
-                  {n}
-                </Text>
-              ))}
+              {s.nums.map((n) => {
+                const flag = n.label && n.label !== "entailment" ? n.label : undefined;
+                return (
+                  <Text
+                    key={n.num}
+                    span
+                    className={flag ? `cite cite-${flag}` : "cite"}
+                    style={{ cursor: "inherit" }}
+                    aria-label={
+                      flag
+                        ? `citation ${n.num}: this source ${faithfulnessMessage(flag)}`
+                        : undefined
+                    }
+                  >
+                    {n.num}
+                    {flag && (
+                      <Text component="span" className="cite-flag" aria-hidden>
+                        !
+                      </Text>
+                    )}
+                  </Text>
+                );
+              })}
             </Group>
             <Text size="sm" fw={500} lh={1.25} lineClamp={2} ff="'Newsreader', Georgia, serif">
               {s.title}

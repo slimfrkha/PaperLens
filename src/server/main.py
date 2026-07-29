@@ -64,10 +64,14 @@ def create_app(cfg: Config) -> FastAPI:
     def warm_models() -> None:
         """Preload the chat models so the first /api/chat isn't a 20-30s wait.
         Building the Searcher loads the embedder eagerly; a tiny dummy search also
-        exercises the rerank path to load the cross-encoder. Failures are non-fatal
-        — the next /api/chat rebuilds and surfaces any real error."""
+        exercises the rerank path to load the cross-encoder, and (if enabled) a
+        dummy check_batch loads the faithfulness checker's model too. Failures are
+        non-fatal — the next /api/chat rebuilds and surfaces any real error."""
         try:
-            get_agent().searcher.search("warm up", k=1, candidates=1)
+            agent = get_agent()
+            agent.searcher.search("warm up", k=1, candidates=1)
+            if cfg.faithfulness.enabled:
+                agent.faithfulness.check_batch([("warm up", "warm up")])
         except Exception as e:
             print(f"[warn] model warmup skipped: {e}")
 

@@ -138,6 +138,18 @@ the paper at the cited passage.
 - `_Avoid_:` reference number, footnote, source id. The marker is a `ref`; the rendered
   clickable thing is a `citation`.
 
+### ✅ Faithfulness check / verdict
+
+An opt-in post-generation check (`faithfulness.enabled`, off by default) verifying each
+`[rN]`-cited sentence of the agent's answer is supported by the passage it cites, scored
+sentence-vs-sentence with a local consistency-scoring cross-encoder (not the whole passage
+as one premise). Attaches a `Verdict` (`label`: `entailment`/`neutral`/`contradiction`,
+`score`) to the citation — a signal, not a gate; the answer itself never changes.
+
+- Code: `FaithfulnessChecker` / `Verdict` / `attribute_refs` in `src/rag/faithfulness.py`;
+  wired into `ChatAgent.run` (`src/server/agent.py`).
+- `_Avoid_:` hallucination detector, grounding score (say "faithfulness check"/"verdict").
+
 ### 🏷️ Tag
 
 An LLM-generated topic label attached to a paper at ingestion time. Powers the tag filter

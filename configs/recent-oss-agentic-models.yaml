@@ -22,6 +22,10 @@ reranker:
   type: hf
   enabled: true
 
+faithfulness:
+  type: hf
+  enabled: true
+
 llm:
   tagging:
     type: openai

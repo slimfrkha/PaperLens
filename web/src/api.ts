@@ -11,6 +11,14 @@ export interface TagCount {
   count: number;
 }
 
+export type FaithfulnessLabel = "entailment" | "neutral" | "contradiction";
+
+export interface FaithfulnessClaim {
+  sentence: string;
+  label: FaithfulnessLabel;
+  score: number;
+}
+
 export interface Citation {
   ref: string;
   paper_id: string;
@@ -18,6 +26,7 @@ export interface Citation {
   breadcrumb: string;
   section_title: string;
   snippet: string;
+  faithfulness?: FaithfulnessClaim[];
 }
 
 export interface AdminStatus {

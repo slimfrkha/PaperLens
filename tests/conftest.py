@@ -28,6 +28,7 @@ from rag.config import (
     OpenAISpec,
     Paths,
 )
+from rag.faithfulness import FaithfulnessChecker, Verdict
 from rag.index import open_collection
 from rag.llm import LLMBackend
 
@@ -101,6 +102,33 @@ class FakeLLM(LLMBackend):
         if on_text:
             on_text(self.answer)
         return self.answer
+
+
+class FakeFaithfulnessChecker(FaithfulnessChecker):
+    """Scripted, call-recording faithfulness checker.
+
+    Returns ``verdict`` for every pair, or the ``by_hypothesis``-keyed override
+    when the hypothesis (the citing sentence) matches exactly.
+    """
+
+    def __init__(
+        self,
+        verdict: Verdict | None = None,
+        by_hypothesis: dict[str, Verdict] | None = None,
+    ) -> None:
+        self.verdict = verdict or Verdict(label="entailment", score=0.9)
+        self.by_hypothesis = by_hypothesis or {}
+        self.calls: list[tuple[str, str]] = []
+
+    def check_batch(self, pairs):
+        self.calls.extend(pairs)
+        return [self.by_hypothesis.get(hypothesis, self.verdict) for _premise, hypothesis in pairs]
+
+
+@pytest.fixture
+def fake_faithfulness_checker():
+    """The FakeFaithfulnessChecker class, so tests can script a verdict per case."""
+    return FakeFaithfulnessChecker
 
 
 @pytest.fixture

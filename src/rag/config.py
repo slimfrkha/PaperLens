@@ -170,6 +170,42 @@ class BM25Cfg(SparseCfg):
     b: float = 0.75
 
 
+# --- Faithfulness: opt-in post-generation consistency check over [rN]-cited sentences ---
+@dataclass
+class FaithfulnessCfg(draccus.ChoiceRegistry):
+    enabled: bool = False  # opt-in — unproven until measured, like sparse.enabled
+
+    @classmethod
+    def default_choice_name(cls) -> str:
+        return "hf"
+
+
+@FaithfulnessCfg.register_subclass("hf")
+@dataclass
+class HFFaithfulnessCfg(FaithfulnessCfg):
+    model: str = "vectara/hallucination_evaluation_model"  # local consistency-scoring cross-encoder
+    # Pinned: the current default revision (HHEM-2.1) needs trust_remote_code and
+    # doesn't load against this repo's transformers version; hhem-1.0-open is a
+    # plain DebertaV2ForSequenceClassification checkpoint, no remote code.
+    revision: str = "hhem-1.0-open"
+    max_length: int = 512
+    # Thresholds on the model's raw [0, 1] consistency score, calibrated against
+    # 16 hand-labeled (passage sentence, claim sentence) pairs from one paper — a
+    # starting point, not a universal constant; re-check if verdicts look off.
+    contradiction_max: float = 0.05  # score <= this -> "contradiction"
+    entailment_min: float = 0.3  # score >= this -> "entailment"; between -> "neutral"
+
+    def __post_init__(self) -> None:
+        # An inverted/overlapping pair silently makes entailment_min dead code —
+        # _to_verdict checks contradiction_max first, so any score below
+        # entailment_min would already have been claimed by "contradiction".
+        if self.contradiction_max >= self.entailment_min:
+            raise ValueError(
+                "faithfulness.contradiction_max must be < entailment_min "
+                f"(got {self.contradiction_max} >= {self.entailment_min})"
+            )
+
+
 # --- LLM backends: a `type` string selects the provider variant ---
 @dataclass
 class LLMSpec(draccus.ChoiceRegistry):
@@ -296,6 +332,7 @@ class Config:
     embedding: EmbeddingCfg = field(default_factory=HFEmbeddingCfg)
     reranker: RerankerCfg = field(default_factory=HFRerankerCfg)
     sparse: SparseCfg = field(default_factory=BM25Cfg)
+    faithfulness: FaithfulnessCfg = field(default_factory=HFFaithfulnessCfg)
     llm: LLMCfg = field(default_factory=LLMCfg)
     chunking: ChunkingCfg = field(default_factory=ChunkingCfg)
     extraction: ExtractionCfg = field(default_factory=ExtractionCfg)

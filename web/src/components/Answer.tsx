@@ -2,25 +2,46 @@ import { Box, Text, Tooltip } from "@mantine/core";
 import { useNavigate } from "react-router-dom";
 import type { Components } from "react-markdown";
 import Markdown from "./Markdown";
-import type { Citation } from "../api";
+import type { Citation, FaithfulnessClaim } from "../api";
+import {
+  createClaimResolver,
+  faithfulnessColor,
+  faithfulnessMessage,
+  sentenceAt,
+  splitSentencesWithOffsets,
+} from "../faithfulness";
 
 /** Renders an assistant answer as markdown, turning [rN] markers into clickable
  *  citation badges that open the cited paper with the passage highlighted. */
 export default function Answer({ text, citations }: { text: string; citations: Citation[] }) {
   const navigate = useNavigate();
   const byRef = new Map(citations.map((c) => [c.ref, c]));
+  const sentences = splitSentencesWithOffsets(text);
+  const resolveClaim = createClaimResolver(citations);
+  const instanceClaims: (FaithfulnessClaim | undefined)[] = [];
 
-  // Rewrite [rN] into a markdown link (cite:rN) so it survives markdown parsing.
-  const processed = text.replace(/\[(r\d+)\]/g, (m, ref) =>
-    byRef.has(ref) ? `[${ref}](cite:${ref})` : m,
-  );
+  // Rewrite [rN] into a markdown link (cite:rN:instanceIdx) so it survives
+  // markdown parsing; instanceIdx picks out this specific marker's own
+  // faithfulness claim (a ref cited in several sentences can carry different
+  // verdicts per sentence — not one collapsed color for the whole ref).
+  const processed = text.replace(/\[(r\d+)\]/g, (m, ref, offset: number) => {
+    if (!byRef.has(ref)) return m;
+    const claim = resolveClaim(ref, sentenceAt(sentences, offset));
+    const idx = instanceClaims.push(claim) - 1;
+    return `[${ref}](cite:${ref}:${idx})`;
+  });
 
   const components: Components = {
     a({ href, children }) {
       if (href && href.startsWith("cite:")) {
-        const c = byRef.get(href.slice(5));
+        const [ref, idxStr] = href.slice(5).split(":");
+        const c = byRef.get(ref);
         if (!c) return <>{children}</>;
         const n = c.ref.replace(/^r/, "");
+        const claim = instanceClaims[Number(idxStr)];
+        // Stay silent on entailment — the thresholds behind it are a starting
+        // calibration, not a validated guarantee, so only flag concerns.
+        const flagged = claim && claim.label !== "entailment" ? claim : undefined;
         return (
           <Tooltip
             color="dark.8"
@@ -37,6 +58,12 @@ export default function Answer({ text, citations }: { text: string; citations: C
                     “{c.snippet}”
                   </Text>
                 )}
+                {flagged && (
+                  <Text size="xs" c={`${faithfulnessColor(flagged.label)}.4`} mt={6}>
+                    ⚠ This source {faithfulnessMessage(flagged.label)} (
+                    {(flagged.score * 100).toFixed(0)}% supported)
+                  </Text>
+                )}
                 <Text size="10px" c="gray.5" mt={6}>
                   Click to open the passage
                 </Text>
@@ -48,7 +75,12 @@ export default function Answer({ text, citations }: { text: string; citations: C
           >
             <Text
               component="a"
-              className="cite"
+              className={flagged ? `cite cite-${flagged.label}` : "cite"}
+              aria-label={
+                flagged
+                  ? `citation ${n}: this source ${faithfulnessMessage(flagged.label)}`
+                  : undefined
+              }
               onClick={() =>
                 navigate(`/papers/${c.paper_id}`, {
                   state: { highlight: c.snippet, section: c.section_title },
@@ -56,6 +88,11 @@ export default function Answer({ text, citations }: { text: string; citations: C
               }
             >
               {n}
+              {flagged && (
+                <Text component="span" className="cite-flag" aria-hidden>
+                  !
+                </Text>
+              )}
             </Text>
           </Tooltip>
         );

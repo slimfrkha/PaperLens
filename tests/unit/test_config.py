@@ -10,6 +10,7 @@ import pytest
 from rag.config import (
     CONFIG_ENV_VAR,
     ChunkingCfg,
+    HFFaithfulnessCfg,
     IngestConfig,
     RetrievalCfg,
     TaggerCfg,
@@ -136,6 +137,8 @@ def test_incoherent_knobs_fail_at_construction():
         RetrievalCfg(k=30, candidates=20)
     with pytest.raises(ValueError, match="min_tags"):
         TaggerCfg(min_tags=8, max_tags=3)
+    with pytest.raises(ValueError, match="contradiction_max"):
+        HFFaithfulnessCfg(contradiction_max=0.5, entailment_min=0.3)
 
 
 def test_incoherent_knobs_fail_at_config_load(tmp_path):

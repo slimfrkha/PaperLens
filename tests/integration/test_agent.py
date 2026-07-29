@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from rag.config import HFFaithfulnessCfg
 from rag.manifest import Manifest
 from server.agent import ChatAgent
 
@@ -12,16 +13,18 @@ from server.agent import ChatAgent
 def make_agent(make_searcher, seed_chunks):
     """Factory: a ChatAgent wired to a seeded searcher, manifest, and FakeLLM."""
 
-    def _make(llm):
+    def _make(llm, faithfulness=None):
         docs = [
             seed_chunks("deepseek-v3", "Attention", "multi head latent attention kv cache"),
             seed_chunks("glm-4.5", "Training", "reinforcement learning recipe"),
         ]
         ctx = make_searcher(docs)
+        if faithfulness is not None:
+            ctx.cfg.faithfulness = HFFaithfulnessCfg(enabled=True)
         manifest = Manifest(ctx.cfg.paths.rag_db)
         manifest.upsert({"paper_id": "deepseek-v3", "title": "DeepSeek-V3", "tags": ["moe"]})
         manifest.upsert({"paper_id": "glm-4.5", "title": "GLM-4.5", "tags": ["rl"]})
-        agent = ChatAgent(ctx.cfg, ctx.searcher, manifest, client=llm)
+        agent = ChatAgent(ctx.cfg, ctx.searcher, manifest, client=llm, faithfulness=faithfulness)
         return agent
 
     return _make
@@ -197,3 +200,134 @@ def test_max_rounds_flows_from_retrieval_config(make_agent, fake_llm):
     agent.cfg.retrieval.max_rounds = 3
     agent.run([{"role": "user", "content": "hi"}], tags=[], papers=[], on_text=lambda _t: None)
     assert llm.run_tools_calls[0]["max_rounds"] == 3
+
+
+def test_faithfulness_disabled_by_default_no_verdict_and_checker_not_called(
+    make_agent, fake_llm, fake_faithfulness_checker
+):
+    checker = fake_faithfulness_checker()
+    llm = fake_llm(
+        answer="Latent attention shrinks the cache [r1].",
+        tool_calls=[("search_papers", {"query": "latent attention kv cache", "top_k": 1})],
+    )
+    # Not passed to make_agent as the active faithfulness checker -> cfg.faithfulness
+    # stays at its default (enabled=False), so ChatAgent builds its own (unused) checker.
+    agent = make_agent(llm)
+    agent.faithfulness = checker  # would be called if enabled — assert it isn't
+
+    _text, citations = agent.run(
+        [{"role": "user", "content": "How does MLA help?"}],
+        tags=[],
+        papers=[],
+        on_text=lambda _t: None,
+    )
+    assert "faithfulness" not in citations[0]
+    assert checker.calls == []
+
+
+def test_faithfulness_check_attaches_verdict_to_cited_ref(
+    make_agent, fake_llm, fake_faithfulness_checker
+):
+    checker = fake_faithfulness_checker()
+    llm = fake_llm(
+        answer="Latent attention shrinks the cache [r1].",
+        tool_calls=[("search_papers", {"query": "latent attention kv cache", "top_k": 1})],
+    )
+    agent = make_agent(llm, faithfulness=checker)
+
+    _text, citations = agent.run(
+        [{"role": "user", "content": "How does MLA help?"}],
+        tags=[],
+        papers=[],
+        on_text=lambda _t: None,
+    )
+    assert len(citations) == 1
+    faithfulness = citations[0]["faithfulness"]
+    assert len(faithfulness) == 1
+    assert faithfulness[0]["sentence"] == "Latent attention shrinks the cache [r1]."
+    assert faithfulness[0]["label"] == "entailment"
+
+    # Scored sentence-vs-sentence against the passage, not the whole body.
+    assert checker.calls
+    for premise, hypothesis in checker.calls:
+        assert hypothesis == "Latent attention shrinks the cache [r1]."
+        assert premise == "multi head latent attention kv cache"
+
+
+def test_faithfulness_skips_refs_never_cited_in_text(
+    make_agent, fake_llm, fake_faithfulness_checker
+):
+    checker = fake_faithfulness_checker()
+    # Cites only r1 even though the answer text never mentions r2 at all — r2 (if
+    # ever retrieved) would have no hypothesis span to test.
+    llm = fake_llm(
+        answer="Latent attention shrinks the cache [r1].",
+        tool_calls=[("search_papers", {"query": "latent attention kv cache", "top_k": 1})],
+    )
+    agent = make_agent(llm, faithfulness=checker)
+
+    _text, citations = agent.run(
+        [{"role": "user", "content": "How does MLA help?"}],
+        tags=[],
+        papers=[],
+        on_text=lambda _t: None,
+    )
+    assert citations[0]["ref"] == "r1"
+    assert "faithfulness" in citations[0]
+
+
+def test_faithfulness_ref_cited_twice_gets_two_item_list(
+    make_agent, fake_llm, fake_faithfulness_checker
+):
+    checker = fake_faithfulness_checker()
+    llm = fake_llm(
+        answer="MLA shrinks the cache [r1]. It also speeds up decoding [r1].",
+        tool_calls=[("search_papers", {"query": "latent attention kv cache", "top_k": 1})],
+    )
+    agent = make_agent(llm, faithfulness=checker)
+
+    _text, citations = agent.run(
+        [{"role": "user", "content": "How does MLA help?"}],
+        tags=[],
+        papers=[],
+        on_text=lambda _t: None,
+    )
+    assert len(citations[0]["faithfulness"]) == 2
+
+
+def test_faithfulness_contradiction_triggers_log_line(
+    make_agent, fake_llm, fake_faithfulness_checker, capsys
+):
+    from rag.faithfulness import Verdict
+
+    checker = fake_faithfulness_checker(verdict=Verdict(label="contradiction", score=0.0))
+    llm = fake_llm(
+        answer="Latent attention shrinks the cache [r1].",
+        tool_calls=[("search_papers", {"query": "latent attention kv cache", "top_k": 1})],
+    )
+    agent = make_agent(llm, faithfulness=checker)
+    agent.run(
+        [{"role": "user", "content": "How does MLA help?"}],
+        tags=[],
+        papers=[],
+        on_text=lambda _t: None,
+    )
+    assert "[faithfulness]" in capsys.readouterr().out
+
+
+def test_faithfulness_all_entailment_does_not_log(
+    make_agent, fake_llm, fake_faithfulness_checker, capsys
+):
+    checker = fake_faithfulness_checker()  # default: entailment
+    llm = fake_llm(
+        answer="Latent attention shrinks the cache [r1].",
+        tool_calls=[("search_papers", {"query": "latent attention kv cache", "top_k": 1})],
+    )
+    agent = make_agent(llm, faithfulness=checker)
+    agent.run(
+        [{"role": "user", "content": "How does MLA help?"}],
+        tags=[],
+        papers=[],
+        on_text=lambda _t: None,
+    )
+    assert "[faithfulness]" not in capsys.readouterr().out

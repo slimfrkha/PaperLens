@@ -85,9 +85,11 @@ src/
     index_isolated.py optimizer.py harness.py
 web/                   # Vite + React + Mantine frontend (SSE chat, trace, paper viewer)
 tests/                 # unit/ + integration/ (no __init__.py; importlib mode)
+  data/                # static fixtures, e.g. the faithfulness calibration golden set
 docs/                  # documentation hub (docs/README.md)
 data/                  # git-ignored runtime: papers/, rag_db/, chat_history/
 evals/                 # git-ignored eval-harness artifacts: <fingerprint>.dev/test.jsonl, confirm.json
+scripts/               # standalone dev tools, not part of the gate (see docs/how-to.md)
 ```
 
 Import the public API from the package (`from rag import Searcher, load_config`), **not**

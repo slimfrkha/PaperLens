@@ -121,6 +121,27 @@ to measure it on your pool before flipping it on (see [harness](harness.md)).
 | `k1` | float | `1.5` | **`bm25` only.** BM25 term-frequency saturation constant (`rank_bm25` default). |
 | `b` | float | `0.75` | **`bm25` only.** BM25 length-normalization constant (`rank_bm25` default). |
 
+### ✅ `faithfulness`
+
+Opt-in post-generation check: verifies each `[rN]`-cited sentence of the agent's answer
+against the passage it cites, using a local consistency-scoring cross-encoder (not a generic
+NLI model — see [architecture](architecture.md) for why). Passive labeling only — a citation
+that fails the check gets a `faithfulness` verdict attached; nothing about the answer text or
+delivery changes. `enabled` defaults to `false`, like `sparse.enabled`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `type` | string | `hf` | Faithfulness backend variant (only `hf` today). |
+| `enabled` | bool | `false` | Turn the post-generation check on/off. |
+| `model` | string | `vectara/hallucination_evaluation_model` | Local consistency-scoring cross-encoder id. |
+| `revision` | string | `hhem-1.0-open` | Pinned revision — the current default revision needs `trust_remote_code` and doesn't load against this repo's `transformers` version; this one is a plain checkpoint, no remote code. |
+| `max_length` | int | `512` | Cross-encoder input token cap. Scoring is sentence-vs-sentence, so this is rarely a binding constraint. |
+| `contradiction_max` | float | `0.05` | Score at/below this → `"contradiction"`. |
+| `entailment_min` | float | `0.3` | Score at/above this → `"entailment"`; between the two → `"neutral"`. Both thresholds were calibrated on a small hand-labeled sample (see [architecture](architecture.md)) — a starting point, not a universal constant. |
+
+Citations gain an optional `faithfulness: [{sentence, label, score}, ...]` field (one entry per
+citing sentence) when enabled.
+
 ### 🤖 `llm`
 
 Two LLM specs share one schema. `llm.tagging` labels papers at ingestion (cheap/fast is
