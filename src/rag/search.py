@@ -39,6 +39,7 @@ class Result:
     section_title: str
     text: str  # breadcrumb + body (what was embedded)
     body: str  # body only
+    source: str = "dense"  # "dense" | "sparse" | "both" — which retrieval pool(s) surfaced this
 
 
 def _pick_device(device: str | None) -> str:
@@ -171,6 +172,8 @@ class Searcher:
         if self.sparse_enabled:
             allowed = set(ids) if ids is not None else None
             sparse_ids = self.sparse.search(query, n=fetch_n, allowed_ids=allowed)
+            dense_set = set(dense_ids)
+            sparse_set = set(sparse_ids)
             fused_ids = reciprocal_rank_fusion([dense_ids, sparse_ids], k=self._rrf_k)[:candidates]
             missing = [cid for cid in fused_ids if cid not in by_id]
             if missing:
@@ -193,6 +196,10 @@ class Searcher:
             scores = rrf_scores([dense_ids, sparse_ids], k=self._rrf_k)
             for cid in fused_ids:
                 by_id[cid].score = scores[cid]
+                in_dense, in_sparse = cid in dense_set, cid in sparse_set
+                by_id[cid].source = (
+                    "both" if in_dense and in_sparse else "sparse" if in_sparse else "dense"
+                )
             results = [by_id[cid] for cid in fused_ids]
         else:
             results = list(by_id.values())

@@ -54,6 +54,7 @@ def test_search_call_builds_citations_and_trace(make_agent, fake_llm):
     assert citations[0]["ref"] == "r1"
     assert citations[0]["paper_id"] == "paper-a"
     assert citations[0]["title"] == "Paper A"
+    assert citations[0]["source"] == "dense"
 
     kinds = [e["type"] for e in trace]
     assert kinds == ["thought", "action", "observation"]

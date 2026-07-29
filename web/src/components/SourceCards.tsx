@@ -1,6 +1,7 @@
 import { Badge, Group, Stack, Text, Tooltip, UnstyledButton } from "@mantine/core";
+import { Fragment } from "react";
 import { useNavigate } from "react-router-dom";
-import type { Citation, FaithfulnessLabel } from "../api";
+import type { Citation, FaithfulnessLabel, RetrievalSource } from "../api";
 import {
   faithfulnessColor,
   faithfulnessMessage,
@@ -8,9 +9,17 @@ import {
   worstLabel,
 } from "../faithfulness";
 
+/** Plain-language tooltip for a citation found via the sparse/hybrid lane. `"dense"` (the
+ *  common case, and the only value when hybrid retrieval is off) is never rendered — see
+ *  the `!== "dense"` guard at the call site. */
+function sourceMessage(source: RetrievalSource): string {
+  return source === "both" ? "found via keyword + semantic match" : "found via keyword match";
+}
+
 interface SourceNum {
   num: string; // citation number, matching the inline [n] markers
   label: FaithfulnessLabel | undefined; // worst-of-per-ref verdict; undefined = unchecked
+  source: RetrievalSource | undefined; // which retrieval pool(s) surfaced it; undefined = dense/unknown
 }
 
 interface Source {
@@ -31,7 +40,7 @@ export default function SourceCards({ citations }: { citations: Citation[] }) {
   // Group by paper, preserving first-seen order; several [n] can hit one paper.
   const byPaper = new Map<string, Source>();
   for (const c of citations) {
-    const n = { num: c.ref.replace(/^r/, ""), label: worstLabel(c.faithfulness) };
+    const n = { num: c.ref.replace(/^r/, ""), label: worstLabel(c.faithfulness), source: c.source };
     const s = byPaper.get(c.paper_id);
     if (s) s.nums.push(n);
     else
@@ -90,9 +99,9 @@ export default function SourceCards({ citations }: { citations: Citation[] }) {
             <Group gap={4} mb={6}>
               {s.nums.map((n) => {
                 const flag = n.label && n.label !== "entailment" ? n.label : undefined;
-                return (
+                const lexical = n.source && n.source !== "dense" ? n.source : undefined;
+                const num = (
                   <Text
-                    key={n.num}
                     span
                     className={flag ? `cite cite-${flag}` : "cite"}
                     style={{ cursor: "inherit" }}
@@ -104,11 +113,22 @@ export default function SourceCards({ citations }: { citations: Citation[] }) {
                   >
                     {n.num}
                     {flag && (
-                      <Text component="span" className="cite-flag" aria-hidden>
+                      <Text component="span" className="cite-flag" inherit aria-hidden>
                         !
                       </Text>
                     )}
                   </Text>
+                );
+                // No visual marker for a lexical/hybrid hit — the number's color already carries
+                // the higher-stakes faithfulness signal, and stacking a second glyph there reads
+                // as noise (e.g. "4!K"). The keyword-match info still exists, just quieter: a
+                // hover tooltip on the number itself, same affordance the number already has for
+                // the "click to open the paper" action.
+                if (!lexical) return <Fragment key={n.num}>{num}</Fragment>;
+                return (
+                  <Tooltip key={n.num} label={sourceMessage(lexical)}>
+                    {num}
+                  </Tooltip>
                 );
               })}
             </Group>

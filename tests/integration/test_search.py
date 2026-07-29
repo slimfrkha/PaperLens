@@ -5,6 +5,7 @@ from __future__ import annotations
 from rag.index import open_collection
 from rag.reranker import Reranker
 from rag.search import Searcher
+from rag.sparse import BM25Index
 
 
 def _docs(seed_chunks):
@@ -227,3 +228,111 @@ def test_sparse_index_rebuilds_after_rescan(make_searcher, seed_chunks):
     # caching the pre-rescan snapshot forever.
     after = searcher.search("zzflorble", k=2, candidates=2, rerank=False)
     assert after[0].paper_id == "new-paper"
+
+
+def test_dense_only_results_are_labeled_dense(make_searcher, seed_chunks):
+    ctx = make_searcher(_docs(seed_chunks))
+    results = ctx.searcher.search("latent attention kv cache", k=2, candidates=10, rerank=False)
+    assert results
+    assert all(r.source == "dense" for r in results)
+
+
+class _FakeSparseIndex(BM25Index):
+    """A ``BM25Index`` that returns a canned id list instead of running real BM25 scoring — the
+    sparse-side counterpart to ``_KeywordReranker`` above. Gives exact control over which ids
+    the sparse pool "finds", so `Result.source` tests don't have to tune real BM25/embedding
+    geometry to force a particular dense/sparse split (see the fetch_multiplier regression test
+    above for how fiddly that gets).
+    """
+
+    def __init__(self, ids: list[str], built_at_count: int):
+        # built_at_count must match the real collection's count, or Searcher.sparse's
+        # staleness check (built_at_count != collection.count()) silently discards this fake
+        # and rebuilds a real BM25Index in its place.
+        super().__init__(ids=[], paper_ids=[], built_at_count=built_at_count, bm25=None)
+        self._canned = ids
+
+    def search(self, query: str, n: int, allowed_ids: set[str] | None = None) -> list[str]:
+        ids = self._canned
+        if allowed_ids is not None:
+            ids = [cid for cid in ids if cid in allowed_ids]
+        return ids[:n]
+
+
+def test_hybrid_source_is_both_when_a_hit_is_in_dense_and_sparse_pools(make_searcher, seed_chunks):
+    # Both docs fit comfortably inside the dense fetch window (candidates=2, corpus=2), so no
+    # exclusion is needed here — only pool membership (dense vs the fake sparse pool) matters.
+    ctx = make_searcher(
+        [
+            seed_chunks("dense-hit", "S", "alpha content"),
+            seed_chunks("both-hit", "S", "beta content"),
+        ]
+    )
+    searcher = Searcher(
+        db_dir=ctx.cfg.paths.rag_db,
+        collection=ctx.cfg.collection,
+        embedder=ctx.searcher.embedder,
+        sparse_enabled=True,
+        # chunk id, per seed_chunks: f"{paper_id}-{section}"; built_at_count=2 matches the pool.
+        sparse=_FakeSparseIndex(["both-hit-S"], built_at_count=2),
+        fetch_multiplier=1,
+    )
+    results = {
+        r.paper_id: r for r in searcher.search("alpha beta", k=2, candidates=2, rerank=False)
+    }
+    assert results["dense-hit"].source == "dense"
+    assert results["both-hit"].source == "both"
+
+
+class _TieredEmbedder:
+    """Three strictly distinct cosine similarities to the query (1.0 / 0.6 / 0.0, tagged
+    "high"/"mid"/"low" in the doc text) — unlike `_DirectionalEmbedder`'s binary near/far split,
+    nothing here ties, so dense recall's top-N is unambiguous regardless of `candidates`."""
+
+    VECS = {"mid": [0.6, 0.8], "low": [0.0, 1.0]}
+
+    def _vec(self, text: str) -> list[float]:
+        for tag, v in self.VECS.items():
+            if tag in text:
+                return v
+        return [1.0, 0.0]  # "high" (and the query itself, which carries no tag)
+
+    def __call__(self, input: list[str]) -> list[list[float]]:
+        return [self._vec(t) for t in input]
+
+
+def test_hybrid_source_is_sparse_when_a_hit_is_excluded_from_the_dense_fetch_window(
+    make_config, seed_chunks
+):
+    # A third ("mid") doc pads the corpus past the dense fetch window (candidates=2,
+    # fetch_multiplier=1 -> fetch_n=2 of 3 docs) so "low" is deterministically excluded from
+    # `dense_ids` by construction, not by a Chroma-internal tie-break — see the class docstring
+    # above for why a 2-doc pool can't isolate this case (fetch_n and the final candidates
+    # truncation share the same `candidates` value).
+    embedder = _TieredEmbedder()
+    cfg = make_config()
+    collection = open_collection(cfg.paths.rag_db, cfg.collection, embedder_name="tiered")
+    docs = [
+        seed_chunks("dense-hit", "S", "high tier document"),
+        seed_chunks("filler", "S", "mid tier document"),
+        seed_chunks("sparse-only", "S", "low tier document"),
+    ]
+    texts = [text for _, text, _ in docs]
+    collection.upsert(
+        ids=[doc_id for doc_id, _, _ in docs],
+        embeddings=embedder(texts),
+        documents=texts,
+        metadatas=[meta for _, _, meta in docs],
+    )
+    searcher = Searcher(
+        db_dir=cfg.paths.rag_db,
+        collection=cfg.collection,
+        embedder=embedder,
+        sparse_enabled=True,
+        # chunk id: f"{paper_id}-{section}"; built_at_count=3 matches the 3-doc pool.
+        sparse=_FakeSparseIndex(["sparse-only-S"], built_at_count=3),
+        fetch_multiplier=1,
+    )
+    results = {r.paper_id: r for r in searcher.search("query", k=2, candidates=2, rerank=False)}
+    assert results["dense-hit"].source == "dense"
+    assert results["sparse-only"].source == "sparse"

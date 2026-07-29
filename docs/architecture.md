@@ -125,7 +125,9 @@ rebuilds whenever the collection has grown since the snapshot was taken, so a li
 `/api/admin/rescan` can't leave it silently stale. Ship-worthiness is measured, not assumed:
 `paperlens-eval screen --tier retrieval --hybrid` (see [harness](harness.md)) adds a
 `"hybrid=on"` arm to the retrieval screen so the config change is proposed with evidence before
-`sparse.enabled` flips to `true`.
+`sparse.enabled` flips to `true`. Each fused `Result` also records which pool(s) surfaced it
+(`source`: `"dense"` / `"sparse"` / `"both"`), threaded into the citation registry and shown as a
+badge in the frontend's source cards.
 
 ## 🤖 The agent: retrieval as a tool
 

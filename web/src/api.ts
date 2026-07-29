@@ -19,12 +19,15 @@ export interface FaithfulnessClaim {
   score: number;
 }
 
+export type RetrievalSource = "dense" | "sparse" | "both";
+
 export interface Citation {
   ref: string;
   paper_id: string;
   title: string;
   breadcrumb: string;
   section_title: string;
+  source?: RetrievalSource;
   snippet: string;
   faithfulness?: FaithfulnessClaim[];
 }

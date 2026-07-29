@@ -122,8 +122,10 @@ optional **reranker** rescoring, returning the top `k` **Result**s. Accepts a `p
 ### 📑 Result / passage
 
 One retrieved chunk returned by the Searcher: `score`, `paper_id`, `breadcrumb`,
-`section_title`, `text`, `body`. When a Result is handed to the chat model or shown to the
-reader, call it a **passage**.
+`section_title`, `text`, `body`, `source`. When a Result is handed to the chat model or shown to
+the reader, call it a **passage**. `source` (`"dense"`/`"sparse"`/`"both"`) records which
+retrieval pool(s) surfaced it — meaningful only when **hybrid retrieval** is on; otherwise
+always `"dense"`.
 
 - Code: `Result` dataclass in `src/rag/search.py`.
 - `_Avoid_:` hit, match, document.
