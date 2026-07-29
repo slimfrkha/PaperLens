@@ -170,11 +170,25 @@ def _load_dev_set(args: argparse.Namespace):
     return cfg, pool, fingerprint, load_queryset(str(dev_path))
 
 
+def _checkpoint_path(cfg: Config, fingerprint: str, name: str) -> Path:
+    """Where a resumable command's ``.ckpt.jsonl`` lives — see ``eval.checkpoint``.
+
+    Distinct from every other fingerprint-keyed file under ``evals/`` (dev/test/meta/
+    genfilter/confirm marker): these are transient, deleted by the command itself on a
+    fully successful run, and safe to delete by hand at any time (``--fresh`` does
+    exactly that before starting).
+    """
+    return Path(cfg.root) / "evals" / f"{fingerprint}.{name}.ckpt.jsonl"
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     cfg, pool, fingerprint, items = _load_dev_set(args)
     print(f"Pool: {len(pool)} papers  fingerprint={fingerprint}  dev={len(items)} questions")
     print("Running default config on the dev split...")
-    print(format_report(run(cfg, items, desc="scoring dev set")))
+    checkpoint_path = _checkpoint_path(cfg, fingerprint, "run")
+    if args.fresh:
+        checkpoint_path.unlink(missing_ok=True)
+    print(format_report(run(cfg, items, desc="scoring dev set", checkpoint_path=checkpoint_path)))
 
 
 def _parse_grid(raw: str | None) -> list[int] | None:
@@ -225,10 +239,18 @@ def cmd_screen(args: argparse.Namespace) -> None:
         grid = _parse_grid(args.candidates)
         hybrid_msg = " + hybrid=on" if args.hybrid else ""
         print(f"Screening retrieval knobs (reranker/candidates{hybrid_msg}) on the dev split...")
+        checkpoint_path = _checkpoint_path(cfg, fingerprint, "screen-retrieval")
+        if args.fresh:
+            checkpoint_path.unlink(missing_ok=True)
         print(
             format_screen_report(
                 screen_retrieval(
-                    cfg, items, candidate_grid=grid, show_progress=True, hybrid=args.hybrid
+                    cfg,
+                    items,
+                    candidate_grid=grid,
+                    show_progress=True,
+                    hybrid=args.hybrid,
+                    checkpoint_path=checkpoint_path,
                 )
             )
         )
@@ -242,9 +264,20 @@ def cmd_screen(args: argparse.Namespace) -> None:
         f"re-indexing {len(pool)} papers each..."
     )
     _print_index_sizes(pool, [(a.label, a.chunking) for a in arms])
+    checkpoint_path = _checkpoint_path(cfg, fingerprint, "screen-chunking")
+    if args.fresh:
+        checkpoint_path.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory(prefix="paperlens-eval-") as tmp:
         t0 = time.time()
-        report = screen_chunking(cfg, pool, items, db_dir=tmp, grids=grids, show_progress=True)
+        report = screen_chunking(
+            cfg,
+            pool,
+            items,
+            db_dir=tmp,
+            grids=grids,
+            show_progress=True,
+            checkpoint_path=checkpoint_path,
+        )
         print(format_chunking_report(report))
         print(f"  ({time.time() - t0:.1f}s wall)")
 
@@ -268,6 +301,10 @@ def cmd_sweep(args: argparse.Namespace) -> None:
             if mt != cfg.chunking.max_tokens
         ],
     )
+    checkpoint_dir = Path(cfg.root) / "evals"
+    if args.fresh:
+        for mt in cells:
+            (checkpoint_dir / f"{fingerprint}.sweep.mt{mt}.ckpt.jsonl").unlink(missing_ok=True)
     with tempfile.TemporaryDirectory(prefix="paperlens-eval-") as tmp:
         t0 = time.time()
         report = sweep(
@@ -278,6 +315,8 @@ def cmd_sweep(args: argparse.Namespace) -> None:
             max_tokens_grid=mt_grid,
             candidate_grid=cand_grid,
             show_progress=True,
+            checkpoint_dir=checkpoint_dir,
+            fingerprint=fingerprint,
         )
         print(format_chunking_report(report))
         print(f"  ({time.time() - t0:.1f}s wall)")
@@ -388,6 +427,12 @@ def cmd_confirm(
             f"rerank={prior['rerank']} — re-running weakens the held-out guarantee."
         )
 
+    # Distinct from marker_path above: this is a transient resume checkpoint, deleted on a
+    # fully successful run, never the "touched once" record — --fresh only clears this one.
+    checkpoint_path = _checkpoint_path(cfg, fingerprint, "confirm")
+    if args.fresh:
+        checkpoint_path.unlink(missing_ok=True)
+
     print(f"Pool: {len(pool)} papers  fingerprint={fingerprint}  test={len(items)} questions")
     print("Confirming on the HELD-OUT TEST SPLIT (touched once per pool).")
     print(f"Config: max_tokens={max_tokens} candidates={candidates} rerank={rerank}")
@@ -423,6 +468,7 @@ def cmd_confirm(
             k=cfg.retrieval.k,
             rerank=rerank,
             desc="scoring test split",
+            checkpoint_path=checkpoint_path,
         )
     else:
         # Chunking changed -> a fresh index is required; isolate it (Guard 1) so the prod
@@ -450,6 +496,7 @@ def cmd_confirm(
                 k=cfg.retrieval.k,
                 rerank=rerank,
                 desc="scoring test split",
+                checkpoint_path=checkpoint_path,
             )
 
     print(format_report(report))
@@ -476,6 +523,12 @@ def cmd_confirm(
             indent=2,
         )
     )
+
+
+_FRESH_HELP = (
+    "discard any resumable checkpoint from an interrupted prior run and start over "
+    "(a no-op if there isn't one)"
+)
 
 
 def main() -> None:
@@ -516,6 +569,7 @@ def main() -> None:
         default=None,
         help="cap the pool to the first N papers (must match the fingerprint gen used)",
     )
+    r.add_argument("--fresh", action="store_true", help=_FRESH_HELP)
     r.set_defaults(func=cmd_run)
 
     s = sub.add_parser(
@@ -552,6 +606,7 @@ def main() -> None:
         default=None,
         help="--tier chunking: comma-separated max_tokens grid overriding the default screen",
     )
+    s.add_argument("--fresh", action="store_true", help=_FRESH_HELP)
     s.set_defaults(func=cmd_screen)
 
     w = sub.add_parser(
@@ -575,6 +630,7 @@ def main() -> None:
         default=None,
         help="comma-separated candidates grid, derived from cache (default 10,20,30,50)",
     )
+    w.add_argument("--fresh", action="store_true", help=_FRESH_HELP)
     w.set_defaults(func=cmd_sweep)
 
     c = sub.add_parser(
@@ -608,6 +664,7 @@ def main() -> None:
         default=None,
         help="winning reranker.enabled (default: the config's own value)",
     )
+    c.add_argument("--fresh", action="store_true", help=_FRESH_HELP)
     c.set_defaults(func=cmd_confirm)
 
     args = p.parse_args()

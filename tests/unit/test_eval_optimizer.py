@@ -76,6 +76,63 @@ def test_score_from_cache_matches_direct_rerank_ordering(make_searcher, seed_chu
     assert from_cache.ranked[0][0] == "p1-m1"  # the "delta" doc reranked to the top
 
 
+class _CountingEmbedder:
+    """Wraps a real embedder, counting calls and (optionally) raising past ``fail_after`` —
+    simulates a crash partway through a per-query loop; ``fail_after=None`` lets everything
+    through, so the same instance can track total calls across an interrupted-then-resumed
+    pair of invocations."""
+
+    def __init__(self, embedder, fail_after: int | None) -> None:
+        self._embedder = embedder
+        self.calls = 0
+        self.fail_after = fail_after
+
+    def __call__(self, input: list[str]) -> list[list[float]]:
+        self.calls += 1
+        if self.fail_after is not None and self.calls > self.fail_after:
+            raise RuntimeError("simulated interruption")
+        return self._embedder(input)
+
+
+def test_build_cache_resumes_without_recomputing_already_cached_queries(
+    make_searcher, fake_embedder, seed_chunks, tmp_path
+):
+    docs = [
+        seed_chunks("p1", "Method", "alpha beta gamma", doc_id="p1-method"),
+        seed_chunks("p2", "Training", "delta epsilon zeta", doc_id="p2-train"),
+        seed_chunks("p3", "Results", "eta theta iota", doc_id="p3-results"),
+    ]
+    ctx = make_searcher(docs)
+    items = [
+        _item("alpha beta gamma", "p1", "Method"),
+        _item("delta epsilon zeta", "p2", "Training"),
+        _item("eta theta iota", "p3", "Results"),
+    ]
+    counting = _CountingEmbedder(fake_embedder, fail_after=2)
+    ctx.searcher.embedder = counting
+    ckpt = tmp_path / "cache.ckpt.jsonl"
+
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        build_cache(
+            ctx.searcher,
+            items,
+            max_candidates=20,
+            reranker=FakeReranker(set()),
+            checkpoint_path=ckpt,
+        )
+    calls_before_resume = counting.calls
+
+    counting.fail_after = None
+    caches = build_cache(
+        ctx.searcher, items, max_candidates=20, reranker=FakeReranker(set()), checkpoint_path=ckpt
+    )
+
+    assert len(caches) == 3
+    # Only the un-cached query is (re-)retrieved+reranked on resume, not the first 2 again.
+    assert counting.calls - calls_before_resume == 1
+    assert not ckpt.exists()  # deleted once every unit is accounted for
+
+
 def test_arms_are_ofat_around_default(make_config):
     cfg = make_config()  # candidates=20, rerank disabled by make_config
     arms = _arms(cfg, [10, 20, 30])
@@ -379,3 +436,123 @@ def test_sweep_runs_offline_and_derives_the_grid(make_config, tmp_path, fake_emb
     assert any("mt=256" in label for label in labels)
     assert any("rr=on" in label for label in labels)
     assert report.n_queries == len(_CHUNKING_ITEMS)
+
+
+# --- Resume: an interrupted cell must be redone whole; a finished one must never re-embed --
+
+
+def test_screen_chunking_resumes_without_reembedding_a_finished_cell(
+    make_config, tmp_path, fake_embedder, monkeypatch
+):
+    import eval.optimizer as optimizer_mod
+
+    real_build_isolated_searcher = optimizer_mod.build_isolated_searcher
+    state = {"calls": 0, "fail_after": 1}
+
+    def flaky(*args, **kwargs):
+        state["calls"] += 1
+        if state["fail_after"] is not None and state["calls"] > state["fail_after"]:
+            raise RuntimeError("simulated interruption")
+        return real_build_isolated_searcher(*args, **kwargs)
+
+    monkeypatch.setattr(optimizer_mod, "build_isolated_searcher", flaky)
+
+    cfg = make_config()
+    ckpt = tmp_path / "screen-chunking.ckpt.jsonl"
+
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        optimizer_mod.screen_chunking(
+            cfg,
+            _CHUNKING_POOL,
+            _CHUNKING_ITEMS,
+            db_dir=str(tmp_path),
+            grids={"max_tokens": [256]},  # 2 arms: default, max_tokens=256
+            embedder=fake_embedder,
+            checkpoint_path=ckpt,
+        )
+    # 1 successful re-index (default) + 1 failed attempt (max_tokens=256, which raised).
+    assert state["calls"] == 2
+    assert ckpt.exists()
+
+    calls_before_resume = state["calls"]
+    state["fail_after"] = None
+    report = optimizer_mod.screen_chunking(
+        cfg,
+        _CHUNKING_POOL,
+        _CHUNKING_ITEMS,
+        db_dir=str(tmp_path),
+        grids={"max_tokens": [256]},
+        embedder=fake_embedder,
+        checkpoint_path=ckpt,
+    )
+
+    # Only the un-finished cell (max_tokens=256) is re-indexed on resume — "default" is not.
+    assert state["calls"] - calls_before_resume == 1
+    assert [r.label for r in report.results] == ["default", "max_tokens=256"]
+    assert not ckpt.exists()  # deleted once every cell is accounted for
+
+
+def test_sweep_resumes_a_finished_cell_without_reembedding(
+    make_config, tmp_path, fake_embedder, monkeypatch
+):
+    import eval.optimizer as optimizer_mod
+
+    real_build_isolated_searcher = optimizer_mod.build_isolated_searcher
+    state = {"calls": 0, "fail_after": 1}
+
+    def flaky(*args, **kwargs):
+        state["calls"] += 1
+        if state["fail_after"] is not None and state["calls"] > state["fail_after"]:
+            raise RuntimeError("simulated interruption")
+        return real_build_isolated_searcher(*args, **kwargs)
+
+    monkeypatch.setattr(optimizer_mod, "build_isolated_searcher", flaky)
+
+    cfg = make_config()  # chunking max_tokens=512 -> cells = sorted({512, 256, 512}) = [256, 512]
+    checkpoint_dir = tmp_path / "evals"
+    checkpoint_dir.mkdir()
+    fingerprint = "testfp"
+
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        optimizer_mod.sweep(
+            cfg,
+            _CHUNKING_POOL,
+            _CHUNKING_ITEMS,
+            db_dir=str(tmp_path / "db"),
+            max_tokens_grid=[256, 512],
+            candidate_grid=[10, 20],
+            embedder=fake_embedder,
+            reranker=FakeReranker(set()),
+            checkpoint_dir=checkpoint_dir,
+            fingerprint=fingerprint,
+        )
+    # 1 successful re-index (mt=256, which then fully cached) + 1 failed attempt (mt=512).
+    assert state["calls"] == 2
+    mt256_ckpt = checkpoint_dir / f"{fingerprint}.sweep.mt256.ckpt.jsonl"
+    mt512_ckpt = checkpoint_dir / f"{fingerprint}.sweep.mt512.ckpt.jsonl"
+    assert mt256_ckpt.exists()  # fully cached, kept on disk (checkpoint_finish=False) until success
+    assert not mt512_ckpt.exists()  # never started
+
+    calls_before_resume = state["calls"]
+    state["fail_after"] = None
+    report = optimizer_mod.sweep(
+        cfg,
+        _CHUNKING_POOL,
+        _CHUNKING_ITEMS,
+        db_dir=str(tmp_path / "db"),
+        max_tokens_grid=[256, 512],
+        candidate_grid=[10, 20],
+        embedder=fake_embedder,
+        reranker=FakeReranker(set()),
+        checkpoint_dir=checkpoint_dir,
+        fingerprint=fingerprint,
+    )
+
+    # Only mt=512 is re-indexed on resume — mt=256's re-index is skipped entirely, not just
+    # its per-query retrieval (that's the whole point of not deleting a cell's checkpoint
+    # until the whole sweep succeeds).
+    assert state["calls"] - calls_before_resume == 1
+    assert any("mt=256" in r.label for r in report.results)
+    assert any("mt=512" in r.label for r in report.results)
+    assert not mt256_ckpt.exists()  # both cleaned up once the whole sweep succeeded
+    assert not mt512_ckpt.exists()

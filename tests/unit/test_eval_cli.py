@@ -42,10 +42,15 @@ class FakeReranker:
 
 
 def _confirm_args(
-    config=None, limit=None, max_tokens=None, candidates=None, rerank=None
+    config=None, limit=None, max_tokens=None, candidates=None, rerank=None, fresh=False
 ) -> argparse.Namespace:
     return argparse.Namespace(
-        config=config, limit=limit, max_tokens=max_tokens, candidates=candidates, rerank=rerank
+        config=config,
+        limit=limit,
+        max_tokens=max_tokens,
+        candidates=candidates,
+        rerank=rerank,
+        fresh=fresh,
     )
 
 

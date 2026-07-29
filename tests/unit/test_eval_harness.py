@@ -10,6 +10,7 @@ import json
 
 import pytest
 
+from eval.checkpoint import resume_units
 from eval.harness import run, score_items
 from eval.queryset import QAItem, load_queryset
 from rag.search import Searcher
@@ -160,6 +161,101 @@ def test_score_items_pairs_each_query_with_its_relevant_set(
     )
     assert scores[0].relevant_ids == {"p1-method-0", "p1-method-1"}
     assert scores[0].gold_in_pool
+
+
+class _CountingEmbedder:
+    """Wraps a real embedder, counting calls and (optionally) raising past ``fail_after`` —
+    simulates a crash partway through a per-query loop. ``fail_after=None`` lets everything
+    through, so the same instance can be reused across an interrupted-then-resumed pair of
+    calls to assert the total call count over *both* invocations, not just the second one.
+    """
+
+    def __init__(self, embedder, fail_after: int | None) -> None:
+        self._embedder = embedder
+        self.calls = 0
+        self.fail_after = fail_after
+
+    def __call__(self, input: list[str]) -> list[list[float]]:
+        self.calls += 1
+        if self.fail_after is not None and self.calls > self.fail_after:
+            raise RuntimeError("simulated interruption")
+        return self._embedder(input)
+
+
+def test_score_items_resumes_without_recomputing_already_scored_queries(
+    make_searcher, fake_embedder, seed_chunks, tmp_path
+):
+    docs = [
+        seed_chunks("p1", "Method", "alpha beta gamma", doc_id="p1-method"),
+        seed_chunks("p2", "Training", "delta epsilon zeta", doc_id="p2-train"),
+        seed_chunks("p3", "Results", "eta theta iota", doc_id="p3-results"),
+    ]
+    ctx = make_searcher(docs)
+    items = [
+        _item("alpha beta gamma", "p1", "Method"),
+        _item("delta epsilon zeta", "p2", "Training"),
+        _item("eta theta iota", "p3", "Results"),
+    ]
+    counting = _CountingEmbedder(fake_embedder, fail_after=2)
+    ctx.searcher.embedder = counting
+    ckpt = tmp_path / "run.ckpt.jsonl"
+
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        score_items(ctx.searcher, items, candidates=20, k=5, rerank=False, checkpoint_path=ckpt)
+    assert ckpt.exists()
+    header = {
+        "candidates": 20,
+        "k": 5,
+        "rerank": False,
+        "index_count": ctx.searcher.collection.count(),
+    }
+    assert len(resume_units(ckpt, header)) == 2  # 2 queries completed before the 3rd raised
+    calls_before_resume = counting.calls  # 2 succeeded + 1 failed attempt
+
+    counting.fail_after = None  # let the interrupted run "come back up"
+    scores = score_items(
+        ctx.searcher, items, candidates=20, k=5, rerank=False, checkpoint_path=ckpt
+    )
+
+    assert len(scores) == 3
+    # Only the one un-cached item is (re-)embedded on resume — the 2 already-checkpointed
+    # queries are never touched again.
+    assert counting.calls - calls_before_resume == 1
+    assert not ckpt.exists()  # deleted once every unit is accounted for
+
+
+def test_run_resume_reproduces_the_uninterrupted_report_exactly(
+    make_searcher, make_config, fake_embedder, seed_chunks, tmp_path
+):
+    """Resume isn't just faster — cluster_bootstrap is seeded (stats.py), so the resumed
+    report must equal, field for field, what an uninterrupted run would have produced."""
+    docs = [
+        seed_chunks("p1", "Method", "alpha beta gamma", doc_id="p1-method"),
+        seed_chunks("p2", "Training", "delta epsilon zeta", doc_id="p2-train"),
+        seed_chunks("p3", "Results", "eta theta iota", doc_id="p3-results"),
+    ]
+    items = [
+        _item("alpha beta gamma", "p1", "Method"),
+        _item("delta epsilon zeta", "p2", "Training"),
+        _item("eta theta iota", "p3", "Results"),
+    ]
+    cfg = make_config()
+
+    baseline_ctx = make_searcher(docs)
+    baseline = run(cfg, items, searcher=baseline_ctx.searcher)
+
+    resumed_ctx = make_searcher(docs)
+    counting = _CountingEmbedder(fake_embedder, fail_after=2)
+    resumed_ctx.searcher.embedder = counting
+    ckpt = tmp_path / "run.ckpt.jsonl"
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        run(cfg, items, searcher=resumed_ctx.searcher, checkpoint_path=ckpt)
+    calls_before_resume = counting.calls
+    counting.fail_after = None
+    resumed = run(cfg, items, searcher=resumed_ctx.searcher, checkpoint_path=ckpt)
+
+    assert resumed == baseline
+    assert counting.calls - calls_before_resume == 1  # only the un-cached item re-embedded
 
 
 def test_load_queryset_round_trips(tmp_path):

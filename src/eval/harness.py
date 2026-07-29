@@ -10,6 +10,7 @@ caching builds on later.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 from tqdm import tqdm
@@ -20,6 +21,7 @@ from rag.reranker import build_reranker
 from rag.search import Searcher
 from rag.sparse import reciprocal_rank_fusion, rrf_scores
 
+from .checkpoint import CheckpointWriter, resume_units
 from .metrics import (
     QueryScore,
     mrr_at_k,
@@ -35,6 +37,25 @@ from .stats import (
     resolution_warning,
     success_samples,
 )
+
+
+def _query_score_to_record(score: QueryScore) -> dict[str, Any]:
+    return {
+        "candidate_ids": score.candidate_ids,
+        "ranked": [list(pair) for pair in score.ranked],
+        "relevant_ids": sorted(score.relevant_ids),
+        "paper_id": score.paper_id,
+    }
+
+
+def _query_score_from_record(qid: str, record: dict[str, Any]) -> QueryScore:
+    return QueryScore(
+        qid=qid,
+        candidate_ids=record["candidate_ids"],
+        ranked=[(cid, s) for cid, s in record["ranked"]],
+        relevant_ids=set(record["relevant_ids"]),
+        paper_id=record["paper_id"],
+    )
 
 
 @dataclass
@@ -135,25 +156,51 @@ def score_items(
     k: int,
     rerank: bool,
     desc: str | None = None,
+    checkpoint_path: Path | None = None,
 ) -> list[QueryScore]:
     """Retrieve for every item and pair it with its gold-section relevant set.
 
     ``desc`` labels a progress bar over ``items`` (one dense query + optional rerank pass
     each — the dominant per-arm cost in a screen/sweep); ``None`` (offline tests) runs silent.
+
+    ``checkpoint_path``, when given, makes the loop resumable: each ``QueryScore`` is
+    appended (flushed) to the checkpoint the moment it's computed, so a second call with
+    the same path/params skips straight to it instead of re-retrieving. The header folds
+    in ``searcher.collection.count()`` as a trip-wire — this reads the persistent index
+    directly (unlike an isolated chunking-cell searcher), so a resumed run against an
+    index whose chunk count changed since the interrupted run is treated as a different
+    run, not silently reused (see docs/harness.md).
     """
+    done: dict[str, dict[str, Any]] = {}
+    writer: CheckpointWriter | None = None
+    if checkpoint_path is not None:
+        header = {
+            "candidates": candidates,
+            "k": k,
+            "rerank": rerank,
+            "index_count": searcher.collection.count(),
+        }
+        done = resume_units(checkpoint_path, header)
+        writer = CheckpointWriter(checkpoint_path, header)
+        if done:
+            print(f"  resuming: {len(done)}/{len(items)} queries already scored")
+
     scores: list[QueryScore] = []
     for i, it in enumerate(tqdm(items, desc=desc, disable=desc is None, leave=False)):
+        qid = str(i)
+        if qid in done:
+            scores.append(_query_score_from_record(qid, done[qid]))
+            continue
         cand_ids, ranked = _retrieve(searcher, it.query, candidates=candidates, k=k, rerank=rerank)
         rel = relevant_ids(searcher.collection, it.paper_id, it.section_number, it.section_title)
-        scores.append(
-            QueryScore(
-                qid=str(i),
-                candidate_ids=cand_ids,
-                ranked=ranked,
-                relevant_ids=rel,
-                paper_id=it.paper_id,
-            )
+        score = QueryScore(
+            qid=qid, candidate_ids=cand_ids, ranked=ranked, relevant_ids=rel, paper_id=it.paper_id
         )
+        scores.append(score)
+        if writer is not None:
+            writer.append(qid, _query_score_to_record(score))
+    if writer is not None:
+        writer.finish()
     return scores
 
 
@@ -166,6 +213,7 @@ def run(
     k: int | None = None,
     rerank: bool | None = None,
     desc: str | None = None,
+    checkpoint_path: Path | None = None,
 ) -> RunReport:
     """Score ``items`` at ``cfg``'s retrieval settings and return the report.
 
@@ -173,13 +221,22 @@ def run(
     ``candidates``/``k``/``rerank`` override ``cfg``'s own values when given — this is what
     lets ``confirm`` score a different config than ``cfg`` carries (e.g. against an isolated,
     re-chunked searcher) while reusing this function's stats/report plumbing. ``desc`` labels
-    a progress bar over ``items``; ``None`` (offline tests) runs silent.
+    a progress bar over ``items``; ``None`` (offline tests) runs silent. ``checkpoint_path``
+    is threaded straight through to :func:`score_items` — see its docstring.
     """
     searcher = searcher or build_searcher(cfg)
     candidates = cfg.retrieval.candidates if candidates is None else candidates
     k = cfg.retrieval.k if k is None else k
     rerank = cfg.reranker.enabled if rerank is None else rerank
-    scores = score_items(searcher, items, candidates=candidates, k=k, rerank=rerank, desc=desc)
+    scores = score_items(
+        searcher,
+        items,
+        candidates=candidates,
+        k=k,
+        rerank=rerank,
+        desc=desc,
+        checkpoint_path=checkpoint_path,
+    )
     boot = cluster_bootstrap(success_samples(scores))
     # boot.point is the same quantity as success_at_candidates(scores) — read it off the
     # bootstrap rather than recomputing, so the point and its CI can never disagree.

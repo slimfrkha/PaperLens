@@ -188,6 +188,7 @@ see [Configuration: project root](configuration.md#-how-the-config-is-found)):
 | `<fingerprint>.meta.json` | `gen` | `fingerprint`, `n_papers`, `n_dev`/`n_test`, the frozen `GenConfig` used, the generation model, `limit`, and a `genfilter` block (`enabled`, `match_threshold`, `n_filtered`) — present even when `--genfilter` wasn't used. |
 | `<fingerprint>.genfilter.jsonl` | `gen --genfilter` | One line per **checked** item (leaked or not): `query`, `paper_id`, `gold_answer`, `closed_book_answer`, `score`, `leaked`, `error`. The audit/calibration trail, not just the discards — see [Known limits](#️-known-limits-read-before-trusting-a-recommendation). `error` is `null` for a real check, `"no_gold_answer"` when there was nothing to compare against, or `"llm_error: ..."` on a failed closed-book call — so a row with `score: 0.0` can be told apart from a skipped/failed one instead of both looking identical. Present but empty when `--genfilter` wasn't passed. |
 | `<fingerprint>.confirm.json` | `confirm` | `timestamp`, the confirmed `max_tokens`/`candidates`/`rerank`, and the resulting scores — checked before every `confirm` run and printed as a loud, non-blocking warning on a repeat, so re-touching the test split leaves a trace instead of happening silently. |
+| `<fingerprint>.{run,screen-retrieval,screen-chunking,sweep.mt<N>,confirm}.ckpt.jsonl` | `run`/`screen`/`sweep`/`confirm` | Transient resume checkpoints — **not** part of the eval set (see [Resuming an interrupted run](#-resuming-an-interrupted-run)). Deleted automatically once the command that wrote them finishes successfully; safe to delete by hand at any time (equivalent to `--fresh`). |
 
 **`fingerprint`** (`fingerprint.corpus_fingerprint`) is a SHA-256 over the sorted paper ids
 and each paper's markdown content — change the pool (add/remove/re-extract a paper) and the
@@ -213,11 +214,11 @@ across both sides and the held-out guarantee would be fiction.
 | Command | Re-indexes? | What it does |
 |---|---|---|
 | `paperlens-eval gen [--config] [--limit N] [--genfilter] [--genfilter-threshold F]` | No | Build/refresh the eval set for the loaded pool. `--genfilter` (off by default, ~2x LLM calls when on) discards closed-book-answerable questions. |
-| `paperlens-eval run [--config] [--limit N]` | No | Score the current config on the dev split. |
-| `paperlens-eval screen --tier retrieval [--candidates 10,20,30,50] [--hybrid]` | No | OFAT: `reranker.enabled`, `retrieval.candidates`. `--hybrid` adds a `"hybrid=on"` arm (BM25 fused via RRF) — independent of `sparse.enabled` in config.yaml, so this is how you measure hybrid retrieval *before* deciding whether to turn it on (see [configuration](configuration.md)). |
-| `paperlens-eval screen --tier chunking [--max-tokens 256,1024]` | Yes, per cell | OFAT over `chunking.*` (default grids: `max_tokens`, `overlap_tokens`, `min_tokens`, `noise_ratio`). |
-| `paperlens-eval sweep [--max-tokens ...] [--candidates ...]` | Yes, per `max_tokens` | Staged grid over the two fixed mechanistic axes: `chunking.max_tokens × retrieval.candidates × reranker.enabled`. Independent of `screen` — reads no file it writes. |
-| `paperlens-eval confirm [--max-tokens N] [--candidates N] [--rerank/--no-rerank]` | Only if `--max-tokens` differs from the config's own value | Score one config once on the test split; print the `config.yaml` block. |
+| `paperlens-eval run [--config] [--limit N] [--fresh]` | No | Score the current config on the dev split. Resumable — see below. |
+| `paperlens-eval screen --tier retrieval [--candidates 10,20,30,50] [--hybrid] [--fresh]` | No | OFAT: `reranker.enabled`, `retrieval.candidates`. `--hybrid` adds a `"hybrid=on"` arm (BM25 fused via RRF) — independent of `sparse.enabled` in config.yaml, so this is how you measure hybrid retrieval *before* deciding whether to turn it on (see [configuration](configuration.md)). Resumable. |
+| `paperlens-eval screen --tier chunking [--max-tokens 256,1024] [--fresh]` | Yes, per cell | OFAT over `chunking.*` (default grids: `max_tokens`, `overlap_tokens`, `min_tokens`, `noise_ratio`). Resumable at cell granularity. |
+| `paperlens-eval sweep [--max-tokens ...] [--candidates ...] [--fresh]` | Yes, per `max_tokens` | Staged grid over the two fixed mechanistic axes: `chunking.max_tokens × retrieval.candidates × reranker.enabled`. Independent of `screen` — reads no file it writes. Resumable at cell granularity. |
+| `paperlens-eval confirm [--max-tokens N] [--candidates N] [--rerank/--no-rerank] [--fresh]` | Only if `--max-tokens` differs from the config's own value | Score one config once on the test split; print the `config.yaml` block. Resumable (the resume checkpoint is unrelated to the "touched once" marker below). |
 
 Every per-item / per-cell loop (`gen`'s per-paper and per-section generation; `run`/`confirm`'s
 per-query scoring; `screen`/`sweep`'s per-arm re-index and per-query cache build) prints a
@@ -228,6 +229,50 @@ so a long chunking screen or sweep doesn't sit silent. Bars don't pollute a redi
 All commands take `--config <path>` (else discovery, same as `paperlens-serve`/
 `paperlens-ingest`) and `--limit N` (smoke-test a prefix of the pool; must match whatever
 `gen` used, since it changes the fingerprint).
+
+### 🔁 Resuming an interrupted run
+
+`run`, `screen`, `sweep`, and `confirm` checkpoint as they go (`eval.checkpoint`) — a
+Ctrl-C or crash and a plain re-run picks up where it left off instead of recomputing
+everything. **`gen` does not resume yet** (its own append-only, per-paper streaming keeps
+partial output on disk if it's interrupted, same as always, but a re-run still regenerates
+the whole set).
+
+The atomic unit is whatever this doc already calls the per-item/per-cell loop above: one
+query for `run`/`confirm`/`screen --tier retrieval`, one re-indexed cell for
+`screen --tier chunking`/`sweep`. A unit only ever appears in a checkpoint once it's
+**fully** done — the unit in progress at interruption time is simply absent and gets
+redone whole on the next run, never partially credited. For `screen --tier chunking`/
+`sweep` this means the re-index itself (the expensive part — `cells × n_chunks` embed
+cost) is always redone whole for whichever cell was in progress, even though the cheaper
+per-query retrieval/rerank pass *within* that same cell still resumes query-by-query once
+the re-index catches up; an already-**finished** earlier cell costs nothing on resume —
+neither its re-index nor its per-query pass repeats.
+
+A checkpoint only applies if its stored parameters still match — a different `candidates`/
+`max_tokens`/grid, or a schema change, invalidates it and starts fresh rather than
+silently reusing a mismatched partial result (printed as *what* changed). `run`/`confirm`/
+`screen --tier retrieval` additionally fold in the on-disk index's chunk count as a
+trip-wire, since (unlike `screen --tier chunking`/`sweep`, which always re-index into a
+fresh collection built from the fingerprinted pool) they read `paths.rag_db` directly —
+a persistent collection this harness doesn't own. That trip-wire catches an index whose
+chunk count changed (e.g. an intervening `paperlens-ingest` with a different
+`chunking.max_tokens`) but **not** a same-size re-chunk; if you changed anything about the
+ingested index between an interrupted run and resuming it, use `--fresh` rather than
+trust the checkpoint.
+
+`--fresh` discards any matching checkpoint before starting (a no-op if there isn't one) —
+reach for it when you don't trust a partial result, not only when the trip-wire above
+can't catch the change itself. Every checkpoint lives at `evals/<fingerprint>.*.ckpt.jsonl`
+(see the [eval-set reference](#-eval-set-reference) table) and is deleted automatically
+once the command that wrote it finishes successfully — so `evals/` never accumulates
+stale ones, and their mere presence is the "this didn't finish last time" signal.
+
+**The `<fingerprint>.confirm.json` marker is a different thing** from `confirm`'s resume
+checkpoint (`<fingerprint>.confirm.ckpt.jsonl`) and unaffected by any of the above: the
+marker is written once, only at the very end of a fully successful `confirm`, and exists
+to flag when the held-out test split has been touched — resuming an interrupted `confirm`
+still only writes it once, at the end, exactly as an uninterrupted run would.
 
 **The emitted `config.yaml` block is deliberately narrower than a full section.**
 `chunking`/`embedding`/`reranker` are dumped whole (via `draccus.dump`, so `ChoiceRegistry`

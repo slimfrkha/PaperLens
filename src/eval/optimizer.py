@@ -25,7 +25,8 @@ one knob and is compared **paired vs default on the same queries** via
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
+from pathlib import Path
 from typing import Any, cast
 
 from tqdm import tqdm
@@ -37,6 +38,7 @@ from rag.reranker import Reranker, build_reranker
 from rag.search import Searcher
 from rag.sparse import BM25Index, build_sparse_index, reciprocal_rank_fusion
 
+from .checkpoint import CheckpointWriter, resume_units
 from .harness import build_searcher, score_items
 from .index_isolated import build_isolated_searcher
 from .metrics import QueryScore, relevant_ids
@@ -44,6 +46,7 @@ from .queryset import QAItem
 from .stats import (
     BootResult,
     DeltaResult,
+    Sample,
     ceiling_saturation_note,
     cluster_bootstrap,
     mrr_samples,
@@ -132,6 +135,38 @@ def build_reranker_for_cfg(cfg: Config) -> Reranker:
     return build_reranker(cfg.reranker, llm=llm)
 
 
+def _query_cache_to_record(cache: QueryCache) -> dict[str, Any]:
+    return {
+        "paper_id": cache.paper_id,
+        "candidate_ids": cache.candidate_ids,
+        "rerank_scores": cache.rerank_scores,
+        "relevant_ids": sorted(cache.relevant_ids),
+        "sparse_ids": cache.sparse_ids,
+    }
+
+
+def _query_cache_from_record(qid: str, record: dict[str, Any]) -> QueryCache:
+    return QueryCache(
+        qid=qid,
+        paper_id=record["paper_id"],
+        candidate_ids=record["candidate_ids"],
+        rerank_scores=record["rerank_scores"],
+        relevant_ids=set(record["relevant_ids"]),
+        sparse_ids=record["sparse_ids"],
+    )
+
+
+def _build_cache_header(
+    max_candidates: int, *, hybrid: bool, fetch_multiplier: int, index_count: int | None
+) -> dict[str, Any]:
+    return {
+        "max_candidates": max_candidates,
+        "hybrid": hybrid,
+        "fetch_multiplier": fetch_multiplier,
+        "index_count": index_count,
+    }
+
+
 def build_cache(
     searcher: Searcher,
     items: list[QAItem],
@@ -141,6 +176,9 @@ def build_cache(
     desc: str | None = None,
     sparse: BM25Index | None = None,
     fetch_multiplier: int = 3,
+    checkpoint_path: Path | None = None,
+    index_count: int | None = None,
+    checkpoint_finish: bool = True,
 ) -> list[QueryCache]:
     """Retrieve once per query and score the pool with ``reranker``.
 
@@ -156,10 +194,39 @@ def build_cache(
     whether ``sparse`` widened the cache underneath it. ``desc`` labels a progress bar over
     ``items`` (this is the one expensive pass every retrieval arm derives from); ``None``
     (offline tests) runs silent.
+
+    ``checkpoint_path`` makes this resumable — same pattern as ``harness.score_items``: each
+    ``QueryCache`` is appended (flushed) the moment it's computed. ``index_count`` is folded
+    into the header as the same index-identity trip-wire ``score_items`` uses — pass
+    ``searcher.collection.count()`` when ``searcher`` reads a persistent, externally-mutable
+    index (retrieval screen); pass (or leave) ``None`` when it's a fresh isolated collection
+    whose identity is already pinned by the caller's own checkpoint filename (``sweep``), so
+    no searcher needs to exist yet just to compute this. ``checkpoint_finish``, when ``False``,
+    leaves a fully-populated checkpoint file on disk instead of deleting it on completion — for
+    a caller (``sweep``) that owns several such files across one command and wants to defer
+    cleanup until *all* of them are done, not just this one.
     """
     fetch_n = max_candidates * fetch_multiplier if sparse is not None else max_candidates
+    done: dict[str, dict[str, Any]] = {}
+    writer: CheckpointWriter | None = None
+    if checkpoint_path is not None:
+        header = _build_cache_header(
+            max_candidates,
+            hybrid=sparse is not None,
+            fetch_multiplier=fetch_multiplier,
+            index_count=index_count,
+        )
+        done = resume_units(checkpoint_path, header)
+        writer = CheckpointWriter(checkpoint_path, header)
+        if done:
+            print(f"  resuming: {len(done)}/{len(items)} queries already cached")
+
     caches: list[QueryCache] = []
     for i, it in enumerate(tqdm(items, desc=desc, disable=desc is None, leave=False)):
+        qid = str(i)
+        if qid in done:
+            caches.append(_query_cache_from_record(qid, done[qid]))
+            continue
         embed_query = getattr(searcher.embedder, "embed_query", None)
         qvec = embed_query([it.query]) if embed_query else searcher.embedder([it.query])
         # Chroma's stubs narrow query_embeddings/results more tightly than runtime accepts;
@@ -181,18 +248,24 @@ def build_cache(
             union_ids.extend(got["ids"])
             union_docs.extend(got["documents"])
         scores = reranker.score(it.query, union_docs) if union_ids else []
-        caches.append(
-            QueryCache(
-                qid=str(i),
-                paper_id=it.paper_id,
-                candidate_ids=ids,
-                rerank_scores=dict(zip(union_ids, scores, strict=True)),
-                relevant_ids=relevant_ids(
-                    searcher.collection, it.paper_id, it.section_number, it.section_title
-                ),
-                sparse_ids=sparse_ids,
-            )
+        cache = QueryCache(
+            qid=qid,
+            paper_id=it.paper_id,
+            candidate_ids=ids,
+            rerank_scores=dict(zip(union_ids, scores, strict=True)),
+            relevant_ids=relevant_ids(
+                searcher.collection, it.paper_id, it.section_number, it.section_title
+            ),
+            sparse_ids=sparse_ids,
         )
+        caches.append(cache)
+        if writer is not None:
+            writer.append(qid, _query_cache_to_record(cache))
+    if writer is not None:
+        if checkpoint_finish:
+            writer.finish()
+        else:
+            writer.close()
     return caches
 
 
@@ -258,6 +331,7 @@ def screen_retrieval(
     searcher: Searcher | None = None,
     show_progress: bool = False,
     hybrid: bool = False,
+    checkpoint_path: Path | None = None,
 ) -> ScreenReport:
     """Screen reranker on/off and candidates depth over the loaded pool, paired vs default.
 
@@ -267,7 +341,9 @@ def screen_retrieval(
     into the default arm's candidates/rerank settings — gated on this explicit flag, **not** on
     ``cfg.sparse.enabled``: the harness's whole purpose is proposing config changes before
     they're committed, so requiring ``sparse.enabled: true`` first would make it impossible to
-    measure the one case that matters (deciding whether to turn it on).
+    measure the one case that matters (deciding whether to turn it on). ``checkpoint_path`` is
+    threaded straight through to :func:`build_cache` — every arm derived from that cache is
+    free, so only the cache-build pass itself needs to be resumable.
     """
     searcher = searcher or build_searcher(cfg)
     grid = candidate_grid or DEFAULT_CANDIDATE_GRID
@@ -302,6 +378,8 @@ def screen_retrieval(
         desc="retrieval cache" if show_progress else None,
         sparse=sparse_index,
         fetch_multiplier=fetch_multiplier,
+        checkpoint_path=checkpoint_path,
+        index_count=searcher.collection.count() if checkpoint_path is not None else None,
     )
 
     def arm_scores(arm: Arm) -> list[QueryScore]:
@@ -510,6 +588,26 @@ def _chunking_default_desc(cfg: Config) -> str:
     )
 
 
+def _cell_samples_to_record(success: list[Sample], mrr: list[Sample]) -> dict[str, Any]:
+    def serialize(samples: list[Sample]) -> list[dict[str, Any]]:
+        return [
+            {"qid": s.qid, "paper_id": s.paper_id, "eligible": s.eligible, "value": s.value}
+            for s in samples
+        ]
+
+    return {"success_samples": serialize(success), "mrr_samples": serialize(mrr)}
+
+
+def _cell_samples_from_record(record: dict[str, Any]) -> tuple[list[Sample], list[Sample]]:
+    def deserialize(data: list[dict[str, Any]]) -> list[Sample]:
+        return [
+            Sample(qid=d["qid"], paper_id=d["paper_id"], eligible=d["eligible"], value=d["value"])
+            for d in data
+        ]
+
+    return deserialize(record["success_samples"]), deserialize(record["mrr_samples"])
+
+
 def screen_chunking(
     cfg: Config,
     pool: dict[str, str],
@@ -520,6 +618,7 @@ def screen_chunking(
     embedder: Any = None,
     reranker: Reranker | None = None,
     show_progress: bool = False,
+    checkpoint_path: Path | None = None,
 ) -> ChunkingReport:
     """OFAT screen over chunking knobs, each arm re-indexed into its own isolated collection.
 
@@ -533,6 +632,13 @@ def screen_chunking(
     tests skip the model download. ``show_progress`` shows embed/score bars per cell (off by
     default, the CLI opts in); the per-cell ``done (elapsed, ~remaining)`` line always prints —
     it's one line per cell, not a bar, and is the aggregate-ETA number a long screen needs.
+
+    ``checkpoint_path`` makes this resumable at cell granularity: a cell's raw
+    ``success``/``mrr`` :class:`~eval.stats.Sample` lists (not just the point estimate — the
+    default cell's samples are needed to compute every other cell's paired delta) are appended
+    the moment that cell finishes, so a cell already in the checkpoint skips re-embedding and
+    re-scoring entirely. The header pins the grid and ``cfg.chunking``'s own values — either
+    changing invalidates the checkpoint (a different arm set).
     """
     arms = chunking_arms(cfg, grids=grids)
     embedder = embedder if embedder is not None else build_embedder(cfg.embedding)
@@ -543,8 +649,21 @@ def screen_chunking(
     n_arms = len(arms)
     t0 = time.monotonic()
 
+    done: dict[str, dict[str, Any]] = {}
+    writer: CheckpointWriter | None = None
+    if checkpoint_path is not None:
+        header = {"grids": grids, "base_chunking": asdict(cfg.chunking), "n_items": len(items)}
+        done = resume_units(checkpoint_path, header)
+        writer = CheckpointWriter(checkpoint_path, header)
+        if done:
+            print(f"  resuming: {len(done)}/{n_arms} cells already done")
+
     def arm_samples(arm: ChunkingArm, idx: int):
         tag = f"[{idx}/{n_arms}] {arm.label}"
+        if arm.label in done:
+            succ, mrr = _cell_samples_from_record(done[arm.label])
+            print(_cell_eta_line(tag, idx, n_arms, t0))
+            return succ, mrr
         searcher = build_isolated_searcher(
             pool,
             arm.chunking,
@@ -563,7 +682,10 @@ def screen_chunking(
             desc=f"{tag} score" if show_progress else None,
         )
         print(_cell_eta_line(tag, idx, n_arms, t0))
-        return success_samples(scores), mrr_samples(scores, k)
+        succ, mrr = success_samples(scores), mrr_samples(scores, k)
+        if writer is not None:
+            writer.append(arm.label, _cell_samples_to_record(succ, mrr))
+        return succ, mrr
 
     default_succ, default_mrr = arm_samples(arms[0], 1)
     results = [
@@ -586,6 +708,8 @@ def screen_chunking(
                 mrr_delta=paired_delta(mrr, default_mrr),
             )
         )
+    if writer is not None:
+        writer.finish()
     # The max_tokens/candidates confound caveat only applies when a max_tokens arm is present;
     # the eligibility caveat always does (each arm's own goldable / gold-in-pool set).
     caveats = [_CAVEAT_ELIGIBILITY]
@@ -663,6 +787,8 @@ def sweep(
     embedder: Any = None,
     reranker: Reranker | None = None,
     show_progress: bool = False,
+    checkpoint_dir: Path | None = None,
+    fingerprint: str | None = None,
 ) -> ChunkingReport:
     """Staged chunking × retrieval grid: re-index once per ``max_tokens`` (the expensive axis),
     then derive every ``candidates × rerank`` slice of that cell from **one cached** dense +
@@ -670,6 +796,12 @@ def sweep(
     So cost is ``|max_tokens_grid|`` re-indexes, not the full grid. Reports each cell paired
     vs the default via :func:`~eval.stats.paired_delta`. ``show_progress`` shows embed/cache
     bars per cell (off by default, the CLI opts in); the per-cell ``done`` line always prints.
+
+    ``checkpoint_dir``/``fingerprint`` (both required together) make each ``max_tokens`` cell's
+    cache-build resumable — one checkpoint file per cell
+    (``<checkpoint_dir>/<fingerprint>.sweep.mt<N>.ckpt.jsonl``), since each is an independent
+    ``build_cache`` pass over its own isolated collection. A cell whose cache is already fully
+    checkpointed still re-embeds nothing further, same as an uninterrupted call.
     """
     mt_grid = max_tokens_grid or DEFAULT_MAX_TOKENS_GRID
     cand_grid = candidate_grid or DEFAULT_CANDIDATE_GRID
@@ -683,9 +815,29 @@ def sweep(
     # One isolated cell + one cached dense/rerank pass per distinct max_tokens.
     caches: dict[int, list[QueryCache]] = {}
     cells = sorted({cfg.chunking.max_tokens, *mt_grid})
+    checkpoint_paths: dict[int, Path] = (
+        {mt: checkpoint_dir / f"{fingerprint}.sweep.mt{mt}.ckpt.jsonl" for mt in cells}
+        if checkpoint_dir is not None and fingerprint is not None
+        else {}
+    )
     t0 = time.monotonic()
     for i, mt in enumerate(cells, 1):
         tag = f"[{i}/{len(cells)}] max_tokens={mt}"
+        ckpt_path = checkpoint_paths.get(mt)
+        if ckpt_path is not None:
+            header = _build_cache_header(max_c, hybrid=False, fetch_multiplier=3, index_count=None)
+            done = resume_units(ckpt_path, header)
+            if len(done) == len(items):
+                # Whole cell already cached from a prior run — skip the re-index entirely,
+                # not just the per-query retrieval (that's the point of not deleting a
+                # cell's checkpoint until the whole sweep succeeds — see checkpoint_finish
+                # below).
+                caches[mt] = [
+                    _query_cache_from_record(str(j), done[str(j)]) for j in range(len(items))
+                ]
+                print(f"  resuming: {tag} already fully cached — skipping re-index")
+                print(_cell_eta_line(tag, i, len(cells), t0))
+                continue
         searcher = build_isolated_searcher(
             pool,
             replace(cfg.chunking, max_tokens=mt),
@@ -701,8 +853,14 @@ def sweep(
             max_candidates=max_c,
             reranker=reranker,
             desc=f"{tag} cache" if show_progress else None,
+            checkpoint_path=ckpt_path,
+            checkpoint_finish=False,  # sweep deletes all cell checkpoints itself, once every
+            # cell has succeeded — not per-cell, so an already-finished earlier cell is still
+            # skippable if a later cell is what gets interrupted.
         )
         print(_cell_eta_line(tag, i, len(cells), t0))
+    for ckpt_path in checkpoint_paths.values():
+        ckpt_path.unlink(missing_ok=True)
 
     def arm_samples(arm: SweepArm):
         scores = [
