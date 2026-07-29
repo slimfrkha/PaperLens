@@ -61,6 +61,8 @@ class HFEmbedder(Embedder):
         batch_size: int = 32,
         device: str | None = None,
         max_seq_length: int = 1024,
+        query_prefix: str = "",
+        document_prefix: str = "",
     ):
         from sentence_transformers import SentenceTransformer
 
@@ -74,6 +76,8 @@ class HFEmbedder(Embedder):
         self.model_name = model_name
         self.batch_size = batch_size
         self.device = device
+        self.query_prefix = query_prefix
+        self.document_prefix = document_prefix
         self.model = SentenceTransformer(model_name, device=device, trust_remote_code=True)
         # Cap sequence length: models like bge-m3 default to 8192, which at a
         # normal batch size overflows Metal's 2**32-byte per-tensor limit on MPS.
@@ -85,8 +89,16 @@ class HFEmbedder(Embedder):
         return f"hf:{self.model_name}"
 
     def __call__(self, input: list[str]) -> list[list[float]]:
+        texts = [self.document_prefix + t for t in input] if self.document_prefix else input
+        return self._encode(texts)
+
+    def embed_query(self, input: list[str]) -> list[list[float]]:
+        texts = [self.query_prefix + t for t in input] if self.query_prefix else input
+        return self._encode(texts)
+
+    def _encode(self, texts: list[str]) -> list[list[float]]:
         vecs = self.model.encode(
-            input,
+            texts,
             batch_size=self.batch_size,
             normalize_embeddings=True,  # cosine-ready
             show_progress_bar=False,
@@ -215,7 +227,11 @@ def build_embedder(cfg: EmbeddingCfg) -> Embedder:
     match cfg:
         case HFEmbeddingCfg():
             return HFEmbedder(
-                cfg.model, batch_size=cfg.batch_size, max_seq_length=cfg.max_seq_length
+                cfg.model,
+                batch_size=cfg.batch_size,
+                max_seq_length=cfg.max_seq_length,
+                query_prefix=cfg.query_prefix,
+                document_prefix=cfg.document_prefix,
             )
         case OpenAIEmbeddingCfg():
             return OpenAIEmbedder(

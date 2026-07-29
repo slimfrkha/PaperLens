@@ -15,7 +15,7 @@ from typing import Any, cast
 
 from tqdm import tqdm
 
-from rag.config import BM25Cfg, Config, LLMRerankerCfg
+from rag.config import BM25Cfg, Config, HFEmbeddingCfg, LLMRerankerCfg
 from rag.llm import build_llm
 from rag.reranker import build_reranker
 from rag.search import Searcher
@@ -84,6 +84,9 @@ def build_searcher(cfg: Config) -> Searcher:
         db_dir=cfg.paths.rag_db,
         collection=cfg.collection,
         embedder_model=cfg.embedding.model,
+        query_prefix=cfg.embedding.query_prefix
+        if isinstance(cfg.embedding, HFEmbeddingCfg)
+        else "",
         reranker=reranker,
         sparse_enabled=cfg.sparse.enabled,
         bm25_k1=cfg.sparse.k1 if isinstance(cfg.sparse, BM25Cfg) else 1.5,

@@ -65,7 +65,10 @@ in the same directory.
 
 The component that turns text into vectors. Selected by `embedding.type`
 (`hf` · `openai` · `gemini` · `ollama`) and built through the **registry**. The same
-embedder is used at indexing time and query time.
+embedder is used at indexing time and query time — though asymmetric embedders may embed
+the same text differently depending on which side it's called from: Gemini's `task_type`,
+or `hf`'s optional `query_prefix`/`document_prefix`, via `embed_query()` diverging from
+`__call__()`.
 
 - Code: `Embedder` ABC + `build_embedder` in `src/rag/embedders.py`.
 - `_Avoid_:` encoder (that is the reranker's cross-encoder), vectorizer, model.

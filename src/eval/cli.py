@@ -23,7 +23,7 @@ from typing import Any
 
 import draccus
 
-from rag.config import ChunkingCfg, Config, EmbeddingCfg, RerankerCfg, load_config
+from rag.config import ChunkingCfg, Config, EmbeddingCfg, HFEmbeddingCfg, RerankerCfg, load_config
 from rag.llm import build_llm
 from rag.reranker import Reranker
 from rag.search import Searcher
@@ -457,6 +457,9 @@ def cmd_confirm(
                 collection=cfg.collection,
                 embedder=embedder,
                 embedder_model=cfg.embedding.model,
+                query_prefix=cfg.embedding.query_prefix
+                if isinstance(cfg.embedding, HFEmbeddingCfg)
+                else "",
                 reranker=active_reranker,
             )
         )

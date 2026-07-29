@@ -62,6 +62,7 @@ class Searcher:
         reranker_model: str = DEFAULT_RERANKER,
         device: str | None = None,
         embedder=None,
+        query_prefix: str = "",
         reranker: Reranker | None = None,
         sparse_enabled: bool = False,
         bm25_k1: float = 1.5,
@@ -74,8 +75,12 @@ class Searcher:
 
         self.device = _pick_device(device)
         # Query embedder: inject one to avoid loading the local model (tests); the
-        # default builds the same HF model used at indexing time.
-        self.embedder = embedder or HFEmbedder(embedder_model, device=self.device)
+        # default builds the same HF model used at indexing time. query_prefix only
+        # applies to this default-build path — an injected embedder already carries
+        # its own prefixes (see build_embedder).
+        self.embedder = embedder or HFEmbedder(
+            embedder_model, device=self.device, query_prefix=query_prefix
+        )
         self.collection = chromadb.PersistentClient(path=db_dir).get_collection(collection)
         self._reranker_model = reranker_model
         # Inject a Reranker (e.g. the config-built llm reranker) or leave None to
@@ -221,6 +226,7 @@ def main() -> None:
     p.add_argument("--db-dir", default="rag_db")
     p.add_argument("--collection", default="arxiv_papers")
     p.add_argument("--embedder", default=DEFAULT_EMBEDDER)
+    p.add_argument("--query-prefix", default="", help="prepended to the query before embedding")
     p.add_argument("--reranker", default=DEFAULT_RERANKER)
     p.add_argument("-k", type=int, default=5, help="final results to show")
     p.add_argument("--candidates", type=int, default=20, help="vector hits to rerank")
@@ -238,6 +244,7 @@ def main() -> None:
         db_dir=args.db_dir,
         collection=args.collection,
         embedder_model=args.embedder,
+        query_prefix=args.query_prefix,
         reranker_model=args.reranker,
         sparse_enabled=args.sparse,
     )

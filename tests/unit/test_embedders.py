@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from rag.config import EmbeddingCfg, OllamaEmbeddingCfg
+from rag.config import EmbeddingCfg, HFEmbeddingCfg, OllamaEmbeddingCfg
 from rag.embedders import build_embedder
 
 
@@ -14,6 +14,45 @@ def test_build_embedder_unknown_variant_raises():
     # The base EmbeddingCfg is not a registered variant.
     with pytest.raises(ValueError, match="Unknown embedding config"):
         build_embedder(EmbeddingCfg())
+
+
+# ---- HF: asymmetric query/document prefixing, faked SentenceTransformer ----
+
+
+class _FakeSentenceTransformer:
+    def __init__(self, model_name, device=None, trust_remote_code=None):
+        self.max_seq_length = 8192
+        self.seen: list[list[str]] = []
+
+    def encode(self, input, **kwargs):
+        self.seen.append(list(input))
+        import numpy as np
+
+        return np.zeros((len(input), 2))
+
+
+def test_hf_embedder_prefixes_are_asymmetric(monkeypatch):
+    st = pytest.importorskip("sentence_transformers")
+    monkeypatch.setattr(st, "SentenceTransformer", _FakeSentenceTransformer)
+
+    e = build_embedder(
+        HFEmbeddingCfg(model="fake-model", query_prefix="query: ", document_prefix="passage: ")
+    )
+    e(["doc"])
+    e.embed_query(["q"])
+
+    assert e.model.seen == [["passage: doc"], ["query: q"]]
+
+
+def test_hf_embedder_empty_prefix_is_noop(monkeypatch):
+    st = pytest.importorskip("sentence_transformers")
+    monkeypatch.setattr(st, "SentenceTransformer", _FakeSentenceTransformer)
+
+    e = build_embedder(HFEmbeddingCfg(model="fake-model"))
+    e(["doc"])
+    e.embed_query(["q"])
+
+    assert e.model.seen == [["doc"], ["q"]]
 
 
 # ---- Ollama: native /api/embed, faked httpx client -------------------------

@@ -43,6 +43,8 @@ embedding:
   model: BAAI/bge-m3      # HF model id (or the API model name for api types)
   batch_size: 32          # embedding batch size
   max_seq_length: 1024    # hf only; token cap guarding the MPS 2**32 tensor limit on Apple Silicon
+  query_prefix: ""        # hf only; prepended to queries before embedding, e.g. "query: " (e5)
+  document_prefix: ""     # hf only; prepended to chunks before embedding; changing requires re-ingest
 
 # --- Reranker: second retrieval stage, scores recalled chunks ---
 #   hf    model, enabled, max_length   (local cross-encoder)

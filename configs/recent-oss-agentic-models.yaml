@@ -16,6 +16,8 @@ embedding:
   type: hf
   max_seq_length: 1024
   batch_size: 32
+  query_prefix: "query: "
+  document_prefix: "document: "
 
 reranker:
   model: BAAI/bge-reranker-v2-m3

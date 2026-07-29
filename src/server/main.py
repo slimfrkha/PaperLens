@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from sse_starlette.sse import EventSourceResponse
 
-from rag.config import BM25Cfg, Config, parse_config
+from rag.config import BM25Cfg, Config, HFEmbeddingCfg, parse_config
 from rag.index import open_collection
 from rag.llm import build_llm
 from rag.manifest import Manifest
@@ -51,6 +51,9 @@ def create_app(cfg: Config) -> FastAPI:
                         db_dir=cfg.paths.rag_db,
                         collection=cfg.collection,
                         embedder_model=cfg.embedding.model,
+                        query_prefix=cfg.embedding.query_prefix
+                        if isinstance(cfg.embedding, HFEmbeddingCfg)
+                        else "",
                         reranker=build_reranker(cfg.reranker, llm=build_llm(cfg.llm.chat)),
                         sparse_enabled=cfg.sparse.enabled,
                         bm25_k1=cfg.sparse.k1 if isinstance(cfg.sparse, BM25Cfg) else 1.5,

@@ -98,6 +98,10 @@ class EmbeddingCfg(draccus.ChoiceRegistry):
 class HFEmbeddingCfg(EmbeddingCfg):
     # Token cap guarding the MPS 2**32 tensor limit on Apple Silicon (hf only).
     max_seq_length: int = 1024
+    # Asymmetric embedding (hf only): prepended to queries/passages before embedding, e.g.
+    # e5's "query: "/"passage: ", or a bge instruction string. "" = symmetric (default).
+    query_prefix: str = ""
+    document_prefix: str = ""
 
 
 @EmbeddingCfg.register_subclass("openai")

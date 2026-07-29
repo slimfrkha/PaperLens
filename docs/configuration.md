@@ -92,6 +92,8 @@ one. (Changing the embedder alone likewise invalidates the index; see the embedd
 | `model` | string | `BAAI/bge-m3` | HF model id, or the API model name for API types (common to all). |
 | `batch_size` | int | `32` | Embedding batch size (common to all). |
 | `max_seq_length` | int | `1024` | **`hf` only.** Token cap guarding the MPS `2**32` per-tensor limit on Apple Silicon. |
+| `query_prefix` | string | `""` | **`hf` only.** Prepended to each query before embedding (e.g. e5's `"query: "`, or a bge instruction string). Empty = symmetric (current default). |
+| `document_prefix` | string | `""` | **`hf` only.** Prepended to each chunk before embedding at index time (e.g. e5's `"passage: "`). Empty = symmetric. Not part of `Embedder.name()` — changing it (like `max_seq_length`) requires manually re-ingesting or using a fresh `collection` name, since old vectors in the index won't reflect the new prefix. |
 | `api_base` | string | `""` | **`openai`/`ollama` only.** Base URL (`""` → provider default). |
 | `api_key_env` | string | per type | **`openai` (`OPENAI_API_KEY`) / `gemini` (`GEMINI_API_KEY`) only.** Env var holding the key. |
 
