@@ -54,7 +54,7 @@ pre-commit hooks run the fast, auto-fixing subset on every commit touching `web/
 ## 🧱 Project layout
 
 ```text
-configs/               # run configs (data, not code); default: recent-oss-agentic-models.yaml
+configs/               # run configs (data, not code); examples/ has copy-me templates
   examples/            # copy-me templates + reference.yaml (every key annotated)
 src/
   rag/                 # config-driven core: ingestion + two-stage retrieval

@@ -18,7 +18,7 @@ Usage:
 
     uv run python scripts/calibrate_faithfulness.py
     uv run python scripts/calibrate_faithfulness.py --fixture path/to/pairs.jsonl \\
-        --config configs/recent-oss-agentic-models.yaml
+        --config configs/my-setup.yaml
 """
 
 from __future__ import annotations

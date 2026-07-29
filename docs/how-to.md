@@ -18,7 +18,7 @@
 
 ## Add papers
 
-1. Add a line to `papers` in your config (e.g. `configs/recent-oss-agentic-models.yaml`):
+1. Add a line to `papers` in your config (e.g. `configs/my-setup.yaml`):
 
    ```yaml
    papers:
@@ -71,7 +71,7 @@ guards, the resolution/MDD statistics, the cost model) — this section is just 
 1. **Generate the eval set** (once per pool — regenerates automatically if the pool changes):
 
    ```bash
-   uv run paperlens-eval gen --config configs/recent-oss-agentic-models.yaml
+   uv run paperlens-eval gen --config configs/my-setup.yaml
    ```
 
    Writes `evals/<fingerprint>.dev.jsonl` / `.test.jsonl` — one question per section, gold is a
@@ -80,7 +80,7 @@ guards, the resolution/MDD statistics, the cost model) — this section is just 
 2. **See what the current config gets you:**
 
    ```bash
-   uv run paperlens-eval run --config configs/recent-oss-agentic-models.yaml
+   uv run paperlens-eval run --config configs/my-setup.yaml
    ```
 
    Prints the stage-1 recall ceiling and stage-2 `MRR@k` on the dev split, leading with the
@@ -90,8 +90,8 @@ guards, the resolution/MDD statistics, the cost model) — this section is just 
 3. **Screen which knobs matter for this pool:**
 
    ```bash
-   uv run paperlens-eval screen --tier retrieval --config configs/recent-oss-agentic-models.yaml  # reranker/candidates, no re-index
-   uv run paperlens-eval screen --tier chunking --config configs/recent-oss-agentic-models.yaml   # chunking knobs, isolated re-index per cell
+   uv run paperlens-eval screen --tier retrieval --config configs/my-setup.yaml  # reranker/candidates, no re-index
+   uv run paperlens-eval screen --tier chunking --config configs/my-setup.yaml   # chunking knobs, isolated re-index per cell
    ```
 
    Each knob is screened one-factor-at-a-time against the default, paired, with a CI. A knob
@@ -101,7 +101,7 @@ guards, the resolution/MDD statistics, the cost model) — this section is just 
 4. **Grid-search the survivors:**
 
    ```bash
-   uv run paperlens-eval sweep --config configs/recent-oss-agentic-models.yaml
+   uv run paperlens-eval sweep --config configs/my-setup.yaml
    ```
 
    Stages the `chunking.max_tokens × retrieval.candidates × reranker.enabled` grid, re-indexing
@@ -110,7 +110,7 @@ guards, the resolution/MDD statistics, the cost model) — this section is just 
 5. **Confirm the winner once, on data never used to pick it:**
 
    ```bash
-   uv run paperlens-eval confirm --config configs/recent-oss-agentic-models.yaml \
+   uv run paperlens-eval confirm --config configs/my-setup.yaml \
      --max-tokens 256 --candidates 50 --rerank
    ```
 

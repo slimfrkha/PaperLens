@@ -66,12 +66,13 @@ make install
 ## 🚀 Quickstart
 
 ```bash
-make serve                  # serves http://127.0.0.1:8000, auto-starts ingestion
-npm --prefix web run dev    # UI at http://localhost:5173 (proxies /api → backend)
+cp configs/examples/local-gpt-oss.yaml configs/my-setup.yaml   # pick a template, edit papers:
+make serve CONFIG=configs/my-setup.yaml     # serves http://127.0.0.1:8000, auto-starts ingestion
+npm --prefix web run dev                    # UI at http://localhost:5173 (proxies /api → backend)
 ```
 
-`make serve` runs `paperlens-serve --config_path configs/recent-oss-agentic-models.yaml` (the
-default config); override with `make serve CONFIG=configs/examples/anthropic.yaml`, or call
+`make serve CONFIG=...` runs `paperlens-serve --config_path ...`; there's no default
+config, so `CONFIG=` (or `PAPERLENS_CONFIG`/discovery) is required. Or call
 `uv run paperlens-serve --config_path <path>` directly.
 
 Open the UI, watch papers ingest on the **Admin** page, then ask a question on

@@ -16,10 +16,10 @@ A config file is the single source of truth. It is located in this order:
 2. The `PAPERLENS_CONFIG` environment variable.
 3. An upward search for a file literally named `config.yaml` from the current directory.
 
-Configs live under [`configs/`](../configs/); the default run config is
-`configs/recent-oss-agentic-models.yaml` (there is no `config.yaml` at the repo root, so a
-bare command with no `--config_path`/`PAPERLENS_CONFIG` falls back to the code defaults). The
-`make` targets pass it for you and take `CONFIG=` to override.
+Configs live under [`configs/`](../configs/) — there is no default config and no
+`config.yaml` at the repo root, so a bare command with no `--config_path`/`PAPERLENS_CONFIG`
+and no `config.yaml` discoverable upward from the CWD raises `FileNotFoundError`. The
+`make` targets take `CONFIG=` to pass a path through.
 
 The **project root** — the nearest `pyproject.toml` ancestor of the resolved config file —
 is what every relative path in the file is anchored to, so commands work from any working
@@ -257,13 +257,13 @@ Console scripts (from `pyproject.toml`); each also runs as `python -m <module>`.
 | Target | Runs |
 |---|---|
 | `make install` | `uv sync` + `npm --prefix web install`. |
-| `make serve` | `uv run paperlens-serve --config_path $(CONFIG)`. |
+| `make serve` | `uv run paperlens-serve $(CONFIG_FLAG)`. |
 | `make dev` | Backend + frontend dev server together. |
-| `make ingest` | `uv run paperlens-ingest --config_path $(CONFIG)`. |
+| `make ingest` | `uv run paperlens-ingest $(CONFIG_FLAG)`. |
 | `make build` | Production frontend build → `web/dist`. |
 
-`serve`/`dev`/`ingest` default `CONFIG` to `configs/recent-oss-agentic-models.yaml`;
-override per run, e.g. `make serve CONFIG=configs/examples/anthropic.yaml`.
+`serve`/`dev`/`ingest` require `CONFIG=<path>` (or rely on `PAPERLENS_CONFIG`/discovery),
+e.g. `make serve CONFIG=configs/examples/anthropic.yaml`.
 
 ### 🖼️ Frontend
 

@@ -9,8 +9,8 @@ from rag.search import Searcher
 
 def _docs(seed_chunks):
     return [
-        seed_chunks("deepseek-v3", "Attention", "multi head latent attention shrinks kv cache"),
-        seed_chunks("glm-4.5", "Training", "reinforcement learning from human feedback recipe"),
+        seed_chunks("paper-a", "Attention", "multi head latent attention shrinks kv cache"),
+        seed_chunks("paper-b", "Training", "reinforcement learning from human feedback recipe"),
     ]
 
 
@@ -18,17 +18,17 @@ def test_retrieves_the_relevant_passage_first(make_searcher, seed_chunks):
     ctx = make_searcher(_docs(seed_chunks))
     results = ctx.searcher.search("latent attention kv cache", k=2, candidates=10, rerank=False)
     assert results
-    assert results[0].paper_id == "deepseek-v3"
+    assert results[0].paper_id == "paper-a"
     assert "latent attention" in results[0].body
 
 
 def test_paper_filter_restricts_to_one_paper(make_searcher, seed_chunks):
     ctx = make_searcher(_docs(seed_chunks))
     results = ctx.searcher.search(
-        "reinforcement learning", k=5, candidates=10, paper="glm-4.5", rerank=False
+        "reinforcement learning", k=5, candidates=10, paper="paper-b", rerank=False
     )
     assert results
-    assert {r.paper_id for r in results} == {"glm-4.5"}
+    assert {r.paper_id for r in results} == {"paper-b"}
 
 
 def test_empty_paper_ids_matches_nothing(make_searcher, seed_chunks):
@@ -39,7 +39,7 @@ def test_empty_paper_ids_matches_nothing(make_searcher, seed_chunks):
 def test_paper_and_paper_ids_intersect(make_searcher, seed_chunks):
     ctx = make_searcher(_docs(seed_chunks))
     # `paper` not in the tag-derived `paper_ids` -> empty intersection -> no hits.
-    out = ctx.searcher.search("attention", paper="deepseek-v3", paper_ids=["glm-4.5"], rerank=False)
+    out = ctx.searcher.search("attention", paper="paper-a", paper_ids=["paper-b"], rerank=False)
     assert out == []
 
 
@@ -80,8 +80,8 @@ def test_rerank_uses_injected_reranker(make_searcher, fake_embedder, seed_chunks
     # no cross-encoder model is loaded). The passage carrying the needle wins.
     ctx = make_searcher(
         [
-            seed_chunks("deepseek-v3", "Attention", "latent attention over the kv cache"),
-            seed_chunks("glm-4.5", "Rewards", "reinforcement learning UNIQUENEEDLE recipe"),
+            seed_chunks("paper-a", "Attention", "latent attention over the kv cache"),
+            seed_chunks("paper-b", "Rewards", "reinforcement learning UNIQUENEEDLE recipe"),
         ]
     )
     searcher = Searcher(
@@ -91,7 +91,7 @@ def test_rerank_uses_injected_reranker(make_searcher, fake_embedder, seed_chunks
         reranker=_KeywordReranker("UNIQUENEEDLE"),
     )
     results = searcher.search("learning", k=2, candidates=10, rerank=True)
-    assert results[0].paper_id == "glm-4.5"
+    assert results[0].paper_id == "paper-b"
     assert results[0].score == 1.0
     assert results[0].score >= results[-1].score
 
@@ -188,7 +188,7 @@ def test_hybrid_fetch_multiplier_is_load_bearing_not_decorative(make_config, see
 
 def test_sparse_index_rebuilds_after_rescan(make_searcher, seed_chunks):
     ctx = make_searcher(
-        [seed_chunks("deepseek-v3", "Attention", "multi head latent attention shrinks kv cache")]
+        [seed_chunks("paper-a", "Attention", "multi head latent attention shrinks kv cache")]
     )
     searcher = Searcher(
         db_dir=ctx.cfg.paths.rag_db,
@@ -200,7 +200,7 @@ def test_sparse_index_rebuilds_after_rescan(make_searcher, seed_chunks):
     # relevance threshold, so it still returns the one (unrelated) chunk it has — the point is
     # that nothing has ever seen "zzflorble" lexically yet.
     before = searcher.search("zzflorble", k=1, candidates=1, rerank=False)
-    assert before[0].paper_id == "deepseek-v3"
+    assert before[0].paper_id == "paper-a"
 
     # Simulate a live rescan (POST /api/admin/rescan) upserting a new paper's chunks directly
     # into the same collection the Searcher already has open.

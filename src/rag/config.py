@@ -363,11 +363,20 @@ class Config:
         )
 
 
-def _find_config(path: str | None) -> Path:
+_NO_CONFIG_MSG = (
+    "No config file found. Pass --config_path <file>, set PAPERLENS_CONFIG, or run from "
+    "a directory with a config.yaml findable upward. Start from a template in "
+    "configs/examples/."
+)
+
+
+def _discover_config(path: str | None) -> Path | None:
     """Locate config.yaml: explicit path -> env var -> upward search from CWD.
 
     An explicit path (e.g. --config_path) is resolved relative to the CWD. This
     makes every entrypoint CWD-independent instead of assuming CWD == repo root.
+    Returns None (does not check existence of an explicit/env path) when nothing
+    resolves via upward search and no explicit/env path was given.
     """
     if path:
         return Path(path)
@@ -379,12 +388,24 @@ def _find_config(path: str | None) -> Path:
         candidate = d / CONFIG_FILENAME
         if candidate.exists():
             return candidate
-    return Path(CONFIG_FILENAME)  # not found -> falls back to Config defaults
+    return None
 
 
-def _load_yaml(cfg_path: Path | None) -> dict:
-    if cfg_path is None or not cfg_path.exists():
-        return {}
+def _require_config(path: Path | None) -> Path:
+    """Config is required, not optional: a config file is the single source of
+    truth, so a location that can't be resolved (or doesn't exist on disk) is a
+    loud failure, not a silent fall-through to code defaults."""
+    if path is None or not path.exists():
+        raise FileNotFoundError(_NO_CONFIG_MSG)
+    return path
+
+
+def _find_config(path: str | None) -> Path:
+    """Locate config.yaml, requiring the result to actually exist."""
+    return _require_config(_discover_config(path))
+
+
+def _load_yaml(cfg_path: Path) -> dict:
     return yaml.safe_load(cfg_path.read_text()) or {}
 
 
@@ -447,9 +468,8 @@ class _InterpolatingArgumentParser(ArgumentParser):
         vals = {k: cfgparsing.parse_string(v) for k, v in vars(parsed_args).items()}
         # draccus's own --config_path (CONFIG_ARG) wins over the discovered default.
         raw = vals.pop(utils.CONFIG_ARG, None) or self.config_path
-        config_path: str | None = str(raw) if raw else None
-        cfg_path = Path(config_path) if config_path else Path.cwd()
-        file_args = _load_yaml(Path(config_path) if config_path else None)
+        cfg_path = _require_config(Path(str(raw)) if raw else None)
+        file_args = _load_yaml(cfg_path)
         merged = cast(dict, mergedeep.merge(file_args, utils.deflatten(vals, sep=".")))
         cfg = decoding.decode(self.config_class, _resolve(merged))
         return _anchor(cfg, cfg_path)
@@ -460,8 +480,8 @@ def parse_config(argv: Sequence[str] | None = None) -> Config:
     after the merge so overrides feed interpolation. Honors ``--config_path`` and
     falls back to the same discovery as ``load_config``."""
     argv = list(sys.argv[1:] if argv is None else argv)
-    cfg_path = _find_config(None)
+    cfg_path = _discover_config(None)
     parser = _InterpolatingArgumentParser(
-        Config, config_path=str(cfg_path) if cfg_path.exists() else None
+        Config, config_path=str(cfg_path) if cfg_path and cfg_path.exists() else None
     )
     return parser.parse_args(argv)

@@ -49,7 +49,7 @@ uv run paperlens-serve           # backend only (FastAPI, port 8000)
 uv run paperlens-ingest          # ingest configured papers not yet in the DB
 uv run paperlens-ingest --retag  # regenerate tags without re-indexing
 uv run paperlens-eval gen        # per-pool eval set + config tuning (see docs/harness.md)
-make dev                         # backend + Vite dev server together
+make dev CONFIG=<path>           # backend + Vite dev server together
 ```
 
 Cloud LLM backends are lazy extras: `uv sync --extra anthropic` / `--extra gemini` /
@@ -58,7 +58,7 @@ Cloud LLM backends are lazy extras: `uv sync --extra anthropic` / `--extra gemin
 ## 🧱 Layout
 
 ```text
-configs/               # run configs (data, not code); default: recent-oss-agentic-models.yaml
+configs/               # run configs (data, not code); examples/ has copy-me templates
   examples/            # copy-me templates + reference.yaml (every key annotated)
 src/
   rag/                 # config-driven core: ingestion + two-stage retrieval

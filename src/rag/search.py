@@ -11,7 +11,7 @@ Two-stage retrieval:
 
 CLI:
     python -m rag.search "how does MLA reduce the KV cache?"
-    python -m rag.search "FP8 quantization" --k 5 --candidates 30 --paper deepseek-v3
+    python -m rag.search "FP8 quantization" --k 5 --candidates 30 --paper <paper_id>
     python -m rag.search "long context" --no-rerank
     python -m rag.search "SwiGLU activation" --sparse
 """

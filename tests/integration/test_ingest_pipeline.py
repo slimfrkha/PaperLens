@@ -13,7 +13,7 @@ from rag.config import ChunkingCfg, Paper
 from rag.index import open_collection
 from rag.manifest import Manifest
 
-_MARKDOWN = """## DeepSeek-V3
+_MARKDOWN = """## Paper A
 
 ## Abstract
 A strong MoE model.
@@ -43,7 +43,7 @@ def test_ingest_paper_populates_db_and_manifest(make_config, fake_embedder, monk
 
     stages: list[str] = []
     record = pipeline.ingest_paper(
-        Paper(name="deepseek-v3", arxiv_id="2412.19437"),
+        Paper(name="paper-a", arxiv_id="0000.00001"),
         cfg.for_ingest(),
         fake_embedder,
         collection,
@@ -51,13 +51,13 @@ def test_ingest_paper_populates_db_and_manifest(make_config, fake_embedder, monk
         on_stage=lambda name, pct: stages.append(name),
     )
 
-    assert record["title"] == "DeepSeek-V3"
+    assert record["title"] == "Paper A"
     assert record["tags"] == ["moe", "attention"]
     assert record["n_chunks"] > 0
     assert collection.count() == record["n_chunks"]
     # Manifest persisted and markdown cached to disk.
-    assert manifest.is_ingested("deepseek-v3")
-    assert (Path(cfg.paths.markdown_dir) / "deepseek-v3.md").exists()
+    assert manifest.is_ingested("paper-a")
+    assert (Path(cfg.paths.markdown_dir) / "paper-a.md").exists()
     assert stages[0] == "download" and stages[-1] == "done"
 
 
@@ -124,7 +124,7 @@ def test_chunking_config_reaches_chunk_markdown(make_config, fake_embedder, monk
             cfg.paths.rag_db, cfg.collection, embedder_name=fake_embedder.name(), reset=True
         )
         record = pipeline.ingest_paper(
-            Paper(name="deepseek-v3", arxiv_id="2412.19437"),
+            Paper(name="paper-a", arxiv_id="0000.00001"),
             cfg.for_ingest(),
             fake_embedder,
             collection,

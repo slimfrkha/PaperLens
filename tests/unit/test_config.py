@@ -70,10 +70,9 @@ def test_parses_scalars_and_papers(tmp_path):
     assert cfg.papers[0].arxiv_id == "1234.5678"
 
 
-def test_missing_file_falls_back_to_defaults(tmp_path):
-    cfg = load_config(str(tmp_path / "nope.yaml"))
-    assert cfg.collection == "arxiv_papers"  # default
-    assert cfg.papers == []
+def test_missing_file_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        load_config(str(tmp_path / "nope.yaml"))
 
 
 def test_env_var_override(tmp_path, monkeypatch):
@@ -81,6 +80,15 @@ def test_env_var_override(tmp_path, monkeypatch):
     monkeypatch.setenv(CONFIG_ENV_VAR, str(cfg_path))
     cfg = load_config()  # no explicit path -> reads the env var
     assert cfg.collection == "my_papers"
+
+
+def test_parse_config_raises_when_nothing_resolves(tmp_path, monkeypatch):
+    # The real entrypoint for paperlens-serve/paperlens-ingest: no --config_path,
+    # no env var, no config.yaml found upward from cwd -> loud failure, not defaults.
+    monkeypatch.delenv(CONFIG_ENV_VAR, raising=False)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(FileNotFoundError):
+        parse_config([])
 
 
 def test_choice_registry_selects_variant(tmp_path):

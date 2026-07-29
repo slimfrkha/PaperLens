@@ -12,9 +12,10 @@ see [Configuration & commands](configuration.md).
 - 🐍 **Python 3.14+** (the project pins it in `.python-version`).
 - 📦 **[uv](https://docs.astral.sh/uv/)** — manages the virtualenv, dependencies, and scripts.
 - 🟢 **Node.js** and **npm** — for the frontend.
-- 🤖 An **LLM endpoint**. The default config (`configs/recent-oss-agentic-models.yaml`)
-  points at a local OpenAI-compatible server (LM Studio at `http://127.0.0.1:1234/v1`). A
-  cloud provider works too — see [step 3](#3-point-it-at-an-llm).
+- 🤖 An **LLM endpoint**. The template this guide uses
+  (`configs/examples/local-gpt-oss.yaml`) points at a local OpenAI-compatible server (LM
+  Studio at `http://127.0.0.1:1234/v1`). A cloud provider works too — see
+  [step 3](#3-point-it-at-an-llm).
 
 ## 1. Install
 
@@ -35,12 +36,20 @@ uv run paperlens-serve --help
 ✅ You should see the command run without an import error. Press `Ctrl-C` if it starts
 serving.
 
-## 2. Look at the configuration
+## 2. Pick a config
 
-Open `configs/recent-oss-agentic-models.yaml` — the default run config. A config file is
-the single source of truth for paths, models, the server, and the **paper list**. You
-don't need to change anything yet — it ingests a set of recent OSS model reports. For every
-key and its options, see [`configs/examples/reference.yaml`](../configs/examples/reference.yaml).
+A config file is the single source of truth for paths, models, the server, and the
+**paper list**. PaperLens has no default config — copy a starter template into `configs/`:
+
+```bash
+cp configs/examples/local-gpt-oss.yaml configs/my-setup.yaml
+```
+
+You don't need to change anything yet — this template's `papers:` list already ingests a
+couple of sample OSS model reports. For every key and its options, see
+[`configs/examples/reference.yaml`](../configs/examples/reference.yaml); for other
+starting points (cloud LLMs, Ollama), see
+[`configs/examples/README.md`](../configs/examples/README.md).
 
 ## 3. Point it at an LLM
 
@@ -56,15 +65,14 @@ tool). Pick one:
 ## 4. Start the app
 
 ```bash
-uv run paperlens-serve --config_path configs/recent-oss-agentic-models.yaml
+uv run paperlens-serve --config_path configs/my-setup.yaml
 ```
 
 This serves `http://127.0.0.1:8000` **and** auto-starts the ingestion worker, which begins
 downloading and indexing the papers from the config. On first run the database is empty,
 so the UI says so while papers ingest.
 
-> 💡 `make serve` runs exactly this; it defaults `CONFIG` to the same file. Override with
-> `make serve CONFIG=configs/examples/anthropic.yaml`.
+> 💡 `make serve CONFIG=configs/my-setup.yaml` runs exactly this.
 
 ✅ You should see startup logs and, as papers process, ingestion progress.
 
@@ -81,7 +89,8 @@ Open `http://localhost:5173`. The dev server proxies `/api` to the backend on po
 ✅ Go to the **Admin** page. You should see paper and chunk counts climbing and a live
 progress bar while ingestion runs. Wait until at least one paper finishes.
 
-> 💡 **Tip:** to run backend and frontend together, use `make dev` instead of steps 4–5.
+> 💡 **Tip:** to run backend and frontend together, use `make dev CONFIG=configs/my-setup.yaml`
+> instead of steps 4–5.
 
 ## 6. Ask your first question
 
