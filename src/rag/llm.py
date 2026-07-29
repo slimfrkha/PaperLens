@@ -143,6 +143,68 @@ class AnthropicBackend(LLMBackend):
         return final_text
 
 
+_THINK_OPEN = "<think>"
+_THINK_CLOSE = "</think>"
+_THINK_PLACEHOLDER = "THINK_TAG"
+
+
+class _ThinkTagStripper:
+    """Streaming filter for inline `<think>...</think>` chain-of-thought that some
+    OpenAI-compatible reasoning models emit inside `content` instead of the
+    structured `reasoning_content` field. Feed each content fragment via `feed()`;
+    it returns only the visible part of that fragment, safe to stream immediately —
+    a complete `<think>...</think>` span is replaced with `THINK_TAG` (no angle
+    brackets, so it can't be mistaken for Markdown/HTML or a `[rN]` citation marker
+    downstream). Extracted think text accumulates in `.reasoning`. A tag split
+    across delta boundaries is held in a bounded lookback buffer (<=6 chars) until
+    it resolves. `finish()` flushes the tail at end-of-stream: if a `<think>` was
+    never closed, its trailing content is folded into `.reasoning` with no
+    placeholder emitted — there's no well-formed span to replace.
+    """
+
+    def __init__(self) -> None:
+        self._inside = False
+        self._buf = ""
+        self.reasoning = ""
+
+    def feed(self, text: str) -> str:
+        self._buf += text
+        visible_parts: list[str] = []
+        while True:
+            tag = _THINK_CLOSE if self._inside else _THINK_OPEN
+            idx = self._buf.find(tag)
+            if idx == -1:
+                break
+            before, self._buf = self._buf[:idx], self._buf[idx + len(tag) :]
+            if self._inside:
+                self.reasoning += before
+                visible_parts.append(_THINK_PLACEHOLDER)
+            else:
+                visible_parts.append(before)
+            self._inside = not self._inside
+
+        tag = _THINK_CLOSE if self._inside else _THINK_OPEN
+        hold = 0
+        for k in range(min(len(tag) - 1, len(self._buf)), 0, -1):
+            if tag.startswith(self._buf[-k:]):
+                hold = k
+                break
+        split = len(self._buf) - hold
+        emit_now, self._buf = self._buf[:split], self._buf[split:]
+        if self._inside:
+            self.reasoning += emit_now
+        else:
+            visible_parts.append(emit_now)
+        return "".join(visible_parts)
+
+    def finish(self) -> str:
+        tail, self._buf = self._buf, ""
+        if self._inside:
+            self.reasoning += tail
+            return ""
+        return tail
+
+
 class OpenAICompatBackend(LLMBackend):
     """OpenAI Chat Completions wire format.
 
@@ -210,14 +272,17 @@ class OpenAICompatBackend(LLMBackend):
             content = ""
             reasoning = ""
             tool_calls: dict[int, dict] = {}
+            think_filter = _ThinkTagStripper()
             for chunk in stream:
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
                 if delta.content:
-                    content += delta.content
-                    if on_text:
-                        on_text(delta.content)
+                    visible = think_filter.feed(delta.content)
+                    if visible:
+                        content += visible
+                        if on_text:
+                            on_text(visible)
                 # Reasoning models expose their chain-of-thought here (if at all).
                 rc = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
                 if rc:
@@ -230,6 +295,13 @@ class OpenAICompatBackend(LLMBackend):
                         slot["name"] = tc.function.name
                     if tc.function and tc.function.arguments:
                         slot["args"] += tc.function.arguments
+
+            tail = think_filter.finish()
+            if tail:
+                content += tail
+                if on_text:
+                    on_text(tail)
+            reasoning += think_filter.reasoning
 
             if reasoning and on_reasoning:
                 on_reasoning(reasoning)

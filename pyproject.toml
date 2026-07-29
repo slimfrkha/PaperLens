@@ -68,4 +68,6 @@ quote-style = "double"
 [tool.codespell]
 skip = "*.lock,*package-lock.json,.git,.venv,data,web/node_modules,web/dist,.ruff_cache,.pytest_cache"
 # ontext: the `on_text`/`OnText` streaming callback name, not a typo of "context".
-ignore-words-list = "ontext"
+# thi: a deliberate `<think>`/`</think>` tag split at a chunk boundary in llm.py's
+# streaming think-tag-stripper tests, not a typo of "the"/"this".
+ignore-words-list = "ontext,thi"

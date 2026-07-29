@@ -14,6 +14,7 @@ from rag.llm import (
     SGLangBackend,
     VLLMBackend,
     _api_key,
+    _ThinkTagStripper,
     build_llm,
 )
 
@@ -111,6 +112,208 @@ def test_openai_run_tools_executes_then_answers(monkeypatch):
     assert executed == [("search_papers", {"query": "mla"})]
     assert out == "MLA shrinks the KV cache [r1]."
     assert "".join(texts) == out
+
+
+# ---- _ThinkTagStripper: direct unit tests (no fake LLM client needed) -------
+
+
+def test_think_tag_stripper_feed_then_finish():
+    f = _ThinkTagStripper()
+    visible = f.feed("<think>plan</think>answer")
+    assert visible == "THINK_TAGanswer"
+    assert f.reasoning == "plan"
+    assert f.finish() == ""
+
+
+def test_think_tag_stripper_split_across_feed_calls():
+    f = _ThinkTagStripper()
+    out = f.feed("<th") + f.feed("ink>reason") + f.feed("</thi") + f.feed("nk>tail")
+    assert out == "THINK_TAGtail"
+    assert f.reasoning == "reason"
+
+
+def test_think_tag_stripper_finish_flushes_false_start_as_visible_text():
+    # A trailing "<" that never completes into "<think>" must not be silently
+    # dropped when the stream ends — it's genuine content, held back only because
+    # more chunks *could* have completed the tag.
+    f = _ThinkTagStripper()
+    visible = f.feed("Score is 3 <")
+    assert visible == "Score is 3 "  # the lone "<" is withheld pending more input
+    assert f.finish() == "<"  # ...and flushed here, not dropped, once the stream ends
+
+
+def test_think_tag_stripper_finish_folds_unterminated_tail_into_reasoning():
+    f = _ThinkTagStripper()
+    visible = f.feed("<think>lost")
+    assert visible == ""
+    assert f.finish() == ""
+    assert f.reasoning == "lost"
+
+
+# ---- inline <think> tag stripping (OpenAI-compatible streaming) -------------
+
+
+class _FakeCompletionsSeq:
+    """Fake streaming client yielding a fixed sequence of chunk-lists, one list per
+    `create()` call (round), and recording the `messages` kwarg of each call."""
+
+    def __init__(self, rounds):
+        self._rounds = list(rounds)
+        self.calls = 0
+        self.messages_seen: list = []
+
+    def create(self, **kwargs):
+        self.messages_seen.append(kwargs.get("messages"))
+        self.calls += 1
+        return iter(self._rounds[self.calls - 1])
+
+
+class _FakeClientSeq:
+    def __init__(self, rounds):
+        self.completions = _FakeCompletionsSeq(rounds)
+        self.chat = SimpleNamespace(completions=self.completions)
+
+
+def test_think_tag_in_one_chunk(monkeypatch):
+    client = _FakeClientSeq(
+        [[_chunk(content="<think>should check X</think>The answer is 42 [r1].")]]
+    )
+    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
+    monkeypatch.setattr(backend, "_client", lambda: client)
+    texts, reasonings = [], []
+    out = backend.run_tools(
+        system="sys",
+        messages=[{"role": "user", "content": "q"}],
+        tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
+        execute=lambda name, args: "result",
+        on_text=texts.append,
+        on_reasoning=reasonings.append,
+    )
+    assert out == "THINK_TAGThe answer is 42 [r1]."
+    assert "".join(texts) == out
+    assert reasonings == ["should check X"]
+
+
+def test_think_tag_split_across_chunks(monkeypatch):
+    client = _FakeClientSeq(
+        [
+            [
+                _chunk(content="<th"),
+                _chunk(content="ink>reasoning here"),
+                _chunk(content="</thi"),
+                _chunk(content="nk>answer text"),
+            ]
+        ]
+    )
+    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
+    monkeypatch.setattr(backend, "_client", lambda: client)
+    texts, reasonings = [], []
+    out = backend.run_tools(
+        system="sys",
+        messages=[{"role": "user", "content": "q"}],
+        tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
+        execute=lambda name, args: "result",
+        on_text=texts.append,
+        on_reasoning=reasonings.append,
+    )
+    assert out == "THINK_TAGanswer text"
+    assert reasonings == ["reasoning here"]
+    for t in texts:
+        assert "<think" not in t
+        assert "</think" not in t
+        assert "reasoning here" not in t
+
+
+def test_think_tag_unterminated_at_stream_end(monkeypatch):
+    client = _FakeClientSeq([[_chunk(content="<think>lost reasoning")]])
+    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
+    monkeypatch.setattr(backend, "_client", lambda: client)
+    texts, reasonings = [], []
+    out = backend.run_tools(
+        system="sys",
+        messages=[{"role": "user", "content": "q"}],
+        tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
+        execute=lambda name, args: "result",
+        on_text=texts.append,
+        on_reasoning=reasonings.append,
+    )
+    assert out == ""
+    assert reasonings == ["lost reasoning"]
+    for t in texts:
+        assert "<think" not in t
+        assert "lost reasoning" not in t
+
+
+def test_think_tag_mixed_text_before_and_after(monkeypatch):
+    client = _FakeClientSeq([[_chunk(content="Intro. <think>plan</think> Conclusion [r1].")]])
+    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
+    monkeypatch.setattr(backend, "_client", lambda: client)
+    texts, reasonings = [], []
+    out = backend.run_tools(
+        system="sys",
+        messages=[{"role": "user", "content": "q"}],
+        tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
+        execute=lambda name, args: "result",
+        on_text=texts.append,
+        on_reasoning=reasonings.append,
+    )
+    assert out == "Intro. THINK_TAG Conclusion [r1]."
+    assert reasonings == ["plan"]
+
+
+def test_no_think_tags_stray_angle_brackets_unaffected(monkeypatch):
+    client = _FakeClientSeq([[_chunk(content="Value < 5 and > 3 [r1].")]])
+    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
+    monkeypatch.setattr(backend, "_client", lambda: client)
+    texts, reasonings = [], []
+    out = backend.run_tools(
+        system="sys",
+        messages=[{"role": "user", "content": "q"}],
+        tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
+        execute=lambda name, args: "result",
+        on_text=texts.append,
+        on_reasoning=reasonings.append,
+    )
+    assert out == "Value < 5 and > 3 [r1]."
+    assert reasonings == []
+
+
+def test_think_tag_in_tool_call_round_not_leaked_into_convo(monkeypatch):
+    client = _FakeClientSeq(
+        [
+            [
+                _chunk(content="<think>deciding to search</think>"),
+                _chunk(tool_call=_tool_call(0, "call_1", "search_papers", '{"query": "mla"}')),
+            ],
+            [_chunk(content="Final answer [r1].")],
+        ]
+    )
+    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
+    monkeypatch.setattr(backend, "_client", lambda: client)
+    executed = []
+    texts, reasonings = [], []
+
+    def execute(name, args):
+        executed.append((name, args))
+        return "passage r1"
+
+    out = backend.run_tools(
+        system="sys",
+        messages=[{"role": "user", "content": "what is MLA?"}],
+        tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
+        execute=execute,
+        on_text=texts.append,
+        on_reasoning=reasonings.append,
+    )
+
+    assert executed == [("search_papers", {"query": "mla"})]
+    assert out == "Final answer [r1]."
+    assert reasonings == ["deciding to search"]
+
+    second_call_messages = client.completions.messages_seen[1]
+    assistant_msgs = [m for m in second_call_messages if m.get("role") == "assistant"]
+    assert len(assistant_msgs) == 1
+    assert assistant_msgs[0]["content"] == "THINK_TAG"
 
 
 def test_anthropic_client_built_lazily(monkeypatch):
