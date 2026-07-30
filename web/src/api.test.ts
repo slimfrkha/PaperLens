@@ -68,6 +68,57 @@ describe("chat", () => {
 
     expect(onToken).toHaveBeenCalledWith("Hi");
   });
+
+  it("sends edit_index in the request body when editing a prior turn", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockStreamResponse("event: done\ndata: \n\n"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await chat([], [], [], "c1", { onToken: vi.fn(), onCitations: vi.fn() }, 2);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/chat",
+      expect.objectContaining({
+        body: JSON.stringify({ messages: [], tags: [], papers: [], chat_id: "c1", edit_index: 2 }),
+      }),
+    );
+  });
+
+  it("sends edit_index: null for a normal (non-edit) send", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockStreamResponse("event: done\ndata: \n\n"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await chat([], [], [], "c1", { onToken: vi.fn(), onCitations: vi.fn() });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/chat",
+      expect.objectContaining({
+        body: JSON.stringify({
+          messages: [],
+          tags: [],
+          papers: [],
+          chat_id: "c1",
+          edit_index: null,
+        }),
+      }),
+    );
+  });
+
+  it("surfaces a 409 (turn already in progress) via onError + onDone without reading a body", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        status: 409,
+        json: () => Promise.resolve({ error: "a turn is already in progress for this chat" }),
+      } as Response),
+    );
+
+    const onError = vi.fn();
+    const onDone = vi.fn();
+    await chat([], [], [], "c1", { onToken: vi.fn(), onCitations: vi.fn(), onError, onDone });
+
+    expect(onError).toHaveBeenCalledWith("a turn is already in progress for this chat");
+    expect(onDone).toHaveBeenCalledOnce();
+  });
 });
 
 describe("setFeedback", () => {

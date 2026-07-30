@@ -40,6 +40,21 @@ class ChatStore:
         self.dir = Path(directory)
         self.dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        self._inflight: set[str] = set()
+
+    def try_acquire(self, chat_id: str) -> bool:
+        """Claim a chat for one in-flight turn. Returns False if one is already running,
+        so an edit-and-resume's truncate + append reads a history no concurrent request
+        can be mutating."""
+        with self._lock:
+            if chat_id in self._inflight:
+                return False
+            self._inflight.add(chat_id)
+            return True
+
+    def release(self, chat_id: str) -> None:
+        with self._lock:
+            self._inflight.discard(chat_id)
 
     def _path(self, chat_id: str) -> Path:
         return self.dir / f"{chat_id}.json"
@@ -153,6 +168,26 @@ class ChatStore:
             chat["feedback"][index] = (
                 {"vote": vote, "note": note, "updated_at": _now()} if vote else None
             )
+            chat["updated_at"] = _now()
+            self._write(chat)
+            return chat
+
+    def truncate_at(self, chat_id: str, index: int) -> dict | None:
+        """Drop messages[index:] and the parallel arrays' tails (an edit-and-resume).
+
+        Returns `None` if `chat_id` doesn't exist; raises `ValueError` for an
+        out-of-range index or one that doesn't land on a user turn.
+        """
+        with self._lock:
+            chat = self.get(chat_id)
+            if chat is None:
+                return None
+            if not (0 <= index < len(chat["messages"])):
+                raise ValueError("index out of range")
+            if chat["messages"][index]["role"] != "user":
+                raise ValueError("edit index must be a user turn")
+            for key in ("messages", "citations", "traces", "feedback", "usage"):
+                chat[key] = chat.get(key, [])[:index]
             chat["updated_at"] = _now()
             self._write(chat)
             return chat

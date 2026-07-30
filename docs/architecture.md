@@ -296,3 +296,10 @@ is documented in `src/rag/__init__.py`. Keeping it acyclic is a maintained invar
   the UI renders the answer and the Thought → Action → Observation trace as they happen.
   A final `usage` event carries the turn's token counts (when the LLM backend reports them)
   and wall-clock latency, shown as a small metadata line under the answer.
+- **Edit-and-resume is a destructive truncate, not a branch.** Editing an earlier query
+  (`edit_index` on `ChatRequest`) truncates the stored session's parallel arrays back to
+  that turn (`ChatStore.truncate_at`) before resuming — there's no branch history, the
+  discarded tail is gone. A per-chat single-flight guard (`ChatStore.try_acquire`/
+  `release`) rejects a second `/api/chat` turn on the same `chat_id` with 409 while one is
+  in flight, so the truncate-then-append can't interleave with a concurrent request and
+  read a half-mutated history.

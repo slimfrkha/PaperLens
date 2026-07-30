@@ -167,6 +167,66 @@ def test_set_feedback_pads_legacy_sessions_without_feedback(tmp_path):
     }
 
 
+def test_truncate_at_drops_tail_across_all_parallel_arrays(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat_id = store.create()["id"]
+    store.append_turn(chat_id, "q1", "a1 [r1]", [{"ref": "r1"}], [{"type": "action"}])
+    store.append_turn(chat_id, "q2", "a2 [r2]", [{"ref": "r2"}], [{"type": "action"}])
+    store.set_feedback(chat_id, 3, "up", "good")
+
+    truncated = store.truncate_at(chat_id, 2)  # drop the second exchange (index 2 = "q2")
+    assert [m["content"] for m in truncated["messages"]] == ["q1", "a1 [r1]"]
+    assert truncated["citations"] == [None, [{"ref": "r1"}]]
+    assert truncated["traces"] == [None, [{"type": "action"}]]
+    assert truncated["feedback"] == [None, None]
+    assert len(truncated["usage"]) == 2
+
+
+def test_truncate_at_index_zero_drops_everything(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat_id = store.create()["id"]
+    store.append_turn(chat_id, "q1", "a1", [], [])
+
+    truncated = store.truncate_at(chat_id, 0)
+    assert truncated["messages"] == []
+    assert truncated["citations"] == []
+
+
+def test_truncate_at_rejects_out_of_range_index(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat_id = store.create()["id"]
+    store.append_turn(chat_id, "q", "a", [], [])
+    with pytest.raises(ValueError):
+        store.truncate_at(chat_id, 5)
+
+
+def test_truncate_at_rejects_assistant_turn_index(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat_id = store.create()["id"]
+    store.append_turn(chat_id, "q", "a", [], [])
+    with pytest.raises(ValueError):
+        store.truncate_at(chat_id, 1)  # index 1 is the assistant turn
+
+
+def test_truncate_at_returns_none_for_missing_chat(tmp_path):
+    store = ChatStore(str(tmp_path))
+    assert store.truncate_at("missing", 0) is None
+
+
+def test_try_acquire_then_release_allows_reacquire(tmp_path):
+    store = ChatStore(str(tmp_path))
+    assert store.try_acquire("c1") is True
+    assert store.try_acquire("c1") is False  # already in flight
+    store.release("c1")
+    assert store.try_acquire("c1") is True  # free again after release
+
+
+def test_try_acquire_is_independent_per_chat(tmp_path):
+    store = ChatStore(str(tmp_path))
+    assert store.try_acquire("c1") is True
+    assert store.try_acquire("c2") is True  # unrelated chat, not blocked
+
+
 def test_generate_name_falls_back_when_llm_errors(monkeypatch):
     from rag.config import AnthropicSpec
 

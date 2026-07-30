@@ -167,7 +167,10 @@ def create_app(cfg: Config) -> FastAPI:
 
     @app.post("/api/chat")
     async def chat(req: ChatRequest):
-        agent = get_agent()
+        if req.chat_id and not chats.try_acquire(req.chat_id):
+            return JSONResponse(
+                {"error": "a turn is already in progress for this chat"}, status_code=409
+            )
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue()
 
@@ -182,6 +185,16 @@ def create_app(cfg: Config) -> FastAPI:
                 emit("trace", json.dumps(e))
 
             try:
+                # Built here, not before scheduling this thread: get_agent() is the
+                # first-touch lazy model build and can throw (bad key, cold cloud
+                # client) — done outside this try/finally, a failure here would never
+                # release the try_acquire guard above, wedging the chat permanently.
+                agent = get_agent()
+                # An edit-and-resume truncates the stored tail before this turn is
+                # computed, so ref_start below reads only the retained history — the
+                # try_acquire guard above ensures no concurrent request can interleave.
+                if req.edit_index is not None and req.chat_id:
+                    chats.truncate_at(req.chat_id, req.edit_index)
                 # Existing chats already carry ref-numbered citations for prior turns —
                 # offset this turn's numbering past them so a follow-up question
                 # continues (r4, r5, ...) instead of restarting at r1 and colliding
@@ -228,6 +241,8 @@ def create_app(cfg: Config) -> FastAPI:
                 emit("error", f"{type(e).__name__}: {e}")
             finally:
                 emit("done", "")
+                if req.chat_id:
+                    chats.release(req.chat_id)
 
         loop.run_in_executor(None, work)
 

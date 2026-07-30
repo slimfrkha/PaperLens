@@ -17,6 +17,7 @@ class ChatRequest(BaseModel):
     tags: list[str] = []
     papers: list[str] = []  # restrict search to these paper_ids (empty = all)
     chat_id: str | None = None
+    edit_index: int | None = None  # if set, truncate stored history to this index first
 
 
 class FeedbackRequest(BaseModel):

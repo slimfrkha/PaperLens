@@ -13,7 +13,7 @@ import {
   Tooltip,
 } from "@mantine/core";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { IconSend, IconSidebar } from "../components/Icons";
+import { IconCheck, IconEdit, IconSend, IconSidebar, IconX } from "../components/Icons";
 import {
   chat,
   createChat,
@@ -60,6 +60,8 @@ export default function ChatPage() {
   const [paperOptions, setPaperOptions] = useState<{ value: string; label: string }[]>([]);
   const [busy, setBusy] = useState(false);
   const [empty, setEmpty] = useState(false);
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState("");
   const loadedId = useRef<string | null>(null); // which chat's turns are in state
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -157,6 +159,9 @@ export default function ChatPage() {
     const q = input.trim();
     if (!q || busy) return;
     setInput("");
+    // A stale open edit box shouldn't survive an unrelated normal send — otherwise its
+    // Save button becomes a silent no-op once `busy` flips true for this turn instead.
+    cancelEdit();
 
     let id = chatId ?? null;
     if (!id) {
@@ -186,6 +191,71 @@ export default function ChatPage() {
         onError: (e) => patchLast((t) => ({ ...t, content: t.content + `\n\n_Error: ${e}_` })),
         onDone: () => patchLast((t) => ({ ...t, streaming: false })),
       });
+    } finally {
+      setBusy(false);
+      refreshSessions();
+    }
+  }
+
+  function startEdit(i: number, content: string) {
+    setEditingIndex(i);
+    setEditDraft(content);
+  }
+
+  function cancelEdit() {
+    setEditingIndex(null);
+    setEditDraft("");
+  }
+
+  async function sendEdit(index: number, newContent: string) {
+    const q = newContent.trim();
+    if (!q || busy || !chatId) return;
+
+    // Exchanges strictly after this one (own reply + any full user/assistant pairs
+    // beyond it) that editing here would discard — confirm only when it's more than
+    // just regenerating the immediate reply.
+    const turnsAfter = turns.length - index - 1;
+    if (turnsAfter > 1) {
+      const exchanges = Math.floor((turnsAfter - 1) / 2);
+      const noun = exchanges === 1 ? "exchange" : "exchanges";
+      if (
+        !window.confirm(
+          `This will remove ${exchanges} later ${noun} in this conversation. Continue?`,
+        )
+      ) {
+        return;
+      }
+    }
+
+    setEditingIndex(null);
+    const prefix = turns.slice(0, index);
+    const history: ChatMessage[] = [
+      ...prefix.map((t) => ({ role: t.role, content: t.content })),
+      { role: "user", content: q },
+    ];
+    setTurns([
+      ...prefix,
+      { role: "user", content: q },
+      { role: "assistant", content: "", streaming: true },
+    ]);
+    setBusy(true);
+    try {
+      await chat(
+        history,
+        tags,
+        papers,
+        chatId,
+        {
+          onToken: (tok) => patchLast((t) => ({ ...t, content: t.content + tok })),
+          onCitations: (c) => patchLast((t) => ({ ...t, citations: c })),
+          onTrace: (e) => patchLast((t) => ({ ...t, trace: [...(t.trace ?? []), e] })),
+          onUsage: (u) => patchLast((t) => ({ ...t, usage: u })),
+          onMeta: () => refreshSessions(),
+          onError: (e) => patchLast((t) => ({ ...t, content: t.content + `\n\n_Error: ${e}_` })),
+          onDone: () => patchLast((t) => ({ ...t, streaming: false })),
+        },
+        index,
+      );
     } finally {
       setBusy(false);
       refreshSessions();
@@ -313,20 +383,73 @@ export default function ChatPage() {
           <Stack gap="xl" style={{ flex: 1 }}>
             {turns.map((t, i) =>
               t.role === "user" ? (
-                <Group key={i} justify="flex-end">
-                  <Box
-                    px="md"
-                    py="xs"
-                    style={{
-                      maxWidth: "82%",
-                      background: "var(--pl-surface-2)",
-                      border: "1px solid var(--pl-border)",
-                      borderRadius: 14,
-                      borderBottomRightRadius: 4,
-                    }}
-                  >
-                    <Text style={{ whiteSpace: "pre-wrap" }}>{t.content}</Text>
-                  </Box>
+                <Group key={i} justify="flex-end" align="center" gap={4}>
+                  {editingIndex === i ? (
+                    <Box style={{ maxWidth: "82%", width: "100%" }}>
+                      <Textarea
+                        autosize
+                        minRows={1}
+                        maxRows={8}
+                        autoFocus
+                        value={editDraft}
+                        onChange={(e) => setEditDraft(e.currentTarget.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && !e.shiftKey) {
+                            e.preventDefault();
+                            sendEdit(i, editDraft);
+                          } else if (e.key === "Escape") {
+                            cancelEdit();
+                          }
+                        }}
+                      />
+                      <Group gap={4} justify="flex-end" mt={4}>
+                        <ActionIcon
+                          size="sm"
+                          variant="subtle"
+                          color="gray"
+                          aria-label="Cancel edit"
+                          onClick={cancelEdit}
+                        >
+                          <IconX size={14} />
+                        </ActionIcon>
+                        <ActionIcon
+                          size="sm"
+                          variant="subtle"
+                          aria-label="Save and resend"
+                          disabled={!editDraft.trim() || busy}
+                          onClick={() => sendEdit(i, editDraft)}
+                        >
+                          <IconCheck size={14} />
+                        </ActionIcon>
+                      </Group>
+                    </Box>
+                  ) : (
+                    <>
+                      <ActionIcon
+                        size="sm"
+                        variant="subtle"
+                        color="gray"
+                        aria-label="Edit message"
+                        disabled={busy}
+                        onClick={() => startEdit(i, t.content)}
+                      >
+                        <IconEdit size={14} />
+                      </ActionIcon>
+                      <Box
+                        px="md"
+                        py="xs"
+                        style={{
+                          maxWidth: "82%",
+                          background: "var(--pl-surface-2)",
+                          border: "1px solid var(--pl-border)",
+                          borderRadius: 14,
+                          borderBottomRightRadius: 4,
+                        }}
+                      >
+                        <Text style={{ whiteSpace: "pre-wrap" }}>{t.content}</Text>
+                      </Box>
+                    </>
+                  )}
                 </Group>
               ) : (
                 <Box key={i}>

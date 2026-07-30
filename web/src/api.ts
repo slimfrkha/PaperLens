@@ -129,19 +129,33 @@ export interface ChatHandlers {
   onDone?: () => void;
 }
 
-/** POST /api/chat and parse the SSE stream (token / citations / trace / usage / meta / error / done). */
+/** POST /api/chat and parse the SSE stream (token / citations / trace / usage / meta / error / done).
+ *  `editIndex` truncates the stored chat back to that user turn before resuming from it. */
 export async function chat(
   messages: ChatMessage[],
   tags: string[],
   papers: string[],
   chatId: string | null,
   h: ChatHandlers,
+  editIndex?: number,
 ): Promise<void> {
   const resp = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, tags, papers, chat_id: chatId }),
+    body: JSON.stringify({
+      messages,
+      tags,
+      papers,
+      chat_id: chatId,
+      edit_index: editIndex ?? null,
+    }),
   });
+  if (resp.status === 409) {
+    const body = await resp.json().catch(() => ({}));
+    h.onError?.(body.error ?? "a turn is already in progress for this chat");
+    h.onDone?.();
+    return;
+  }
   if (!resp.body) throw new Error("no response body");
 
   const reader = resp.body.getReader();

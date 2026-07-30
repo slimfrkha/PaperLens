@@ -205,6 +205,264 @@ def test_chat_continues_citation_numbering_across_turns(make_config, monkeypatch
     assert cits2[0]["ref"] == "r2"
 
 
+def test_chat_edit_index_truncates_and_restarts_ref_numbering(make_config, monkeypatch):
+    # Edit the FIRST turn of a two-turn chat: the second exchange (and its r2 citation)
+    # must be dropped, and the edited turn's citation must renumber from r1, not r3 —
+    # ref_start has to be read off the truncated history, not the pre-edit one.
+    import importlib
+
+    main_mod = importlib.import_module("server.main")
+
+    class FakeAgent:
+        def __init__(self, *a, **k):
+            pass
+
+        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0):
+            ref = f"r{ref_start + 1}"
+            text = f"See [{ref}]."
+            on_text(text)
+            return text, [{"ref": ref, "paper_id": "p", "title": "P"}], Usage(10, 5)
+
+    monkeypatch.setattr(main_mod, "build_llm", lambda *a, **k: object())
+    monkeypatch.setattr(main_mod, "build_reranker", lambda *a, **k: object())
+    monkeypatch.setattr(main_mod, "Searcher", lambda *a, **k: object())
+    monkeypatch.setattr(main_mod, "ChatAgent", FakeAgent)
+
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    client = TestClient(create_app(cfg))
+
+    chat_id = client.post("/api/chats").json()["id"]
+    client.post(
+        "/api/chat", json={"messages": [{"role": "user", "content": "q1"}], "chat_id": chat_id}
+    )
+    client.post(
+        "/api/chat",
+        json={
+            "messages": [
+                {"role": "user", "content": "q1"},
+                {"role": "assistant", "content": "See [r1]."},
+                {"role": "user", "content": "q2"},
+            ],
+            "chat_id": chat_id,
+        },
+    )
+    before = client.get(f"/api/chats/{chat_id}").json()
+    assert len(before["messages"]) == 4
+
+    edited = client.post(
+        "/api/chat",
+        json={
+            "messages": [{"role": "user", "content": "q1 edited"}],
+            "chat_id": chat_id,
+            "edit_index": 0,
+        },
+    )
+    cits = json.loads(next(e["data"] for e in _parse_sse(edited.text) if e["event"] == "citations"))
+    assert cits[0]["ref"] == "r1"  # renumbered from scratch, not r3
+
+    after = client.get(f"/api/chats/{chat_id}").json()
+    assert [m["content"] for m in after["messages"]] == ["q1 edited", "See [r1]."]
+
+
+def test_chat_edit_index_mid_conversation_keeps_earlier_refs(make_config, monkeypatch):
+    # Edit the SECOND turn of a two-turn chat: the first exchange (and its r1
+    # citation) is retained, so the edited turn's ref must continue at r2.
+    import importlib
+
+    main_mod = importlib.import_module("server.main")
+
+    class FakeAgent:
+        def __init__(self, *a, **k):
+            pass
+
+        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0):
+            ref = f"r{ref_start + 1}"
+            text = f"See [{ref}]."
+            on_text(text)
+            return text, [{"ref": ref, "paper_id": "p", "title": "P"}], Usage(10, 5)
+
+    monkeypatch.setattr(main_mod, "build_llm", lambda *a, **k: object())
+    monkeypatch.setattr(main_mod, "build_reranker", lambda *a, **k: object())
+    monkeypatch.setattr(main_mod, "Searcher", lambda *a, **k: object())
+    monkeypatch.setattr(main_mod, "ChatAgent", FakeAgent)
+
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    client = TestClient(create_app(cfg))
+
+    chat_id = client.post("/api/chats").json()["id"]
+    client.post(
+        "/api/chat", json={"messages": [{"role": "user", "content": "q1"}], "chat_id": chat_id}
+    )
+    client.post(
+        "/api/chat",
+        json={
+            "messages": [
+                {"role": "user", "content": "q1"},
+                {"role": "assistant", "content": "See [r1]."},
+                {"role": "user", "content": "q2"},
+            ],
+            "chat_id": chat_id,
+        },
+    )
+
+    edited = client.post(
+        "/api/chat",
+        json={
+            "messages": [
+                {"role": "user", "content": "q1"},
+                {"role": "assistant", "content": "See [r1]."},
+                {"role": "user", "content": "q2 edited"},
+            ],
+            "chat_id": chat_id,
+            "edit_index": 2,
+        },
+    )
+    cits = json.loads(next(e["data"] for e in _parse_sse(edited.text) if e["event"] == "citations"))
+    assert cits[0]["ref"] == "r2"  # continues past the retained r1, doesn't collide
+
+    after = client.get(f"/api/chats/{chat_id}").json()
+    assert [m["content"] for m in after["messages"]] == [
+        "q1",
+        "See [r1].",
+        "q2 edited",
+        "See [r2].",
+    ]
+
+
+def test_chat_edit_index_on_assistant_turn_surfaces_sse_error(make_config, monkeypatch):
+    # truncate_at's ValueError (bad index) must come back as an SSE `error` event, not
+    # an HTTP 4xx — the streaming response has already started by the time it's raised.
+    import importlib
+
+    main_mod = importlib.import_module("server.main")
+
+    class FakeAgent:
+        def __init__(self, *a, **k):
+            pass
+
+        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0):
+            on_text("answer")
+            return "answer", [], Usage(10, 5)
+
+    monkeypatch.setattr(main_mod, "build_llm", lambda *a, **k: object())
+    monkeypatch.setattr(main_mod, "build_reranker", lambda *a, **k: object())
+    monkeypatch.setattr(main_mod, "Searcher", lambda *a, **k: object())
+    monkeypatch.setattr(main_mod, "ChatAgent", FakeAgent)
+
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    client = TestClient(create_app(cfg))
+
+    chat_id = client.post("/api/chats").json()["id"]
+    client.post(
+        "/api/chat", json={"messages": [{"role": "user", "content": "q"}], "chat_id": chat_id}
+    )
+
+    resp = client.post(
+        "/api/chat",
+        json={"messages": [{"role": "user", "content": "q2"}], "chat_id": chat_id, "edit_index": 1},
+    )
+    assert resp.status_code == 200
+    events = _parse_sse(resp.text)
+    assert any(e["event"] == "error" for e in events)
+    assert events[-1]["event"] == "done"
+
+
+def test_chat_route_releases_guard_when_agent_build_fails(make_config, monkeypatch):
+    # get_agent() is the first-touch lazy model build and can throw (bad key, cold
+    # cloud client). That must not leak the single-flight guard: a failed turn has to
+    # release its chat_id, or every later request against it gets stuck behind a
+    # permanent 409 with nothing actually running.
+    import importlib
+
+    main_mod = importlib.import_module("server.main")
+
+    def boom(*a, **k):
+        raise RuntimeError("boom: agent build failed")
+
+    monkeypatch.setattr(main_mod, "build_llm", boom)
+    monkeypatch.setattr(main_mod, "build_reranker", lambda *a, **k: object())
+    monkeypatch.setattr(main_mod, "Searcher", lambda *a, **k: object())
+
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    client = TestClient(create_app(cfg))
+
+    chat_id = client.post("/api/chats").json()["id"]
+
+    first = client.post(
+        "/api/chat", json={"messages": [{"role": "user", "content": "q"}], "chat_id": chat_id}
+    )
+    assert first.status_code == 200  # streams an SSE error rather than a bare 500
+    events = _parse_sse(first.text)
+    assert any(e["event"] == "error" for e in events)
+    assert events[-1]["event"] == "done"
+
+    # The guard must be released even though the turn failed — a second request on
+    # the same chat_id must not be rejected with 409.
+    second = client.post(
+        "/api/chat", json={"messages": [{"role": "user", "content": "q2"}], "chat_id": chat_id}
+    )
+    assert second.status_code != 409
+
+
+def test_chat_route_rejects_concurrent_turn_on_same_chat(make_config, monkeypatch):
+    # The single-flight guard exists so an edit's truncate+append can't interleave
+    # with another in-flight turn on the same chat. Force real overlap: block the
+    # first request's agent mid-turn, confirm a second request on the same chat_id
+    # is rejected with 409 while the first is still running, then let it finish.
+    import importlib
+    import threading
+
+    main_mod = importlib.import_module("server.main")
+
+    started = threading.Event()
+    release_agent = threading.Event()
+
+    class SlowFakeAgent:
+        def __init__(self, *a, **k):
+            pass
+
+        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0):
+            started.set()
+            assert release_agent.wait(timeout=5), "test deadlocked waiting for release"
+            on_text("answer")
+            return "answer", [], Usage(10, 5)
+
+    monkeypatch.setattr(main_mod, "build_llm", lambda *a, **k: object())
+    monkeypatch.setattr(main_mod, "build_reranker", lambda *a, **k: object())
+    monkeypatch.setattr(main_mod, "Searcher", lambda *a, **k: object())
+    monkeypatch.setattr(main_mod, "ChatAgent", SlowFakeAgent)
+
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    client = TestClient(create_app(cfg))
+
+    chat_id = client.post("/api/chats").json()["id"]
+    results: dict = {}
+
+    def first():
+        results["first"] = client.post(
+            "/api/chat", json={"messages": [{"role": "user", "content": "q"}], "chat_id": chat_id}
+        )
+
+    t = threading.Thread(target=first)
+    t.start()
+    assert started.wait(timeout=5), "first request never reached the agent"
+
+    second = client.post(
+        "/api/chat", json={"messages": [{"role": "user", "content": "q2"}], "chat_id": chat_id}
+    )
+    assert second.status_code == 409
+
+    release_agent.set()
+    t.join(timeout=5)
+    assert results["first"].status_code == 200
+    assert "done" in results["first"].text
+
+
 def test_feedback_route_sets_clears_and_rejects_invalid_index(make_config, monkeypatch):
     import importlib
 
