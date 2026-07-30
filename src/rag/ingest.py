@@ -3,6 +3,7 @@
     python -m rag.ingest                          # ingest papers not yet in the DB
     python -m rag.ingest --config_path other.yaml
     python -m rag.ingest --retag                  # regenerate tags for ingested papers
+    python -m rag.ingest --reindex                 # re-chunk/re-embed ingested papers (tags kept)
 
 Accepts draccus per-field overrides too (e.g. ``--llm.tagging.model=...``). Same
 code path the app's background worker uses.
@@ -56,9 +57,10 @@ def _normalize_step(cfg: IngestConfig, manifest: Manifest) -> None:
 
 
 def main() -> None:
-    # --retag is a CLI action, not a config field; pull it out before draccus parses.
-    argv = [a for a in sys.argv[1:] if a != "--retag"]
+    # --retag/--reindex are CLI actions, not config fields; pull them out before draccus parses.
+    argv = [a for a in sys.argv[1:] if a not in ("--retag", "--reindex")]
     do_retag = "--retag" in sys.argv[1:]
+    do_reindex = "--reindex" in sys.argv[1:]
 
     cfg = parse_config(argv).for_ingest()
     manifest = Manifest(cfg.paths.rag_db)
@@ -66,6 +68,32 @@ def main() -> None:
     if do_retag:
         print("== Regenerating tags ==")
         retag(cfg, manifest)
+        return
+
+    if do_reindex:
+        papers = [p for p in cfg.papers if manifest.is_ingested(p.name)]
+        if not papers:
+            print("Nothing to reindex — no configured papers are in the DB yet.")
+            return
+        print(f"== Reindexing {len(papers)} paper(s) under the current config ==")
+        embedder = build_embedder_from_config(cfg)
+        collection = open_collection(
+            cfg.paths.rag_db, cfg.collection, embedder_name=embedder.name()
+        )
+        for paper in papers:
+            print(f"\n-- {paper.name} ({paper.arxiv_id}) --")
+            rec = ingest_paper(
+                paper,
+                cfg,
+                embedder,
+                collection,
+                manifest,
+                on_stage=lambda s, pct: print(f"   {s:9s} {int(pct * 100):3d}%"),
+                retag=False,
+            )
+            tags = ", ".join(rec["tags"]) or "(none)"
+            print(f"   -> {rec['n_chunks']} chunks (tags unchanged: {tags})")
+        print("\nDone.")
         return
 
     pending = pending_papers(cfg, manifest)

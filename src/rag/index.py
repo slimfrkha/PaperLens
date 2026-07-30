@@ -43,6 +43,12 @@ def _chunk_id(c: Chunk) -> str:
     return hashlib.md5(key.encode()).hexdigest()
 
 
+def _existing_chunk_ids(collection, paper_id: str) -> set[str]:
+    """Ids already in the collection for one paper (empty on a fresh ingest)."""
+    got = collection.get(where={"paper_id": paper_id}, include=[])
+    return set(got["ids"])
+
+
 def collect_chunks(docs_dir: str, **chunk_kwargs) -> list[Chunk]:
     chunks: list[Chunk] = []
     for path in sorted(glob.glob(os.path.join(docs_dir, "*.md"))):
@@ -101,7 +107,12 @@ def index_markdown(
     batch_size: int = 32,
     progress=None,
 ) -> int:
-    """Chunk one markdown file and upsert it. Returns the chunk count."""
+    """Chunk one markdown file and upsert it. Returns the chunk count.
+
+    Also removes any chunk already in the collection for this ``paper_id`` that the new
+    chunking no longer produces — otherwise a re-ingest under a different chunking config
+    (fewer/renumbered parts) leaves the old parts behind as stale, silently-wrong hits.
+    """
     with open(md_path) as f:
         md = f.read()
     chunks = chunk_markdown(
@@ -113,6 +124,10 @@ def index_markdown(
         noise_ratio=chunking.noise_ratio,
         extra_skip_titles=chunking.extra_skip_titles,
     )
+    new_ids = {_chunk_id(c) for c in chunks}
+    stale = _existing_chunk_ids(collection, paper_id) - new_ids
+    if stale:
+        collection.delete(ids=list(stale))
     upsert_chunks(collection, embedder, chunks, batch_size=batch_size, progress=progress)
     return len(chunks)
 

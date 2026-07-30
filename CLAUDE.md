@@ -48,6 +48,7 @@ npm --prefix web install         # frontend deps
 uv run paperlens-serve           # backend only (FastAPI, port 8000)
 uv run paperlens-ingest          # ingest configured papers not yet in the DB
 uv run paperlens-ingest --retag  # regenerate tags without re-indexing
+uv run paperlens-ingest --reindex # re-chunk/re-embed existing papers under current config, tags untouched
 uv run paperlens-eval gen        # per-pool eval set + config tuning (see docs/harness.md)
 make dev CONFIG=<path>           # backend + Vite dev server together
 ```
@@ -73,7 +74,7 @@ src/
     search.py          # Searcher: dense recall → rerank (+ paper filter)
     tagger.py          # LLM tag generation
     pipeline.py        # ingest_paper: download → extract → index → tag → manifest
-    ingest.py          # headless ingestion CLI (+ --retag)
+    ingest.py          # headless ingestion CLI (+ --retag, --reindex)
   server/              # FastAPI backend + in-process ingestion worker (composes rag)
     main.py            # create_app: wires manifest, worker, lazy ChatAgent; all routes
     agent.py           # ChatAgent: ReAct loop, search_papers tool, ref/citation registry

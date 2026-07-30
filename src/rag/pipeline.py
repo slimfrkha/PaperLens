@@ -62,6 +62,11 @@ def _title(md: str) -> str:
     return ""
 
 
+def _existing_tags(manifest: Manifest, paper_id: str) -> list[str]:
+    rec = next((r for r in manifest.papers() if r["paper_id"] == paper_id), None)
+    return rec["tags"] if rec else []
+
+
 def ingest_paper(
     paper: Paper,
     cfg: IngestConfig,
@@ -69,8 +74,14 @@ def ingest_paper(
     collection,
     manifest: Manifest,
     on_stage: OnStage | None = None,
+    retag: bool = True,
 ) -> dict:
-    """Run one paper through the full pipeline and record it in the manifest."""
+    """Run one paper through the full pipeline and record it in the manifest.
+
+    When ``retag`` is False (used by ``--reindex``), tags are carried forward from the
+    existing manifest record instead of regenerated — re-chunking/re-embedding shouldn't
+    also churn tags or spend an LLM call unrelated to the change that triggered it.
+    """
 
     def stage(name: str, pct: float = 0.0):
         if on_stage:
@@ -109,8 +120,19 @@ def ingest_paper(
             return []
 
     stage("index", 0.5)
-    with ThreadPoolExecutor(max_workers=1) as ex:
-        tags_future = ex.submit(_tags)
+    if retag:
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            tags_future = ex.submit(_tags)
+            n_chunks = index_markdown(
+                collection,
+                embedder,
+                md_path,
+                paper.name,
+                batch_size=cfg.embedding.batch_size,
+                chunking=cfg.chunking,
+            )
+            tags = tags_future.result()
+    else:
         n_chunks = index_markdown(
             collection,
             embedder,
@@ -119,7 +141,7 @@ def ingest_paper(
             batch_size=cfg.embedding.batch_size,
             chunking=cfg.chunking,
         )
-        tags = tags_future.result()
+        tags = _existing_tags(manifest, paper.name)
     stage("tag", 0.85)
 
     record = {

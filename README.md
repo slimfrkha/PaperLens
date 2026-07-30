@@ -9,6 +9,12 @@ by a single `config.yaml`. ⚙️
 
 > 🤖 This repo is **vibecoded with [Claude Code](https://claude.com/claude-code)**.
 
+PaperLens is meant to be **launched locally by one person** — start it, ask questions about
+your papers, stop it — not deployed as an always-on service for others. That's a deliberate
+scope choice, not an oversight: it's why there's no auth, no multi-tenancy, and no production
+ops layer (observability/tracing, health-check endpoints, job queues) — those solve problems
+that only exist once something runs unattended or serves multiple people at once.
+
 ## 🛠️ How it works
 
 ```text

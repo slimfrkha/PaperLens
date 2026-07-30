@@ -35,7 +35,7 @@ input, so env interpolation is a convenience, not a new trust boundary.
 `paperlens-serve` / `paperlens-ingest` also take **per-field CLI overrides** on top of the
 file (`--server.port=9000`, `--llm.chat.model=…`, `--help` to list them all). Overrides are
 merged *before* interpolation resolves, so `${...}` sees them too. `paperlens-ingest` also
-takes the non-config flag `--retag`.
+takes the non-config flags `--retag` and `--reindex`.
 
 > **Migration (from the pydantic config):** the LLM selector key `provider` was renamed to
 > `type` (uniform with `embedding.type` / `reranker.type`), and the config-file CLI flag
@@ -271,6 +271,7 @@ Console scripts (from `pyproject.toml`); each also runs as `python -m <module>`.
 | `uv run paperlens-serve` | `python -m server` | Serve the API on `server.host:server.port`; auto-starts the worker if `ingestion.auto_start`. |
 | `uv run paperlens-ingest` | `python -m rag.ingest` | Ingest every configured paper not yet in the DB (headless, same pipeline as the worker). |
 | `uv run paperlens-ingest --retag` | — | Regenerate tags for already-ingested papers (no re-index). |
+| `uv run paperlens-ingest --reindex` | — | Re-chunk/re-embed every already-ingested paper under the current config, cleaning up chunks orphaned by a chunking change. Tags are left untouched — `--retag` and `--reindex` each do one job and don't combine in a single invocation, so run `--retag` as a separate follow-up command if you also want fresh tags. |
 | `uv run paperlens-{serve,ingest} --config_path <path>` | — | Use a specific config file. |
 
 ### 🎁 Make targets
