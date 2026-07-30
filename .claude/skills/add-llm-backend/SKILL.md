@@ -46,7 +46,9 @@ different API (like `AnthropicBackend`).
    class MyBackend(LLMBackend):
        def __init__(self, spec: LLMSpec): ...
        def complete(self, system: str, user: str, *, max_tokens: int) -> str: ...
-       def run_tools(self, *, system, messages, tools, execute, on_text, on_reasoning): ...
+       def run_tools(
+           self, *, system, messages, tools, execute, on_text, on_reasoning
+       ) -> tuple[str, Usage]: ...
 
    # in build_llm(spec):
    #     case MySpec(): return MyBackend(spec)   # subclasses before their base
@@ -60,6 +62,9 @@ different API (like `AnthropicBackend`).
    - Read the API key from `spec.api_key_env` (an env var name), never a hard-coded key.
    - `run_tools` drives the ReAct loop for chat — it must call `execute` for each tool call
      and stream text through `on_text`. Study `AnthropicBackend.run_tools` for the contract.
+   - `run_tools` returns `(text, Usage)`: sum `input_tokens`/`output_tokens` across every
+     ReAct round (each round is a separate billed API call) before the final return.
+     Return `Usage(None, None)` if the provider's SDK response never carries usage.
 
 4. **Export the new variant** from `src/rag/__init__.py` (add `MySpec` to the `.config`
    import block and `__all__`), mirroring the other spec variants.

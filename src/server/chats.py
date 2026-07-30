@@ -7,13 +7,16 @@ Each session is one JSON file in the configured `chat_history` directory:
       "created_at": "...", "updated_at": "...",
       "messages":  [{"role": "user", "content": "..."}, ...],   # ChatML
       "citations": [null, [<citation>, ...], ...],              # parallel to messages
-      "feedback":  [null, {"vote": "up", "note": "...", "updated_at": "..."}, ...]
+      "feedback":  [null, {"vote": "up", "note": "...", "updated_at": "..."}, ...],
+      "usage":     [null, {"input_tokens": 512, "output_tokens": 128, "latency_ms": 2100}, ...]
     }
 
 `messages` is a plain ChatML list; `citations[i]` holds the grounded sources for
 `messages[i]` (null for user turns) so the UI can re-link them after reload. `feedback[i]`
 holds the 👍/👎 + optional note left on that assistant turn, set via `set_feedback`
-(null until a vote is cast, and always null for user turns).
+(null until a vote is cast, and always null for user turns). `usage[i]` holds the token
+counts + latency for that assistant turn (null for user turns; token counts may also be
+null if the LLM backend never reported usage).
 """
 
 from __future__ import annotations
@@ -72,6 +75,7 @@ class ChatStore:
             "citations": [],
             "traces": [],
             "feedback": [],
+            "usage": [],
         }
         self._write(chat)
         return chat
@@ -83,6 +87,7 @@ class ChatStore:
         assistant_content: str,
         citations: list,
         trace: list,
+        usage: dict | None = None,
         name: str | None = None,
     ) -> dict:
         """Append one user+assistant exchange, preserving prior turns."""
@@ -96,15 +101,20 @@ class ChatStore:
                 "traces": [],
             }
             chat.setdefault("traces", [])
-            # Keep parallel arrays aligned even for sessions created before traces.
+            chat.setdefault("usage", [])
+            # Keep parallel arrays aligned even for sessions created before traces/usage.
             while len(chat["traces"]) < len(chat["messages"]):
                 chat["traces"].append(None)
+            while len(chat["usage"]) < len(chat["messages"]):
+                chat["usage"].append(None)
             chat["messages"].append({"role": "user", "content": user_content})
             chat["citations"].append(None)
             chat["traces"].append(None)
+            chat["usage"].append(None)
             chat["messages"].append({"role": "assistant", "content": assistant_content})
             chat["citations"].append(citations)
             chat["traces"].append(trace)
+            chat["usage"].append(usage)
             if name is not None:
                 chat["name"] = name
             chat["updated_at"] = _now()

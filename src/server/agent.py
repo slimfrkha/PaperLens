@@ -17,7 +17,7 @@ from rag.faithfulness import (
     build_faithfulness_checker,
     split_sentences,
 )
-from rag.llm import build_llm
+from rag.llm import Usage, build_llm
 from rag.manifest import Manifest
 from rag.search import Searcher
 
@@ -110,8 +110,10 @@ class ChatAgent:
             note = "No paper/tag filter is active; all papers are searchable."
         return SYSTEM_PROMPT.format(filter_note=note, papers=papers)
 
-    def run(self, messages, tags, papers, on_text, on_trace=None, ref_start: int = 0):
-        """Returns (answer_text, citations[]).
+    def run(
+        self, messages, tags, papers, on_text, on_trace=None, ref_start: int = 0
+    ) -> tuple[str, list[dict], Usage]:
+        """Returns (answer_text, citations[], usage).
 
         `tags` and `papers` are two optional scoping filters the user can set: a
         tag filter (papers carrying any of the tags) and an explicit paper picker.
@@ -186,7 +188,7 @@ class ChatAgent:
             trace({"type": "observation", "text": observation})
             return observation
 
-        text = self.client.run_tools(
+        text, usage = self.client.run_tools(
             system=self._system(paper_ids),
             messages=[dict(m) for m in messages],
             tools=[self.search_tool],
@@ -197,7 +199,7 @@ class ChatAgent:
         )
         if self.cfg.faithfulness.enabled and registry:
             self._check_faithfulness(text, registry, bodies)
-        return text, list(registry.values())
+        return text, list(registry.values()), usage
 
     def _check_faithfulness(
         self, text: str, registry: dict[str, dict], bodies: dict[str, str]

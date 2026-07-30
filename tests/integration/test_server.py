@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from rag.llm import Usage
 from server.main import create_app
 
 
@@ -89,7 +90,7 @@ def test_chat_streams_token_citations_done(make_config, monkeypatch):
             on_text("bar")
             if on_trace:
                 on_trace({"type": "action", "query": "q"})
-            return "foobar", [{"ref": "r1", "paper_id": "p", "title": "P"}]
+            return "foobar", [{"ref": "r1", "paper_id": "p", "title": "P"}], Usage(10, 5)
 
     monkeypatch.setattr(main_mod, "build_llm", lambda *a, **k: object())
     monkeypatch.setattr(main_mod, "build_reranker", lambda *a, **k: object())
@@ -115,6 +116,44 @@ def test_chat_streams_token_citations_done(make_config, monkeypatch):
     assert cits[0]["ref"] == "r1"
 
 
+def test_chat_streams_usage_event_and_persists_it(make_config, monkeypatch):
+    import importlib
+
+    main_mod = importlib.import_module("server.main")
+
+    class FakeAgent:
+        def __init__(self, *a, **k):
+            pass
+
+        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0):
+            on_text("answer")
+            return "answer", [], Usage(42, 7)
+
+    monkeypatch.setattr(main_mod, "build_llm", lambda *a, **k: object())
+    monkeypatch.setattr(main_mod, "build_reranker", lambda *a, **k: object())
+    monkeypatch.setattr(main_mod, "Searcher", lambda *a, **k: object())
+    monkeypatch.setattr(main_mod, "ChatAgent", FakeAgent)
+
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    client = TestClient(create_app(cfg))
+
+    chat_id = client.post("/api/chats").json()["id"]
+    resp = client.post(
+        "/api/chat",
+        json={"messages": [{"role": "user", "content": "hi"}], "chat_id": chat_id},
+    )
+
+    events = _parse_sse(resp.text)
+    usage_event = json.loads(next(e["data"] for e in events if e["event"] == "usage"))
+    assert usage_event["input_tokens"] == 42
+    assert usage_event["output_tokens"] == 7
+    assert usage_event["latency_ms"] >= 0
+
+    saved = client.get(f"/api/chats/{chat_id}").json()
+    assert saved["usage"][1]["input_tokens"] == 42
+
+
 def test_chat_continues_citation_numbering_across_turns(make_config, monkeypatch):
     # Reproduces the reported bug: a second question in the same chat must not
     # restart citation numbering at r1 — main.py must offset ref numbering by
@@ -131,7 +170,7 @@ def test_chat_continues_citation_numbering_across_turns(make_config, monkeypatch
             ref = f"r{ref_start + 1}"
             text = f"See [{ref}]."
             on_text(text)
-            return text, [{"ref": ref, "paper_id": "p", "title": "P"}]
+            return text, [{"ref": ref, "paper_id": "p", "title": "P"}], Usage(10, 5)
 
     monkeypatch.setattr(main_mod, "build_llm", lambda *a, **k: object())
     monkeypatch.setattr(main_mod, "build_reranker", lambda *a, **k: object())
@@ -177,7 +216,7 @@ def test_feedback_route_sets_clears_and_rejects_invalid_index(make_config, monke
 
         def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0):
             on_text("answer")
-            return "answer", []
+            return "answer", [], Usage(10, 5)
 
     monkeypatch.setattr(main_mod, "build_llm", lambda *a, **k: object())
     monkeypatch.setattr(main_mod, "build_reranker", lambda *a, **k: object())

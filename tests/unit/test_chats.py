@@ -40,6 +40,28 @@ def test_append_turn_pads_legacy_sessions_without_traces(tmp_path):
     assert len(saved["traces"]) == len(saved["messages"])
 
 
+def test_append_turn_stores_usage_parallel_to_messages(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat = store.create()
+    usage = {"input_tokens": 100, "output_tokens": 20, "latency_ms": 1500}
+    saved = store.append_turn(chat["id"], "hi", "hello", [], [], usage)
+
+    assert saved["usage"] == [None, usage]
+
+
+def test_append_turn_pads_legacy_sessions_without_usage(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat = store.create()
+    # Simulate a pre-usage session: messages present, usage key missing entirely.
+    chat["messages"] = [{"role": "user", "content": "old"}]
+    chat["citations"] = [None]
+    del chat["usage"]
+    store._write(chat)
+
+    saved = store.append_turn(chat["id"], "q", "a", [], [])
+    assert len(saved["usage"]) == len(saved["messages"])
+
+
 def test_delete_and_list_all_sorted_by_updated(tmp_path):
     store = ChatStore(str(tmp_path))
     a = store.append_turn(store.create()["id"], "q", "a", [], [], name="Alpha")

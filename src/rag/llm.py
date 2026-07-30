@@ -19,6 +19,7 @@ import json
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from .config import AnthropicSpec, GeminiSpec, LLMSpec, OpenAISpec, SGLangSpec, VLLMSpec
@@ -27,6 +28,19 @@ from .config import AnthropicSpec, GeminiSpec, LLMSpec, OpenAISpec, SGLangSpec, 
 Tool = dict  # {"name": str, "description": str, "input_schema": dict}
 ToolExecutor = Callable[[str, dict], str]  # (name, args) -> result text
 OnText = Callable[[str], None]  # streamed text / reasoning deltas
+
+
+@dataclass
+class Usage:
+    """Token usage for one `run_tools` call, summed across ReAct rounds.
+
+    `None` means the backend never reported usage for this call (e.g. a local
+    server that ignores `stream_options`) — kept distinct from `0`, which would
+    misleadingly claim a free/zero-token turn.
+    """
+
+    input_tokens: int | None
+    output_tokens: int | None
 
 
 def _api_key(spec: LLMSpec) -> str:
@@ -67,7 +81,7 @@ class LLMBackend(ABC):
         on_text: OnText | None = None,
         on_reasoning: OnText | None = None,
         max_rounds: int = 8,
-    ) -> str: ...
+    ) -> tuple[str, Usage]: ...
 
 
 class AnthropicBackend(LLMBackend):
@@ -102,6 +116,8 @@ class AnthropicBackend(LLMBackend):
         client = self._client()
         convo = [dict(m) for m in messages]
         final_text = ""
+        total_in = 0
+        total_out = 0
         for _ in range(max_rounds):
             text_parts: list[str] = []
             with client.messages.stream(
@@ -122,10 +138,12 @@ class AnthropicBackend(LLMBackend):
                             on_text(event.delta.text)
                 msg = stream.get_final_message()
 
+            total_in += msg.usage.input_tokens
+            total_out += msg.usage.output_tokens
             final_text = "".join(text_parts)
             tool_uses = [b for b in msg.content if b.type == "tool_use"]
             if not tool_uses:
-                return final_text
+                return final_text, Usage(total_in, total_out)
             convo.append({"role": "assistant", "content": msg.content})
             convo.append(
                 {
@@ -140,7 +158,7 @@ class AnthropicBackend(LLMBackend):
                     ],
                 }
             )
-        return final_text
+        return final_text, Usage(total_in, total_out)
 
 
 _THINK_OPEN = "<think>"
@@ -260,6 +278,13 @@ class OpenAICompatBackend(LLMBackend):
         ]
         convo = [{"role": "system", "content": system}] + [dict(m) for m in messages]
         final_text = ""
+        total_in = 0
+        total_out = 0
+        usage_complete = True  # False if any round's server never reports usage
+
+        def usage() -> Usage:
+            return Usage(total_in, total_out) if usage_complete else Usage(None, None)
+
         for _ in range(max_rounds):
             stream = client.chat.completions.create(
                 model=self.spec.model,
@@ -268,12 +293,18 @@ class OpenAICompatBackend(LLMBackend):
                 tools=oai_tools,
                 messages=convo,
                 stream=True,
+                stream_options={"include_usage": True},
             )
             content = ""
             reasoning = ""
             tool_calls: dict[int, dict] = {}
             think_filter = _ThinkTagStripper()
+            round_usage = None
             for chunk in stream:
+                # The usage-only final chunk (when the server honors stream_options)
+                # carries an empty `choices` list — capture it before skipping below.
+                if getattr(chunk, "usage", None):
+                    round_usage = chunk.usage
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
@@ -306,9 +337,15 @@ class OpenAICompatBackend(LLMBackend):
             if reasoning and on_reasoning:
                 on_reasoning(reasoning)
 
+            if round_usage:
+                total_in += round_usage.prompt_tokens
+                total_out += round_usage.completion_tokens
+            else:
+                usage_complete = False
+
             final_text = content
             if not tool_calls:
-                return final_text
+                return final_text, usage()
 
             convo.append(
                 {
@@ -336,7 +373,7 @@ class OpenAICompatBackend(LLMBackend):
                         "content": execute(c["name"], args),
                     }
                 )
-        return final_text
+        return final_text, usage()
 
 
 class VLLMBackend(OpenAICompatBackend):
@@ -456,11 +493,16 @@ class GeminiBackend(LLMBackend):
             for m in messages
         ]
         final_text = ""
+        total_in = 0
+        total_out = 0
         for _ in range(max_rounds):
             text, reasoning, calls = "", "", []
+            round_usage = None
             for chunk in client.models.generate_content_stream(
                 model=self.spec.model, contents=contents, config=cfg
             ):
+                if getattr(chunk, "usage_metadata", None):
+                    round_usage = chunk.usage_metadata
                 for cand in chunk.candidates or []:
                     parts = (cand.content.parts if cand.content else None) or []
                     for part in parts:
@@ -474,9 +516,16 @@ class GeminiBackend(LLMBackend):
                                 on_text(part.text)
             if reasoning and on_reasoning:
                 on_reasoning(reasoning)
+            if round_usage:
+                total_in += round_usage.prompt_token_count or 0
+                # Thinking tokens are billed but reported separately from
+                # candidates_token_count (thinking_config.include_thoughts=True above).
+                total_out += (round_usage.candidates_token_count or 0) + (
+                    getattr(round_usage, "thoughts_token_count", None) or 0
+                )
             final_text = text
             if not calls:
-                return final_text
+                return final_text, Usage(total_in, total_out)
             contents.append(
                 types.Content(role="model", parts=[types.Part(function_call=fc) for fc in calls])
             )
@@ -492,7 +541,7 @@ class GeminiBackend(LLMBackend):
                     ],
                 )
             )
-        return final_text
+        return final_text, Usage(total_in, total_out)
 
 
 def build_llm(spec: LLMSpec) -> LLMBackend:
@@ -536,7 +585,7 @@ def _selftest() -> None:
         print(f"\n[tool call] {name}({args})")
         return "sunny, 25C"
 
-    out = llm.run_tools(
+    text, usage = llm.run_tools(
         system="You are a helpful assistant. Use tools when needed.",
         messages=[
             {"role": "user", "content": "What's the weather in Paris? Use the tool, then answer."}
@@ -545,7 +594,7 @@ def _selftest() -> None:
         execute=execute,
         on_text=lambda t: print(t, end="", flush=True),
     )
-    print(f"\n\n--- final ---\n{out}")
+    print(f"\n\n--- final ---\n{text}\n(usage: {usage})")
 
 
 if __name__ == "__main__":

@@ -45,6 +45,20 @@ describe("chat", () => {
     expect(onDone).toHaveBeenCalledOnce();
   });
 
+  it("parses the usage SSE event", async () => {
+    const sse = 'event: usage\ndata: {"input_tokens":100,"output_tokens":20,"latency_ms":1500}\n\n';
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockStreamResponse(sse)));
+
+    const onUsage = vi.fn();
+    await chat([], [], [], null, { onToken: vi.fn(), onCitations: vi.fn(), onUsage });
+
+    expect(onUsage).toHaveBeenCalledWith({
+      input_tokens: 100,
+      output_tokens: 20,
+      latency_ms: 1500,
+    });
+  });
+
   it("normalizes CRLF frame separators from the sse-starlette server", async () => {
     const sse = "event: token\r\ndata: Hi\r\n\r\n";
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockStreamResponse(sse)));

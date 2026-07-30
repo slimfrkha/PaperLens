@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -189,7 +190,10 @@ def create_app(cfg: Config) -> FastAPI:
                 ref_start = (
                     sum(len(c) for c in existing.get("citations", []) if c) if existing else 0
                 )
-                text, citations = agent.run(
+                # Spans the whole turn (retrieval + rerank + LLM + faithfulness check),
+                # not just LLM think time — that's the wait the user actually feels.
+                t0 = time.perf_counter()
+                text, citations, usage = agent.run(
                     [m.model_dump() for m in req.messages],
                     req.tags,
                     req.papers,
@@ -197,7 +201,14 @@ def create_app(cfg: Config) -> FastAPI:
                     on_trace=on_trace,
                     ref_start=ref_start,
                 )
+                latency_ms = int((time.perf_counter() - t0) * 1000)
+                usage_payload = {
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "latency_ms": latency_ms,
+                }
                 emit("citations", json.dumps(citations))
+                emit("usage", json.dumps(usage_payload))
                 # Persist the turn (append user + assistant) and name new sessions.
                 if req.chat_id and req.messages:
                     name = None
@@ -209,6 +220,7 @@ def create_app(cfg: Config) -> FastAPI:
                         text,
                         citations,
                         trace_entries,
+                        usage_payload,
                         name=name,
                     )
                     emit("meta", json.dumps({"chat_id": saved["id"], "name": saved["name"]}))

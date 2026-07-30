@@ -63,6 +63,12 @@ export interface Feedback {
   note: string | null;
 }
 
+export interface UsageInfo {
+  input_tokens: number | null;
+  output_tokens: number | null;
+  latency_ms: number;
+}
+
 export interface ChatSession {
   id: string;
   name: string;
@@ -70,6 +76,7 @@ export interface ChatSession {
   citations: (Citation[] | null)[];
   traces?: (TraceEntry[] | null)[];
   feedback?: (Feedback | null)[];
+  usage?: (UsageInfo | null)[];
 }
 
 async function j<T>(r: Response): Promise<T> {
@@ -117,11 +124,12 @@ export interface ChatHandlers {
   onCitations: (c: Citation[]) => void;
   onTrace?: (e: TraceEntry) => void;
   onMeta?: (m: { chat_id: string; name: string }) => void;
+  onUsage?: (u: UsageInfo) => void;
   onError?: (e: string) => void;
   onDone?: () => void;
 }
 
-/** POST /api/chat and parse the SSE stream (token / citations / meta / error / done). */
+/** POST /api/chat and parse the SSE stream (token / citations / trace / usage / meta / error / done). */
 export async function chat(
   messages: ChatMessage[],
   tags: string[],
@@ -144,6 +152,7 @@ export async function chat(
     if (event === "token") h.onToken(data);
     else if (event === "citations") h.onCitations(JSON.parse(data) as Citation[]);
     else if (event === "trace") h.onTrace?.(JSON.parse(data) as TraceEntry);
+    else if (event === "usage") h.onUsage?.(JSON.parse(data) as UsageInfo);
     else if (event === "meta") h.onMeta?.(JSON.parse(data));
     else if (event === "error") h.onError?.(data);
     else if (event === "done") h.onDone?.();

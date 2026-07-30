@@ -101,7 +101,7 @@ def test_openai_run_tools_executes_then_answers(monkeypatch):
         executed.append((name, args))
         return "passage r1"
 
-    out = backend.run_tools(
+    out, _usage = backend.run_tools(
         system="sys",
         messages=[{"role": "user", "content": "what is MLA?"}],
         tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
@@ -112,6 +112,64 @@ def test_openai_run_tools_executes_then_answers(monkeypatch):
     assert executed == [("search_papers", {"query": "mla"})]
     assert out == "MLA shrinks the KV cache [r1]."
     assert "".join(texts) == out
+
+
+def _usage_chunk(prompt_tokens, completion_tokens):
+    # The usage-only terminal chunk sent when `stream_options.include_usage` is
+    # honored: no choices, just a cumulative-for-that-call usage object.
+    usage = SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
+    return SimpleNamespace(choices=[], usage=usage)
+
+
+def test_openai_run_tools_sums_usage_across_rounds(monkeypatch):
+    client = _FakeClientSeq(
+        [
+            [
+                _chunk(tool_call=_tool_call(0, "call_1", "search_papers", '{"query": "mla"}')),
+                _usage_chunk(prompt_tokens=100, completion_tokens=10),
+            ],
+            [
+                _chunk(content="Final answer [r1]."),
+                _usage_chunk(prompt_tokens=150, completion_tokens=20),
+            ],
+        ]
+    )
+    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
+    monkeypatch.setattr(backend, "_client", lambda: client)
+
+    out, usage = backend.run_tools(
+        system="sys",
+        messages=[{"role": "user", "content": "what is MLA?"}],
+        tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
+        execute=lambda name, args: "passage r1",
+    )
+
+    assert out == "Final answer [r1]."
+    assert usage.input_tokens == 100 + 150
+    assert usage.output_tokens == 10 + 20
+
+
+def test_openai_run_tools_usage_unknown_when_any_round_omits_it(monkeypatch):
+    # A local server that ignores stream_options never sends the usage chunk —
+    # report the whole call's usage as unknown rather than under-counting.
+    client = _FakeClientSeq(
+        [
+            [_chunk(tool_call=_tool_call(0, "call_1", "search_papers", '{"query": "mla"}'))],
+            [_chunk(content="Final answer [r1]."), _usage_chunk(150, 20)],
+        ]
+    )
+    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
+    monkeypatch.setattr(backend, "_client", lambda: client)
+
+    _out, usage = backend.run_tools(
+        system="sys",
+        messages=[{"role": "user", "content": "what is MLA?"}],
+        tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
+        execute=lambda name, args: "passage r1",
+    )
+
+    assert usage.input_tokens is None
+    assert usage.output_tokens is None
 
 
 # ---- _ThinkTagStripper: direct unit tests (no fake LLM client needed) -------
@@ -181,7 +239,7 @@ def test_think_tag_in_one_chunk(monkeypatch):
     backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
     monkeypatch.setattr(backend, "_client", lambda: client)
     texts, reasonings = [], []
-    out = backend.run_tools(
+    out, _usage = backend.run_tools(
         system="sys",
         messages=[{"role": "user", "content": "q"}],
         tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
@@ -208,7 +266,7 @@ def test_think_tag_split_across_chunks(monkeypatch):
     backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
     monkeypatch.setattr(backend, "_client", lambda: client)
     texts, reasonings = [], []
-    out = backend.run_tools(
+    out, _usage = backend.run_tools(
         system="sys",
         messages=[{"role": "user", "content": "q"}],
         tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
@@ -229,7 +287,7 @@ def test_think_tag_unterminated_at_stream_end(monkeypatch):
     backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
     monkeypatch.setattr(backend, "_client", lambda: client)
     texts, reasonings = [], []
-    out = backend.run_tools(
+    out, _usage = backend.run_tools(
         system="sys",
         messages=[{"role": "user", "content": "q"}],
         tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
@@ -249,7 +307,7 @@ def test_think_tag_mixed_text_before_and_after(monkeypatch):
     backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
     monkeypatch.setattr(backend, "_client", lambda: client)
     texts, reasonings = [], []
-    out = backend.run_tools(
+    out, _usage = backend.run_tools(
         system="sys",
         messages=[{"role": "user", "content": "q"}],
         tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
@@ -266,7 +324,7 @@ def test_no_think_tags_stray_angle_brackets_unaffected(monkeypatch):
     backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
     monkeypatch.setattr(backend, "_client", lambda: client)
     texts, reasonings = [], []
-    out = backend.run_tools(
+    out, _usage = backend.run_tools(
         system="sys",
         messages=[{"role": "user", "content": "q"}],
         tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
@@ -297,7 +355,7 @@ def test_think_tag_in_tool_call_round_not_leaked_into_convo(monkeypatch):
         executed.append((name, args))
         return "passage r1"
 
-    out = backend.run_tools(
+    out, _usage = backend.run_tools(
         system="sys",
         messages=[{"role": "user", "content": "what is MLA?"}],
         tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
@@ -330,6 +388,38 @@ def test_gemini_client_built_lazily(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "k")
     client = GeminiBackend(GeminiSpec())._client()
     assert client is not None
+
+
+def test_gemini_run_tools_folds_thinking_tokens_into_output(monkeypatch):
+    # thinking_config.include_thoughts=True (always on) bills thinking tokens
+    # separately from candidates_token_count — they must still land in output_tokens,
+    # or the one backend with visible chain-of-thought would under-report the most.
+    pytest.importorskip("google.genai")
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+
+    part = SimpleNamespace(function_call=None, thought=False, text="42.")
+    candidate = SimpleNamespace(content=SimpleNamespace(parts=[part]))
+    usage_metadata = SimpleNamespace(
+        prompt_token_count=100, candidates_token_count=5, thoughts_token_count=40
+    )
+    chunk = SimpleNamespace(candidates=[candidate], usage_metadata=usage_metadata)
+
+    class _FakeModels:
+        def generate_content_stream(self, **kwargs):
+            return iter([chunk])
+
+    backend = GeminiBackend(GeminiSpec())
+    monkeypatch.setattr(backend, "_client", lambda: SimpleNamespace(models=_FakeModels()))
+
+    _text, usage = backend.run_tools(
+        system="sys",
+        messages=[{"role": "user", "content": "q"}],
+        tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
+        execute=lambda name, args: "result",
+    )
+
+    assert usage.input_tokens == 100
+    assert usage.output_tokens == 5 + 40
 
 
 def test_client_built_once_and_reused(monkeypatch):

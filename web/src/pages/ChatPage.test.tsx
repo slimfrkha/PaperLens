@@ -59,6 +59,47 @@ describe("ChatPage scroll-to-bottom effect", () => {
   });
 });
 
+describe("ChatPage usage metadata", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("renders token count and latency for a loaded turn", async () => {
+    const sessionWithUsage = {
+      ...chatSession,
+      usage: [{ input_tokens: 100, output_tokens: 20, latency_ms: 1500 }],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        const body =
+          url === "/api/chats/test-id"
+            ? sessionWithUsage
+            : url.startsWith("/api/tags") ||
+                url.startsWith("/api/papers") ||
+                url.startsWith("/api/chats")
+              ? []
+              : {};
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
+      }),
+    );
+
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+
+    await screen.findByText(/regression marker text/i);
+    expect(await screen.findByText("120 tokens · 1.5s")).toBeInTheDocument();
+  });
+});
+
 describe("ChatPage feedback control", () => {
   afterEach(() => {
     vi.unstubAllGlobals();

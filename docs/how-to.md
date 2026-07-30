@@ -278,14 +278,18 @@ concrete backend + one `match` arm.
    class MyBackend(LLMBackend):
        def __init__(self, spec: LLMSpec): ...
        def complete(self, system: str, user: str, *, max_tokens: int) -> str: ...
-       def run_tools(self, *, system, messages, tools, execute, on_text, on_reasoning): ...
+       def run_tools(
+           self, *, system, messages, tools, execute, on_text, on_reasoning
+       ) -> tuple[str, Usage]: ...
 
    # in build_llm(spec):
    #     case MySpec(): return MyBackend(spec)
    ```
 
    Match the method signatures of the existing backends (`AnthropicBackend`,
-   `OpenAICompatBackend`). If the provider speaks the OpenAI wire format, subclass
+   `OpenAICompatBackend`). `run_tools` returns `(text, Usage)` — sum token usage
+   across every ReAct round before returning; `Usage(None, None)` if the provider
+   never reports usage. If the provider speaks the OpenAI wire format, subclass
    `OpenAISpec` / `OpenAICompatBackend` instead (see `VLLMSpec` / `VLLMBackend`).
 
 3. Set `type: myprovider` in a config LLM spec. `build_llm` dispatches on the variant.

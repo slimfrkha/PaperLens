@@ -30,7 +30,7 @@ from rag.config import (
 )
 from rag.faithfulness import FaithfulnessChecker, Verdict
 from rag.index import open_collection
-from rag.llm import LLMBackend
+from rag.llm import LLMBackend, Usage
 
 _EMBED_DIM = 32
 
@@ -75,11 +75,13 @@ class FakeLLM(LLMBackend):
         answer: str = "ok",
         tool_calls: list[tuple[str, dict]] | None = None,
         reasoning: str | None = None,
+        usage: Usage | None = None,
     ) -> None:
         super().__init__(spec or AnthropicSpec())
         self.answer = answer
         self.tool_calls = tool_calls or []
         self.reasoning = reasoning
+        self.usage = usage or Usage(input_tokens=10, output_tokens=5)
         self.complete_calls: list[dict] = []
         self.run_tools_calls: list[dict] = []
         self.executed: list[tuple[str, dict]] = []
@@ -101,7 +103,7 @@ class FakeLLM(LLMBackend):
             execute(name, args)
         if on_text:
             on_text(self.answer)
-        return self.answer
+        return self.answer, self.usage
 
 
 class FakeFaithfulnessChecker(FaithfulnessChecker):

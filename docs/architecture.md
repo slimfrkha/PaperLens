@@ -294,3 +294,5 @@ is documented in `src/rag/__init__.py`. Keeping it acyclic is a maintained invar
   CWD-independent.
 - **SSE streaming.** `/api/chat` streams tokens and trace steps over Server-Sent Events, so
   the UI renders the answer and the Thought → Action → Observation trace as they happen.
+  A final `usage` event carries the turn's token counts (when the LLM backend reports them)
+  and wall-clock latency, shown as a small metadata line under the answer.

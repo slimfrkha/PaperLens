@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from rag.config import HFFaithfulnessCfg
+from rag.llm import Usage
 from rag.manifest import Manifest
 from server.agent import ChatAgent
 
@@ -40,7 +41,7 @@ def test_search_call_builds_citations_and_trace(make_agent, fake_llm):
 
     trace = []
     texts = []
-    text, citations = agent.run(
+    text, citations, _usage = agent.run(
         [{"role": "user", "content": "How does MLA help?"}],
         tags=[],
         papers=[],
@@ -62,11 +63,22 @@ def test_search_call_builds_citations_and_trace(make_agent, fake_llm):
     assert kinds == ["thought", "action", "observation"]
 
 
+def test_run_returns_usage_from_the_llm_backend(make_agent, fake_llm):
+    llm = fake_llm(answer="Hello!", tool_calls=[], usage=Usage(input_tokens=123, output_tokens=45))
+    agent = make_agent(llm)
+
+    _text, _citations, usage = agent.run(
+        [{"role": "user", "content": "hi"}], tags=[], papers=[], on_text=lambda _t: None
+    )
+    assert usage.input_tokens == 123
+    assert usage.output_tokens == 45
+
+
 def test_small_talk_answers_without_searching(make_agent, fake_llm):
     llm = fake_llm(answer="Hello!", tool_calls=[])
     agent = make_agent(llm)
 
-    text, citations = agent.run(
+    text, citations, _usage = agent.run(
         [{"role": "user", "content": "hi"}], tags=[], papers=[], on_text=lambda _t: None
     )
     assert text == "Hello!"
@@ -83,7 +95,7 @@ def test_ref_start_continues_numbering_across_turns(make_agent, fake_llm):
     )
     agent = make_agent(llm)
 
-    _text, citations = agent.run(
+    _text, citations, _usage = agent.run(
         [{"role": "user", "content": "follow-up question"}],
         tags=[],
         papers=[],
@@ -102,7 +114,7 @@ def test_tag_filter_scopes_search_to_matching_papers(make_agent, fake_llm):
     )
     agent = make_agent(llm)
 
-    _text, citations = agent.run(
+    _text, citations, _usage = agent.run(
         [{"role": "user", "content": "training recipe?"}],
         tags=["rl"],
         papers=[],
@@ -120,7 +132,7 @@ def test_paper_filter_scopes_search_to_selected_papers(make_agent, fake_llm):
     )
     agent = make_agent(llm)
 
-    _text, citations = agent.run(
+    _text, citations, _usage = agent.run(
         [{"role": "user", "content": "training?"}],
         tags=[],
         papers=["paper-a"],
@@ -135,7 +147,7 @@ def test_tag_and_paper_filters_intersect(make_agent, fake_llm):
     llm = fake_llm(answer="none", tool_calls=[("search_papers", {"query": "anything"})])
     agent = make_agent(llm)
 
-    _text, citations = agent.run(
+    _text, citations, _usage = agent.run(
         [{"role": "user", "content": "x"}],
         tags=["rl"],
         papers=["paper-a"],
@@ -168,7 +180,7 @@ def test_filter_scopes_the_paper_catalog_in_the_prompt(make_agent, fake_llm):
 def test_empty_query_is_rejected(make_agent, fake_llm):
     llm = fake_llm(answer="done", tool_calls=[("search_papers", {"query": "   "})])
     agent = make_agent(llm)
-    _text, citations = agent.run(
+    _text, citations, _usage = agent.run(
         [{"role": "user", "content": "x"}], tags=[], papers=[], on_text=lambda _t: None
     )
     # Blank query -> no search performed, no citations.
@@ -238,7 +250,7 @@ def test_faithfulness_disabled_by_default_no_verdict_and_checker_not_called(
     agent = make_agent(llm)
     agent.faithfulness = checker  # would be called if enabled — assert it isn't
 
-    _text, citations = agent.run(
+    _text, citations, _usage = agent.run(
         [{"role": "user", "content": "How does MLA help?"}],
         tags=[],
         papers=[],
@@ -258,7 +270,7 @@ def test_faithfulness_check_attaches_verdict_to_cited_ref(
     )
     agent = make_agent(llm, faithfulness=checker)
 
-    _text, citations = agent.run(
+    _text, citations, _usage = agent.run(
         [{"role": "user", "content": "How does MLA help?"}],
         tags=[],
         papers=[],
@@ -289,7 +301,7 @@ def test_faithfulness_skips_refs_never_cited_in_text(
     )
     agent = make_agent(llm, faithfulness=checker)
 
-    _text, citations = agent.run(
+    _text, citations, _usage = agent.run(
         [{"role": "user", "content": "How does MLA help?"}],
         tags=[],
         papers=[],
@@ -309,7 +321,7 @@ def test_faithfulness_ref_cited_twice_gets_two_item_list(
     )
     agent = make_agent(llm, faithfulness=checker)
 
-    _text, citations = agent.run(
+    _text, citations, _usage = agent.run(
         [{"role": "user", "content": "How does MLA help?"}],
         tags=[],
         papers=[],

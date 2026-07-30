@@ -73,7 +73,7 @@ from .faithfulness import (
     build_faithfulness_checker,
 )
 from .index import index_markdown, open_collection
-from .llm import LLMBackend, build_llm
+from .llm import LLMBackend, Usage, build_llm
 from .manifest import Manifest
 from .pipeline import build_embedder_from_config, ingest_paper, pending_papers
 from .query_expansion import generate_paraphrases
@@ -120,6 +120,7 @@ __all__ = [
     "SGLangSpec",
     "Searcher",
     "SparseCfg",
+    "Usage",
     "VLLMSpec",
     "Verdict",
     "best_support",

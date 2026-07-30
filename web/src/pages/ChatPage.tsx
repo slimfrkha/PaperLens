@@ -29,6 +29,7 @@ import {
   type Feedback,
   type TagCount,
   type TraceEntry,
+  type UsageInfo,
 } from "../api";
 import Answer from "../components/Answer";
 import ChatSidebar from "../components/ChatSidebar";
@@ -43,6 +44,7 @@ interface Turn {
   trace?: TraceEntry[];
   streaming?: boolean;
   feedback?: Feedback | null;
+  usage?: UsageInfo;
 }
 
 export default function ChatPage() {
@@ -102,6 +104,7 @@ export default function ChatPage() {
             citations: s.citations?.[i] ?? undefined,
             trace: s.traces?.[i] ?? undefined,
             feedback: s.feedback?.[i] ?? undefined,
+            usage: s.usage?.[i] ?? undefined,
           })),
         );
         // Filters aren't persisted per chat; reset so a reopened chat never shows
@@ -178,6 +181,7 @@ export default function ChatPage() {
         onToken: (tok) => patchLast((t) => ({ ...t, content: t.content + tok })),
         onCitations: (c) => patchLast((t) => ({ ...t, citations: c })),
         onTrace: (e) => patchLast((t) => ({ ...t, trace: [...(t.trace ?? []), e] })),
+        onUsage: (u) => patchLast((t) => ({ ...t, usage: u })),
         onMeta: () => refreshSessions(),
         onError: (e) => patchLast((t) => ({ ...t, content: t.content + `\n\n_Error: ${e}_` })),
         onDone: () => patchLast((t) => ({ ...t, streaming: false })),
@@ -338,6 +342,11 @@ export default function ChatPage() {
                     </Group>
                   ) : null}
                   {!t.streaming && t.citations && <SourceCards citations={t.citations} />}
+                  {!t.streaming && t.usage && (
+                    <Text size="xs" c="dimmed" mt={4}>
+                      {formatUsage(t.usage)}
+                    </Text>
+                  )}
                   {!t.streaming && t.content && chatId && (
                     <FeedbackControl
                       // Scoped to chatId, not just the array index — otherwise switching
@@ -361,6 +370,16 @@ export default function ChatPage() {
       </Stack>
     </Group>
   );
+}
+
+function formatUsage(u: UsageInfo): string {
+  const parts: string[] = [];
+  if (u.input_tokens != null && u.output_tokens != null) {
+    const total = u.input_tokens + u.output_tokens;
+    parts.push(`${total.toLocaleString()} token${total === 1 ? "" : "s"}`);
+  }
+  parts.push(`${(u.latency_ms / 1000).toFixed(1)}s`);
+  return parts.join(" · ");
 }
 
 function EmptyHero() {
