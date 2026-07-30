@@ -325,6 +325,185 @@ def test_screen_retrieval_hybrid_arm_plumbs_through_paired_delta(make_config, se
     assert any("fetch_multiplier" in c for c in report.caveats)
 
 
+# --- Multi-query: build_cache(multi_query_llm=...), score_from_cache(multi_query=True), the
+# "multi_query=on" arm ---
+
+
+def test_build_cache_with_multi_query_preserves_default_arm_exactness(
+    make_searcher, seed_chunks, fake_llm
+):
+    # Same guarantee as the hybrid version above: widening the cache for a multi-query arm
+    # must not change what the *default* (non-multi-query) arm reads back.
+    docs = [
+        seed_chunks("p1", "Method", "latent attention compresses the cache", doc_id="p1-method"),
+        seed_chunks("p1", "Training", "fp8 mixed precision schedule", doc_id="p1-train"),
+        seed_chunks("p2", "Results", "benchmark accuracy evaluation", doc_id="p2-results"),
+    ]
+    ctx = make_searcher(docs)
+    items = [
+        _item("latent attention compresses the cache", "p1", "Method"),
+        _item("fp8 mixed precision schedule", "p1", "Training"),
+    ]
+    llm = fake_llm(answer='["a paraphrase of the query"]')
+    plain = build_cache(ctx.searcher, items, max_candidates=2, reranker=FakeReranker(set()))
+    widened = build_cache(
+        ctx.searcher,
+        items,
+        max_candidates=2,
+        reranker=FakeReranker(set()),
+        multi_query_llm=llm,
+        multi_query_n=1,
+    )
+    assert all(c.variant_candidate_ids for c in widened)  # the whole point of passing multi_query
+    for w, p in zip(widened, plain, strict=True):
+        from_widened = score_from_cache(w, candidates=2, k=5, rerank=False)
+        from_plain = score_from_cache(p, candidates=2, k=5, rerank=False)
+        assert from_widened.candidate_ids == from_plain.candidate_ids
+        assert [cid for cid, _ in from_widened.ranked] == [cid for cid, _ in from_plain.ranked]
+
+
+def test_build_cache_multi_query_uses_its_own_fetch_multiplier(
+    make_searcher, seed_chunks, fake_llm, monkeypatch
+):
+    # Regression: a paraphrase variant's dense fetch must widen by multi_query_fetch_multiplier,
+    # not by fetch_multiplier (sparse's) — reusing the latter silently gives the multi-query arm
+    # zero fusion headroom whenever sparse is None, the common case of screening multi-query
+    # alone. Deliberately mismatched fetch_multiplier=5 vs multi_query_fetch_multiplier=3 to
+    # catch any cross-talk between the two knobs.
+    docs = [seed_chunks("p1", "Method", "alpha beta gamma", doc_id="p1-m")]
+    ctx = make_searcher(docs)
+    llm = fake_llm(answer='["a paraphrase"]')
+    seen_n_results: list[int] = []
+    original_query = ctx.searcher.collection.query
+
+    def spy_query(*args, **kwargs):
+        seen_n_results.append(kwargs["n_results"])
+        return original_query(*args, **kwargs)
+
+    monkeypatch.setattr(ctx.searcher.collection, "query", spy_query)
+
+    build_cache(
+        ctx.searcher,
+        [_item("alpha beta gamma", "p1", "Method")],
+        max_candidates=2,
+        reranker=FakeReranker(set()),
+        fetch_multiplier=5,  # unused here since sparse is None — must not leak into the variant
+        multi_query_llm=llm,
+        multi_query_n=1,
+        multi_query_fetch_multiplier=3,
+    )
+
+    # base query: max_candidates(2), sparse is None so fetch_multiplier doesn't apply.
+    # paraphrase variant: max_candidates(2) * multi_query_fetch_multiplier(3) = 6 — not 2
+    # (no headroom, the bug) and not 10 (fetch_multiplier=5 leaking in).
+    assert seen_n_results == [2, 6]
+
+
+def test_score_from_cache_multi_query_fuses_variant_pools(make_config, seed_chunks, fake_llm):
+    # score_from_cache(multi_query=True) RRF-fuses candidate_ids with every cached
+    # variant_candidate_ids pool, not just the default query's dense pool.
+    from types import SimpleNamespace
+
+    from rag.index import open_collection
+    from rag.search import Searcher
+
+    class _DirectionalEmbedder:
+        """Decouples dense closeness from lexical content, like the hybrid test's, so a
+        multi-query-only hit can be constructed deterministically."""
+
+        def _vec(self, text: str) -> list[float]:
+            return [0.0, 1.0] if "FAR_MARKER" in text else [1.0, 0.0]
+
+        def __call__(self, input: list[str]) -> list[list[float]]:
+            return [self._vec(t) for t in input]
+
+    embedder = _DirectionalEmbedder()
+    cfg = make_config()
+    collection = open_collection(cfg.paths.rag_db, cfg.collection, embedder_name="directional")
+    docs = [
+        seed_chunks("target", "S", "FAR_MARKER zzflorble appears once here", doc_id="p-target"),
+        seed_chunks("near", "S", "zzflorble but embeds near the default query", doc_id="p-near"),
+    ]
+    texts = [text for _, text, _ in docs]
+    collection.upsert(
+        ids=[doc_id for doc_id, _, _ in docs],
+        embeddings=embedder(texts),
+        documents=texts,
+        metadatas=[meta for _, _, meta in docs],
+    )
+    searcher = Searcher(db_dir=cfg.paths.rag_db, collection=cfg.collection, embedder=embedder)
+    ctx = SimpleNamespace(searcher=searcher, cfg=cfg, collection=collection)
+    items = [_item("zzflorble", "target", "S")]
+    llm = fake_llm(answer='["FAR_MARKER zzflorble variant"]')  # embeds toward "target" only
+
+    cache = build_cache(
+        ctx.searcher,
+        items,
+        max_candidates=1,
+        reranker=FakeReranker(set()),
+        multi_query_llm=llm,
+        multi_query_n=1,
+    )[0]
+    assert cache.candidate_ids == ["p-near"]  # dense-only misses "target" entirely at depth 1
+    fused = score_from_cache(cache, candidates=2, k=2, rerank=False, multi_query=True)
+    assert "p-target" in fused.candidate_ids  # RRF-fused in via the paraphrase variant
+
+
+def test_screen_retrieval_multi_query_arm_plumbs_through_paired_delta(
+    monkeypatch, make_config, seed_chunks, fake_llm
+):
+    from types import SimpleNamespace
+
+    from rag.index import open_collection
+    from rag.search import Searcher
+
+    class _DirectionalEmbedder:
+        def _vec(self, text: str) -> list[float]:
+            return [0.0, 1.0] if "FAR_MARKER" in text else [1.0, 0.0]
+
+        def __call__(self, input: list[str]) -> list[list[float]]:
+            return [self._vec(t) for t in input]
+
+    embedder = _DirectionalEmbedder()
+    cfg = make_config()
+    collection = open_collection(cfg.paths.rag_db, cfg.collection, embedder_name="directional")
+    docs = [
+        seed_chunks("target", "S", "FAR_MARKER zzflorble appears once here"),
+        seed_chunks("mid-0", "S", "zzflorble zzflorble zzflorble midtier document"),
+        seed_chunks("mid-1", "S", "zzflorble zzflorble zzflorble another midtier document"),
+        seed_chunks("dis-0", "S", "totally unrelated content number 0"),
+        seed_chunks("dis-1", "S", "totally unrelated content number 1"),
+        seed_chunks("dis-2", "S", "totally unrelated content number 2"),
+        seed_chunks("dis-3", "S", "totally unrelated content number 3"),
+    ]
+    texts = [text for _, text, _ in docs]
+    collection.upsert(
+        ids=[doc_id for doc_id, _, _ in docs],
+        embeddings=embedder(texts),
+        documents=texts,
+        metadatas=[meta for _, _, meta in docs],
+    )
+    searcher = Searcher(db_dir=cfg.paths.rag_db, collection=cfg.collection, embedder=embedder)
+    searcher._reranker = FakeReranker(set())  # the rerank=on toggle arm needs one; no model
+    ctx = SimpleNamespace(searcher=searcher, cfg=cfg, collection=collection)
+
+    # screen_retrieval builds its own LLM client from cfg.llm.chat (`build_llm`) — swap the
+    # import site so the paraphrase call is scripted, not a real network call.
+    llm = fake_llm(answer='["FAR_MARKER zzflorble variant"]')
+    monkeypatch.setattr("eval.optimizer.build_llm", lambda spec: llm)
+
+    cfg.retrieval.candidates = 3
+    cfg.multi_query.n_paraphrases = 1
+    items = [_item("zzflorble", "target", "S")]
+
+    report = screen_retrieval(cfg, items, searcher=ctx.searcher, multi_query=True)
+    labels = [r.arm.label for r in report.results]
+    assert "multi_query=on" in labels
+    mq_result = next(r for r in report.results if r.arm.label == "multi_query=on")
+    assert mq_result.success_delta is not None
+    assert any("multi_query=on" in c for c in report.caveats)
+
+
 # --- Chunking: isolated re-index screen + sweep, offline over a temp Chroma ---------------
 
 # A two-paper pool with numbered sections. Numbered sections are immune to the noise_ratio

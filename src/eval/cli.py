@@ -237,8 +237,10 @@ def cmd_screen(args: argparse.Namespace) -> None:
     print(f"Pool: {len(pool)} papers  fingerprint={fingerprint}  dev={len(items)} questions")
     if args.tier == "retrieval":
         grid = _parse_grid(args.candidates)
-        hybrid_msg = " + hybrid=on" if args.hybrid else ""
-        print(f"Screening retrieval knobs (reranker/candidates{hybrid_msg}) on the dev split...")
+        arm_msg = "".join(
+            [" + hybrid=on" if args.hybrid else "", " + multi_query=on" if args.multi_query else ""]
+        )
+        print(f"Screening retrieval knobs (reranker/candidates{arm_msg}) on the dev split...")
         checkpoint_path = _checkpoint_path(cfg, fingerprint, "screen-retrieval")
         if args.fresh:
             checkpoint_path.unlink(missing_ok=True)
@@ -250,6 +252,7 @@ def cmd_screen(args: argparse.Namespace) -> None:
                     candidate_grid=grid,
                     show_progress=True,
                     hybrid=args.hybrid,
+                    multi_query=args.multi_query,
                     checkpoint_path=checkpoint_path,
                 )
             )
@@ -603,6 +606,14 @@ def main() -> None:
         action="store_true",
         help="--tier retrieval: add a 'hybrid=on' arm (BM25 fused via RRF) — independent of "
         "config.yaml's sparse.enabled, so this is how you measure hybrid before turning it on",
+    )
+    s.add_argument(
+        "--multi-query",
+        action="store_true",
+        help="--tier retrieval: add a 'multi_query=on' arm (llm.chat paraphrases the query, "
+        "every variant's pool RRF-fused) — independent of config.yaml's multi_query.enabled. "
+        "Not free like --hybrid: widens the cache-build pass with one LLM call plus "
+        "n_paraphrases extra dense queries per item",
     )
     s.add_argument(
         "--max-tokens",

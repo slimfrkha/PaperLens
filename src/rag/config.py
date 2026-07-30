@@ -278,6 +278,28 @@ class RetrievalCfg:
 
 
 @dataclass
+class MultiQueryCfg:
+    """Opt-in: paraphrase the query with the chat LLM, search each variant, RRF-fuse.
+
+    Plain dataclass, not a ``ChoiceRegistry`` like ``sparse``/``faithfulness`` — its only
+    pluggable part is which LLM powers it, and that's already a ``ChoiceRegistry`` one
+    level down (``llm.chat``, reused rather than duplicated here)."""
+
+    enabled: bool = False  # opt-in — unproven until screened, like sparse.enabled
+    n_paraphrases: int = 3
+    # Each variant over-fetches fetch_multiplier * candidates before the flat RRF fuse,
+    # independent of sparse.fetch_multiplier — needed even when sparse is off, or the fuse
+    # has no margin to promote a hit ranked just outside one variant's own top-candidates.
+    fetch_multiplier: int = 3
+
+    def __post_init__(self) -> None:
+        if self.n_paraphrases < 1:
+            raise ValueError("multi_query.n_paraphrases must be >= 1")
+        if self.fetch_multiplier < 1:
+            raise ValueError("multi_query.fetch_multiplier must be >= 1")
+
+
+@dataclass
 class TaggerCfg:
     max_tags: int = 12
     min_tags: int = 5
@@ -341,6 +363,7 @@ class Config:
     chunking: ChunkingCfg = field(default_factory=ChunkingCfg)
     extraction: ExtractionCfg = field(default_factory=ExtractionCfg)
     retrieval: RetrievalCfg = field(default_factory=RetrievalCfg)
+    multi_query: MultiQueryCfg = field(default_factory=MultiQueryCfg)
     tagger: TaggerCfg = field(default_factory=TaggerCfg)
     ingestion: IngestionCfg = field(default_factory=IngestionCfg)
     server: ServerCfg = field(default_factory=ServerCfg)

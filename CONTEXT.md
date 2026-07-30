@@ -113,6 +113,23 @@ per ranking `i`, summed over every ranking `d` appears in. `sparse.rrf_k` is the
 - Code: `reciprocal_rank_fusion` / `rrf_scores` in `src/rag/sparse.py`.
 - `_Avoid_:` score fusion, rank merging, ensemble (say "RRF").
 
+### 🌐 Multi-query expansion
+
+Opt-in: `llm.chat` paraphrases the query into `multi_query.n_paraphrases` variants, each
+variant is searched, and every resulting ranking — dense, plus BM25 per variant when
+**hybrid retrieval** is also on — is **RRF**-fused in one flat pass, not a fusion of
+per-variant fusions. Toggled by `multi_query.enabled` (off by default — unproven until
+screened, see [harness](docs/harness.md)'s `--multi-query` screen). A recall boost against
+how a question happens to be phrased; the cost (one extra LLM call plus
+`n_paraphrases` extra retrievals per `search_papers` call) is unconditional, not gated on
+retrieval confidence.
+
+- Code: the `len(variants) > 1` branch in `Searcher.search` (`src/rag/search.py`);
+  `generate_paraphrases` in `src/rag/query_expansion.py`; `MultiQueryCfg` in
+  `src/rag/config.py`.
+- `_Avoid_:` query rewriting, query expansion alone (say "multi-query expansion"), paper
+  voting (that's a different peer repo's design — PaperLens fuses chunks, not papers).
+
 ### 🔎 Searcher
 
 The object that runs two-stage retrieval: dense **embedder** recall of `candidates`, then

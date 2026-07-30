@@ -3,7 +3,10 @@
 Two-stage retrieval:
   1. Dense vector search in Chroma returns the top ``candidates`` chunks. When hybrid sparse
      retrieval is enabled, a BM25 lexical search runs alongside it and the two rankings are
-     fused via reciprocal rank fusion (RRF) before reranking.
+     fused via reciprocal rank fusion (RRF) before reranking. When multi-query expansion is
+     also enabled, the chat LLM paraphrases the query and every variant's dense (+ sparse)
+     ranking is fused into that same flat RRF pass — a recall boost against how a question
+     happens to be phrased, opt-in like hybrid (see ``MultiQueryCfg`` in ``config.py``).
   2. A cross-encoder reranker (default BAAI/bge-reranker-v2-m3, the sibling of
      the bge-m3 embedder) rescores each (query, chunk) pair and keeps the top
      ``k``. Reranking reorders keyword-y matches below the truly relevant ones;
@@ -23,7 +26,10 @@ import textwrap
 from dataclasses import dataclass
 from typing import Any, cast
 
+from .config import AnthropicSpec
 from .embedders import HFEmbedder
+from .llm import LLMBackend, build_llm
+from .query_expansion import generate_paraphrases
 from .reranker import CrossEncoderReranker, Reranker
 from .sparse import BM25Index, build_sparse_index, reciprocal_rank_fusion, rrf_scores
 
@@ -70,8 +76,19 @@ class Searcher:
         rrf_k: int = 60,
         fetch_multiplier: int = 3,
         sparse: BM25Index | None = None,
+        multi_query_enabled: bool = False,
+        multi_query_n: int = 3,
+        multi_query_fetch_multiplier: int = 3,
+        llm: LLMBackend | None = None,
     ):
         import chromadb
+
+        # Multi-query is opt-in with no sane default LLM (unlike reranker/sparse, which
+        # always have a default backend) — require one explicitly rather than lazily
+        # building one, matching build_reranker's check that the `llm` reranker needs an
+        # LLM passed.
+        if multi_query_enabled and llm is None:
+            raise ValueError("multi_query_enabled requires an LLM; pass Searcher(..., llm=...).")
 
         self.device = _pick_device(device)
         # Query embedder: inject one to avoid loading the local model (tests); the
@@ -93,6 +110,10 @@ class Searcher:
         self._fetch_multiplier = fetch_multiplier
         # Inject a BM25Index for tests, or leave None to lazily build/rebuild on first use.
         self._sparse = sparse
+        self.multi_query_enabled = multi_query_enabled
+        self.multi_query_n = multi_query_n
+        self.multi_query_fetch_multiplier = multi_query_fetch_multiplier
+        self.llm = llm
 
     @property
     def reranker(self) -> Reranker:
@@ -116,6 +137,46 @@ class Searcher:
             self._sparse = build_sparse_index(self.collection, k1=self._bm25_k1, b=self._bm25_b)
         return self._sparse
 
+    def _dense_ids(
+        self, query: str, fetch_n: int, where: dict[str, Any] | None
+    ) -> tuple[list[str], dict[str, Result]]:
+        """One query's dense ranking: chunk ids in Chroma's distance order, plus their Results.
+
+        Factored out of ``search`` so multi-query can call it once per paraphrase; the
+        single-query path below is the ``len(variants) == 1`` case of the same call.
+        """
+        # Asymmetric embedders (e.g. Gemini) embed queries differently from docs;
+        # symmetric ones fall through to __call__.
+        embed_query = getattr(self.embedder, "embed_query", None)
+        qvec = embed_query([query]) if embed_query else self.embedder([query])
+        # Chroma's type stubs narrow query_embeddings/results more tightly than
+        # runtime accepts; the include= keys are always present and non-None here.
+        res = cast(
+            dict[str, Any],
+            self.collection.query(
+                query_embeddings=qvec,  # ty: ignore[invalid-argument-type]  # list invariance vs Chroma's Sequence param
+                n_results=fetch_n,
+                where=where,
+                include=["documents", "metadatas", "distances"],
+            ),
+        )
+        dense_ids = res["ids"][0]
+        docs = res["documents"][0]
+        metas = res["metadatas"][0]
+        dists = res["distances"][0]
+        by_id = {
+            cid: Result(
+                score=1 - d,  # cosine distance -> similarity
+                paper_id=m["paper_id"],
+                breadcrumb=m["breadcrumb"],
+                section_title=m["section_title"],
+                text=doc,
+                body=m["body"],
+            )
+            for cid, doc, m, d in zip(dense_ids, docs, metas, dists, strict=True)
+        }
+        return dense_ids, by_id
+
     def search(
         self,
         query: str,
@@ -133,72 +194,107 @@ class Searcher:
         if ids is not None and len(ids) == 0:
             return []
         where = {"paper_id": {"$in": ids}} if ids is not None else None
+        allowed = set(ids) if ids is not None else None
 
-        # Asymmetric embedders (e.g. Gemini) embed queries differently from docs;
-        # symmetric ones fall through to __call__.
-        embed_query = getattr(self.embedder, "embed_query", None)
-        qvec = embed_query([query]) if embed_query else self.embedder([query])
+        variants = [query]
+        if self.multi_query_enabled:
+            assert self.llm is not None  # enforced at construction
+            variants += generate_paraphrases(query, self.llm, n=self.multi_query_n)
 
-        # Fusion breadth: when hybrid is on, both sides over-fetch fetch_multiplier * candidates
-        # before RRF-fusing, so fusion has margin to promote a sparse-only hit that dense ranked
-        # outside its own top-`candidates` — the final truncation to `candidates` happens after
-        # fusion, not before, so downstream (rerank, k) sees the same pool shape either way.
-        fetch_n = candidates * self._fetch_multiplier if self.sparse_enabled else candidates
-        # Chroma's type stubs narrow query_embeddings/results more tightly than
-        # runtime accepts; the include= keys are always present and non-None here.
-        res = cast(
-            dict[str, Any],
-            self.collection.query(
-                query_embeddings=qvec,  # ty: ignore[invalid-argument-type]  # list invariance vs Chroma's Sequence param
-                n_results=fetch_n,
-                where=where,
-                include=["documents", "metadatas", "distances"],
-            ),
-        )
-        dense_ids = res["ids"][0]
-        docs = res["documents"][0]
-        metas = res["metadatas"][0]
-        dists = res["distances"][0]
-        if not dense_ids:
-            return []
+        if len(variants) == 1:
+            # Fusion breadth: when hybrid is on, both sides over-fetch fetch_multiplier * candidates
+            # before RRF-fusing, so fusion has margin to promote a sparse-only hit that dense ranked
+            # outside its own top-`candidates` — the final truncation to `candidates` happens after
+            # fusion, not before, so downstream (rerank, k) sees the same pool shape either way.
+            fetch_n = candidates * self._fetch_multiplier if self.sparse_enabled else candidates
+            dense_ids, by_id = self._dense_ids(query, fetch_n, where)
+            if not dense_ids:
+                return []
 
-        by_id = {
-            cid: Result(
-                score=1 - d,  # cosine distance -> similarity
-                paper_id=m["paper_id"],
-                breadcrumb=m["breadcrumb"],
-                section_title=m["section_title"],
-                text=doc,
-                body=m["body"],
-            )
-            for cid, doc, m, d in zip(dense_ids, docs, metas, dists, strict=True)
-        }
-
-        if self.sparse_enabled:
-            allowed = set(ids) if ids is not None else None
-            sparse_ids = self.sparse.search(query, n=fetch_n, allowed_ids=allowed)
-            dense_set = set(dense_ids)
-            sparse_set = set(sparse_ids)
-            fused_ids = reciprocal_rank_fusion([dense_ids, sparse_ids], k=self._rrf_k)[:candidates]
-            missing = [cid for cid in fused_ids if cid not in by_id]
-            if missing:
-                got = cast(
-                    dict[str, Any],
-                    self.collection.get(ids=missing, include=["documents", "metadatas"]),
-                )
-                for cid, doc, m in zip(got["ids"], got["documents"], got["metadatas"], strict=True):
-                    by_id[cid] = Result(
-                        score=0.0,
-                        paper_id=m["paper_id"],
-                        breadcrumb=m["breadcrumb"],
-                        section_title=m["section_title"],
-                        text=doc,
-                        body=m["body"],
+            if self.sparse_enabled:
+                sparse_ids = self.sparse.search(query, n=fetch_n, allowed_ids=allowed)
+                dense_set = set(dense_ids)
+                sparse_set = set(sparse_ids)
+                fused_ids = reciprocal_rank_fusion([dense_ids, sparse_ids], k=self._rrf_k)[
+                    :candidates
+                ]
+                missing = [cid for cid in fused_ids if cid not in by_id]
+                if missing:
+                    got = cast(
+                        dict[str, Any],
+                        self.collection.get(ids=missing, include=["documents", "metadatas"]),
                     )
-            # RRF score uniformly across the whole fused set — don't mix cosine similarity and
-            # RRF scales (Result.score's docstring covers this: "rerank score if reranked, else
-            # cosine similarity" stops being true for a hybrid+no-rerank query).
-            scores = rrf_scores([dense_ids, sparse_ids], k=self._rrf_k)
+                    for cid, doc, m in zip(
+                        got["ids"], got["documents"], got["metadatas"], strict=True
+                    ):
+                        by_id[cid] = Result(
+                            score=0.0,
+                            paper_id=m["paper_id"],
+                            breadcrumb=m["breadcrumb"],
+                            section_title=m["section_title"],
+                            text=doc,
+                            body=m["body"],
+                        )
+                # RRF score uniformly across the whole fused set — don't mix cosine similarity and
+                # RRF scales (Result.score's docstring covers this: "rerank score if reranked, else
+                # cosine similarity" stops being true for a hybrid+no-rerank query).
+                scores = rrf_scores([dense_ids, sparse_ids], k=self._rrf_k)
+                for cid in fused_ids:
+                    by_id[cid].score = scores[cid]
+                    in_dense, in_sparse = cid in dense_set, cid in sparse_set
+                    by_id[cid].source = (
+                        "both" if in_dense and in_sparse else "sparse" if in_sparse else "dense"
+                    )
+                results = [by_id[cid] for cid in fused_ids]
+            else:
+                results = list(by_id.values())
+        else:
+            # Multi-query: one flat RRF pass over every ranking from every variant at once —
+            # dense_v1, sparse_v1, dense_v2, sparse_v2, ... — not a fusion of per-variant
+            # fusions. RRF is already generalized to N rankings, so nesting two RRF passes
+            # (fuse dense+sparse per variant, then fuse those fused results again) would
+            # double-apply its rank-decay to evidence that already went through one fusion
+            # round, with no clean interpretation of what that compounding means.
+            # `multi_query_fetch_multiplier` governs over-fetch depth for every ranking here
+            # (both a variant's dense and its sparse query), deliberately independent of
+            # `sparse.fetch_multiplier` — needed even when hybrid is off, or the fuse has no
+            # margin to promote a hit ranked just outside one variant's own top-`candidates`.
+            variant_fetch_n = candidates * self.multi_query_fetch_multiplier
+            rankings: list[list[str]] = []
+            dense_ids_all: list[str] = []
+            sparse_ids_all: list[str] = []
+            by_id = {}
+            for v in variants:
+                dense_ids_v, by_id_v = self._dense_ids(v, variant_fetch_n, where)
+                for cid, r in by_id_v.items():
+                    by_id.setdefault(cid, r)
+                rankings.append(dense_ids_v)
+                dense_ids_all += dense_ids_v
+                if self.sparse_enabled:
+                    sparse_ids_v = self.sparse.search(v, n=variant_fetch_n, allowed_ids=allowed)
+                    rankings.append(sparse_ids_v)
+                    sparse_ids_all += sparse_ids_v
+                    missing = [cid for cid in sparse_ids_v if cid not in by_id]
+                    if missing:
+                        got = cast(
+                            dict[str, Any],
+                            self.collection.get(ids=missing, include=["documents", "metadatas"]),
+                        )
+                        for cid, doc, m in zip(
+                            got["ids"], got["documents"], got["metadatas"], strict=True
+                        ):
+                            by_id[cid] = Result(
+                                score=0.0,
+                                paper_id=m["paper_id"],
+                                breadcrumb=m["breadcrumb"],
+                                section_title=m["section_title"],
+                                text=doc,
+                                body=m["body"],
+                            )
+            fused_ids = reciprocal_rank_fusion(rankings, k=self._rrf_k)[:candidates]
+            scores = rrf_scores(rankings, k=self._rrf_k)
+            dense_set = set(dense_ids_all)
+            sparse_set = set(sparse_ids_all)
             for cid in fused_ids:
                 by_id[cid].score = scores[cid]
                 in_dense, in_sparse = cid in dense_set, cid in sparse_set
@@ -206,8 +302,6 @@ class Searcher:
                     "both" if in_dense and in_sparse else "sparse" if in_sparse else "dense"
                 )
             results = [by_id[cid] for cid in fused_ids]
-        else:
-            results = list(by_id.values())
 
         if rerank:
             try:
@@ -253,6 +347,15 @@ def main() -> None:
         default=False,
         help="fuse in BM25 lexical search (hybrid); --no-sparse is dense-only (default)",
     )
+    p.add_argument(
+        "--multi-query",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="paraphrase the query with the chat LLM and RRF-fuse each variant's results",
+    )
+    p.add_argument(
+        "--multi-query-n", type=int, default=3, help="paraphrases to generate (--multi-query only)"
+    )
     args = p.parse_args()
 
     searcher = Searcher(
@@ -262,6 +365,9 @@ def main() -> None:
         query_prefix=args.query_prefix,
         reranker_model=args.reranker,
         sparse_enabled=args.sparse,
+        multi_query_enabled=args.multi_query,
+        multi_query_n=args.multi_query_n,
+        llm=build_llm(AnthropicSpec()) if args.multi_query else None,
     )
     results = searcher.search(
         args.query,
@@ -272,6 +378,7 @@ def main() -> None:
     )
 
     mode = "hybrid" if searcher.sparse_enabled else "vector"
+    mode = f"{mode}+multi-query" if searcher.multi_query_enabled else mode
     tag = mode if args.no_rerank else f"{mode}+rerank"
     print(f"\nQ: {args.query}   [{tag}, top {args.k} of {args.candidates} candidates]")
     for r in results:

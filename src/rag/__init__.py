@@ -10,7 +10,9 @@ Module layering — imports flow one way (top -> bottom); there are no cycles::
        |        |         |         |        |
     embedders(config)   llm(config)   index(chunking, embedders)   reranker(config, llm)
        |                                              |
-    tagger(llm)   search(embedders, reranker, sparse)   pipeline(extract, index, manifest, tagger)
+    tagger(llm)   query_expansion(llm)   search(embedders, reranker, sparse, query_expansion)
+                              |                        |
+                         pipeline(extract, index, manifest, tagger)
                               |
                          ingest(pipeline, index, manifest, tagger)
 
@@ -43,6 +45,7 @@ from .config import (
     LLMCfg,
     LLMRerankerCfg,
     LLMSpec,
+    MultiQueryCfg,
     OllamaEmbeddingCfg,
     OpenAIEmbeddingCfg,
     OpenAISpec,
@@ -73,6 +76,7 @@ from .index import index_markdown, open_collection
 from .llm import LLMBackend, build_llm
 from .manifest import Manifest
 from .pipeline import build_embedder_from_config, ingest_paper, pending_papers
+from .query_expansion import generate_paraphrases
 from .reranker import Reranker, build_reranker
 from .search import Result, Searcher
 from .sparse import BM25Index, build_sparse_index, reciprocal_rank_fusion, rrf_scores
@@ -103,6 +107,7 @@ __all__ = [
     "LLMRerankerCfg",
     "LLMSpec",
     "Manifest",
+    "MultiQueryCfg",
     "OllamaEmbedder",
     "OllamaEmbeddingCfg",
     "OpenAIEmbedder",
@@ -125,6 +130,7 @@ __all__ = [
     "build_reranker",
     "build_sparse_index",
     "chunk_markdown",
+    "generate_paraphrases",
     "generate_tags",
     "index_markdown",
     "ingest_paper",

@@ -33,7 +33,8 @@ from tqdm import tqdm
 
 from rag.config import BM25Cfg, ChunkingCfg, Config, LLMRerankerCfg
 from rag.embedders import build_embedder
-from rag.llm import build_llm
+from rag.llm import LLMBackend, build_llm
+from rag.query_expansion import generate_paraphrases
 from rag.reranker import Reranker, build_reranker
 from rag.search import Searcher
 from rag.sparse import BM25Index, build_sparse_index, reciprocal_rank_fusion
@@ -81,12 +82,14 @@ DEFAULT_MAX_TOKENS_GRID = [256, 512, 1024]  # chunking re-index axis of the swee
 
 @dataclass
 class Arm:
-    """One config point in the screen: a candidates depth, a reranker on/off, and hybrid on/off."""
+    """One config point in the screen: a candidates depth, a reranker on/off, hybrid on/off,
+    and multi-query on/off."""
 
     label: str
     candidates: int
     rerank: bool
     sparse: bool = False
+    multi_query: bool = False
 
 
 @dataclass
@@ -96,9 +99,13 @@ class QueryCache:
     ``candidate_ids`` is the dense pool ordered by ascending cosine distance (Chroma's own
     order) at ``max(grid)`` depth (or ``max(grid) * fetch_multiplier`` when a hybrid arm widened
     it — see :func:`build_cache`); ``rerank_scores`` maps each of those ids, plus every id in
-    ``sparse_ids``, to its cross-encoder score over the full unioned pool; ``relevant_ids`` is
-    the gold-section set. ``sparse_ids`` is the BM25 pool at the same depth, empty when no
-    ``sparse`` index was passed to :func:`build_cache`.
+    ``sparse_ids`` and every id in ``variant_candidate_ids``, to its cross-encoder score over the
+    full unioned pool; ``relevant_ids`` is the gold-section set. ``sparse_ids`` is the BM25 pool
+    at the same depth, empty when no ``sparse`` index was passed to :func:`build_cache``.
+    ``variant_candidate_ids`` is one dense pool per LLM-generated paraphrase (empty when
+    multi-query wasn't requested for this cache build) — unlike ``sparse_ids``, this needs a
+    fresh embedding + Chroma query per paraphrase, so it isn't free the way hybrid's BM25 pool
+    is; see the ``multi_query_llm``/``multi_query_n`` cost note on :func:`build_cache`.
     """
 
     qid: str
@@ -107,6 +114,7 @@ class QueryCache:
     rerank_scores: dict[str, float]
     relevant_ids: set[str]
     sparse_ids: list[str] = field(default_factory=list)
+    variant_candidate_ids: list[list[str]] = field(default_factory=list)
 
 
 @dataclass
@@ -142,6 +150,7 @@ def _query_cache_to_record(cache: QueryCache) -> dict[str, Any]:
         "rerank_scores": cache.rerank_scores,
         "relevant_ids": sorted(cache.relevant_ids),
         "sparse_ids": cache.sparse_ids,
+        "variant_candidate_ids": cache.variant_candidate_ids,
     }
 
 
@@ -153,17 +162,26 @@ def _query_cache_from_record(qid: str, record: dict[str, Any]) -> QueryCache:
         rerank_scores=record["rerank_scores"],
         relevant_ids=set(record["relevant_ids"]),
         sparse_ids=record["sparse_ids"],
+        variant_candidate_ids=record["variant_candidate_ids"],
     )
 
 
 def _build_cache_header(
-    max_candidates: int, *, hybrid: bool, fetch_multiplier: int, index_count: int | None
+    max_candidates: int,
+    *,
+    hybrid: bool,
+    fetch_multiplier: int,
+    index_count: int | None,
+    multi_query_n: int = 0,
+    multi_query_fetch_multiplier: int = 3,
 ) -> dict[str, Any]:
     return {
         "max_candidates": max_candidates,
         "hybrid": hybrid,
         "fetch_multiplier": fetch_multiplier,
         "index_count": index_count,
+        "multi_query_n": multi_query_n,
+        "multi_query_fetch_multiplier": multi_query_fetch_multiplier,
     }
 
 
@@ -179,6 +197,9 @@ def build_cache(
     checkpoint_path: Path | None = None,
     index_count: int | None = None,
     checkpoint_finish: bool = True,
+    multi_query_llm: LLMBackend | None = None,
+    multi_query_n: int = 0,
+    multi_query_fetch_multiplier: int = 3,
 ) -> list[QueryCache]:
     """Retrieve once per query and score the pool with ``reranker``.
 
@@ -195,6 +216,20 @@ def build_cache(
     ``items`` (this is the one expensive pass every retrieval arm derives from); ``None``
     (offline tests) runs silent.
 
+    ``multi_query_llm``/``multi_query_n``/``multi_query_fetch_multiplier`` add multi-query
+    expansion to the cache build: when ``multi_query_n > 0``, each item gets one extra LLM call
+    (paraphrase generation) plus one extra dense query (+ one extra BM25 query when ``sparse`` is
+    also given) per paraphrase, at ``max_candidates * multi_query_fetch_multiplier`` depth —
+    deliberately its **own** multiplier, independent of ``fetch_multiplier`` (sparse's), mirroring
+    ``Searcher.search``'s own ``multi_query_fetch_multiplier``. Reusing ``fetch_multiplier`` here
+    would silently give the multi-query arm zero fusion headroom whenever ``sparse`` is ``None``
+    (the common case — screening multi-query without also screening hybrid), understating its
+    real recall lift relative to what production would deliver. Unlike hybrid's BM25 pool, this
+    widening is genuinely NOT free (each paraphrase needs its own embedding), so it's costed
+    explicitly here rather than folded silently into every screen run. Every variant's ids that
+    aren't already in the union get backfilled and reranked too, so ``score_from_cache``'s
+    ``multi_query`` fuse always has a rerank score for whatever it selects.
+
     ``checkpoint_path`` makes this resumable — same pattern as ``harness.score_items``: each
     ``QueryCache`` is appended (flushed) the moment it's computed. ``index_count`` is folded
     into the header as the same index-identity trip-wire ``score_items`` uses — pass
@@ -207,6 +242,10 @@ def build_cache(
     cleanup until *all* of them are done, not just this one.
     """
     fetch_n = max_candidates * fetch_multiplier if sparse is not None else max_candidates
+    # Independent of fetch_n/fetch_multiplier (sparse's) — a variant's own multiplier, so the
+    # multi-query arm gets fusion headroom even when sparse is None (screening multi-query
+    # alone, the common case), mirroring Searcher.search's multi_query_fetch_multiplier.
+    variant_fetch_n = max_candidates * multi_query_fetch_multiplier
     done: dict[str, dict[str, Any]] = {}
     writer: CheckpointWriter | None = None
     if checkpoint_path is not None:
@@ -215,6 +254,8 @@ def build_cache(
             hybrid=sparse is not None,
             fetch_multiplier=fetch_multiplier,
             index_count=index_count,
+            multi_query_n=multi_query_n,
+            multi_query_fetch_multiplier=multi_query_fetch_multiplier,
         )
         done = resume_units(checkpoint_path, header)
         writer = CheckpointWriter(checkpoint_path, header)
@@ -247,6 +288,42 @@ def build_cache(
             got = cast(dict[str, Any], searcher.collection.get(ids=missing, include=["documents"]))
             union_ids.extend(got["ids"])
             union_docs.extend(got["documents"])
+
+        variant_candidate_ids: list[list[str]] = []
+        if multi_query_n > 0:
+            assert multi_query_llm is not None  # enforced by the caller (screen_retrieval)
+            for variant in generate_paraphrases(it.query, multi_query_llm, n=multi_query_n):
+                v_qvec = embed_query([variant]) if embed_query else searcher.embedder([variant])
+                v_res = cast(
+                    dict[str, Any],
+                    searcher.collection.query(
+                        query_embeddings=v_qvec,  # ty: ignore[invalid-argument-type]
+                        n_results=variant_fetch_n,
+                        include=["documents"],
+                    ),
+                )
+                v_ids: list[str] = v_res["ids"][0]
+                variant_candidate_ids.append(v_ids)
+                v_missing = [cid for cid in v_ids if cid not in union_ids]
+                if v_missing:
+                    got = cast(
+                        dict[str, Any],
+                        searcher.collection.get(ids=v_missing, include=["documents"]),
+                    )
+                    union_ids.extend(got["ids"])
+                    union_docs.extend(got["documents"])
+                if sparse is not None:
+                    v_sparse_ids = sparse.search(variant, n=variant_fetch_n)
+                    variant_candidate_ids.append(v_sparse_ids)
+                    vs_missing = [cid for cid in v_sparse_ids if cid not in union_ids]
+                    if vs_missing:
+                        got = cast(
+                            dict[str, Any],
+                            searcher.collection.get(ids=vs_missing, include=["documents"]),
+                        )
+                        union_ids.extend(got["ids"])
+                        union_docs.extend(got["documents"])
+
         scores = reranker.score(it.query, union_docs) if union_ids else []
         cache = QueryCache(
             qid=qid,
@@ -257,6 +334,7 @@ def build_cache(
                 searcher.collection, it.paper_id, it.section_number, it.section_title
             ),
             sparse_ids=sparse_ids,
+            variant_candidate_ids=variant_candidate_ids,
         )
         caches.append(cache)
         if writer is not None:
@@ -278,17 +356,32 @@ def score_from_cache(
     sparse: bool = False,
     rrf_k: int = 60,
     fetch_multiplier: int = 3,
+    multi_query: bool = False,
+    multi_query_fetch_multiplier: int = 3,
 ) -> QueryScore:
     """Derive one arm's :class:`QueryScore` by slicing the cache — no retrieval.
 
-    Non-hybrid arms (the default and every existing OFAT arm) slice the dense pool to
-    top-``candidates`` — unaffected by whether the cache was built wide for a hybrid arm
-    elsewhere, since list slicing truncates the same either way. Hybrid arms RRF-fuse an
-    over-fetched slice of both pools first — the same over-fetch-then-truncate shape
+    Non-hybrid, non-multi-query arms (the default and every existing OFAT arm) slice the dense
+    pool to top-``candidates`` — unaffected by whether the cache was built wide for a hybrid or
+    multi-query arm elsewhere, since list slicing truncates the same either way. Hybrid arms
+    RRF-fuse an over-fetched slice of both pools first — the same over-fetch-then-truncate shape
     ``Searcher.search`` uses — then either sort the fused pool by cached rerank score (on) or
-    keep fused order (off), and take the top ``k``.
+    keep fused order (off), and take the top ``k``. ``multi_query`` does the same, but as one
+    flat RRF pass over the default pool plus every cached paraphrase-variant pool at once —
+    mirroring ``Searcher.search``'s own flat fuse over all variants, not a fusion of per-variant
+    fusions — using ``multi_query_fetch_multiplier``, its own knob, **not** ``fetch_multiplier``
+    (sparse's): reusing the latter would give the multi-query arm zero fusion headroom whenever
+    ``sparse`` is off. Mutually exclusive with ``sparse`` in this screen (each is its own OFAT
+    arm); if both were somehow requested together, ``multi_query`` wins since its fuse already
+    includes the default pool.
     """
-    if sparse:
+    if multi_query:
+        fetch_n = candidates * multi_query_fetch_multiplier
+        rankings = [cache.candidate_ids[:fetch_n]] + [
+            v[:fetch_n] for v in cache.variant_candidate_ids
+        ]
+        cand = reciprocal_rank_fusion(rankings, k=rrf_k)[:candidates]
+    elif sparse:
         fetch_n = candidates * fetch_multiplier
         cand = reciprocal_rank_fusion(
             [cache.candidate_ids[:fetch_n], cache.sparse_ids[:fetch_n]], k=rrf_k
@@ -331,6 +424,7 @@ def screen_retrieval(
     searcher: Searcher | None = None,
     show_progress: bool = False,
     hybrid: bool = False,
+    multi_query: bool = False,
     checkpoint_path: Path | None = None,
 ) -> ScreenReport:
     """Screen reranker on/off and candidates depth over the loaded pool, paired vs default.
@@ -341,9 +435,14 @@ def screen_retrieval(
     into the default arm's candidates/rerank settings — gated on this explicit flag, **not** on
     ``cfg.sparse.enabled``: the harness's whole purpose is proposing config changes before
     they're committed, so requiring ``sparse.enabled: true`` first would make it impossible to
-    measure the one case that matters (deciding whether to turn it on). ``checkpoint_path`` is
-    threaded straight through to :func:`build_cache` — every arm derived from that cache is
-    free, so only the cache-build pass itself needs to be resumable.
+    measure the one case that matters (deciding whether to turn it on). ``multi_query`` adds
+    ``"multi_query=on"`` the same way, gated on this flag rather than ``cfg.multi_query.enabled``
+    — but unlike ``hybrid``, it is NOT free: each paraphrase needs a fresh embedding, so it
+    widens the cache-build pass itself (one LLM call plus ``cfg.multi_query.n_paraphrases`` extra
+    dense queries per item) rather than being a free re-slice of an already-cached pool — see
+    :func:`build_cache`. ``checkpoint_path`` is threaded straight through to :func:`build_cache`
+    — every arm derived from that cache is free, so only the cache-build pass itself needs to be
+    resumable.
     """
     searcher = searcher or build_searcher(cfg)
     grid = candidate_grid or DEFAULT_CANDIDATE_GRID
@@ -364,6 +463,20 @@ def screen_retrieval(
             "the 10-100 range; fetch_multiplier's shipped default, 3, is the "
             "peer-implementation reference value, not something screened here)"
         )
+    multi_query_llm: LLMBackend | None = None
+    multi_query_n = 0
+    multi_query_fetch_multiplier = cfg.multi_query.fetch_multiplier
+    if multi_query:
+        c0, r0 = cfg.retrieval.candidates, cfg.reranker.enabled
+        arms = [*arms, Arm(label="multi_query=on", candidates=c0, rerank=r0, multi_query=True)]
+        multi_query_llm = build_llm(cfg.llm.chat)
+        multi_query_n = cfg.multi_query.n_paraphrases
+        caveats.append(
+            f"multi_query=on generates {multi_query_n} paraphrases per query via llm.chat and "
+            "widens the cache-build pass accordingly — one extra LLM call plus "
+            f"{multi_query_n} extra dense queries per item, unlike hybrid=on's free re-slice of "
+            "an already-cached pool"
+        )
     max_candidates = max(a.candidates for a in arms)
     # Reach past Searcher's public `.reranker` property on purpose: that property lazily builds
     # the default hf cross-encoder, which is the WRONG reranker for an `llm`-type config.
@@ -380,6 +493,9 @@ def screen_retrieval(
         fetch_multiplier=fetch_multiplier,
         checkpoint_path=checkpoint_path,
         index_count=searcher.collection.count() if checkpoint_path is not None else None,
+        multi_query_llm=multi_query_llm,
+        multi_query_n=multi_query_n,
+        multi_query_fetch_multiplier=multi_query_fetch_multiplier,
     )
 
     def arm_scores(arm: Arm) -> list[QueryScore]:
@@ -392,6 +508,8 @@ def screen_retrieval(
                 sparse=arm.sparse,
                 rrf_k=rrf_k,
                 fetch_multiplier=fetch_multiplier,
+                multi_query=arm.multi_query,
+                multi_query_fetch_multiplier=multi_query_fetch_multiplier,
             )
             for c in cache
         ]

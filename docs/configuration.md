@@ -207,6 +207,25 @@ Shapes the agentic search loop. The chat model can still request a different `to
 | `candidates` | int | `20` | Dense-recall pool size handed to the reranker. This is a **floor**: a larger `top_k` scales the pool to `4 × top_k`, so the reranker always has candidates to discard rather than merely reordering what dense recall returned. |
 | `max_rounds` | int | `8` | How many search/answer ReAct cycles the agent gets before it must answer. |
 
+### 🔀 `multi_query`
+
+Opt-in multi-query expansion: `llm.chat` paraphrases the query, each variant is searched,
+and every resulting ranking (dense, plus sparse per variant when `sparse.enabled` too) is
+RRF-fused together in one flat pass — the same primitive `sparse` uses, generalized across
+query variants instead of retrieval systems. No new LLM config — it reuses `llm.chat` (the
+same client the `llm` reranker already reuses). The cost is **unconditional**: once
+enabled, every `search_papers` call pays one extra LLM completion plus
+`n_paraphrases` extra embed+Chroma round-trips, with no confidence gating — there's no
+"only fan out if the first pass looks weak." `enabled` defaults to `false`, like
+`sparse.enabled` — unproven until screened with `paperlens-eval screen --multi-query`
+(see [harness](harness.md)).
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `false` | Turn multi-query expansion on/off. |
+| `n_paraphrases` | int | `3` | Paraphrases requested per query. Must be `>= 1`. |
+| `fetch_multiplier` | int | `3` | Each variant (dense, plus sparse if hybrid is also on) over-fetches `fetch_multiplier × candidates` before the flat RRF fuse — independent of `sparse.fetch_multiplier`, so multi-query has fusion headroom even when hybrid is off. Must be `>= 1`. |
+
 ### 🏷️ `tagger`
 
 Shapes the prompt `generate_tags` sends to `llm.tagging` — the model itself is configured

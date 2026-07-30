@@ -47,6 +47,9 @@ def create_app(cfg: Config) -> FastAPI:
         if lazy["agent"] is None:
             with lazy_lock:
                 if lazy["agent"] is None:
+                    # Reused for both the reranker (if `llm` type) and multi-query
+                    # paraphrase generation — one client, not two.
+                    chat_llm = build_llm(cfg.llm.chat)
                     searcher = Searcher(
                         db_dir=cfg.paths.rag_db,
                         collection=cfg.collection,
@@ -54,12 +57,16 @@ def create_app(cfg: Config) -> FastAPI:
                         query_prefix=cfg.embedding.query_prefix
                         if isinstance(cfg.embedding, HFEmbeddingCfg)
                         else "",
-                        reranker=build_reranker(cfg.reranker, llm=build_llm(cfg.llm.chat)),
+                        reranker=build_reranker(cfg.reranker, llm=chat_llm),
                         sparse_enabled=cfg.sparse.enabled,
                         bm25_k1=cfg.sparse.k1 if isinstance(cfg.sparse, BM25Cfg) else 1.5,
                         bm25_b=cfg.sparse.b if isinstance(cfg.sparse, BM25Cfg) else 0.75,
                         rrf_k=cfg.sparse.rrf_k,
                         fetch_multiplier=cfg.sparse.fetch_multiplier,
+                        multi_query_enabled=cfg.multi_query.enabled,
+                        multi_query_n=cfg.multi_query.n_paraphrases,
+                        multi_query_fetch_multiplier=cfg.multi_query.fetch_multiplier,
+                        llm=chat_llm,
                     )
                     lazy["agent"] = ChatAgent(cfg, searcher, manifest)
         return lazy["agent"]
