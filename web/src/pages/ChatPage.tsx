@@ -22,14 +22,17 @@ import {
   getPapers,
   getTags,
   listChats,
+  setFeedback,
   type ChatMessage,
   type ChatSummary,
   type Citation,
+  type Feedback,
   type TagCount,
   type TraceEntry,
 } from "../api";
 import Answer from "../components/Answer";
 import ChatSidebar from "../components/ChatSidebar";
+import FeedbackControl from "../components/FeedbackControl";
 import SourceCards from "../components/SourceCards";
 import TraceBox from "../components/TraceBox";
 
@@ -39,6 +42,7 @@ interface Turn {
   citations?: Citation[];
   trace?: TraceEntry[];
   streaming?: boolean;
+  feedback?: Feedback | null;
 }
 
 export default function ChatPage() {
@@ -97,6 +101,7 @@ export default function ChatPage() {
             content: m.content,
             citations: s.citations?.[i] ?? undefined,
             trace: s.traces?.[i] ?? undefined,
+            feedback: s.feedback?.[i] ?? undefined,
           })),
         );
         // Filters aren't persisted per chat; reset so a reopened chat never shows
@@ -111,9 +116,15 @@ export default function ChatPage() {
   // Block body (not a concise arrow): some smooth-scroll polyfills / browser
   // extensions make scrollIntoView return a Promise, and a concise body would
   // leak that as the effect's cleanup → "destroy is not a function" on unmount.
+  //
+  // Depend on the tail's own progress signals, not the whole `turns` array — every
+  // mutation (patchAt/patchLast) replaces the array with a new reference, and keying
+  // off `turns` itself meant setting feedback on ANY turn (even an old one) re-ran
+  // this and yanked the view down to the bottom.
+  const lastTurn = turns[turns.length - 1];
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [turns]);
+  }, [turns.length, lastTurn?.content, lastTurn?.trace?.length, lastTurn?.streaming]);
 
   const patchLast = (fn: (t: Turn) => Turn) =>
     setTurns((prev) => {
@@ -121,6 +132,23 @@ export default function ChatPage() {
       next[next.length - 1] = fn(next[next.length - 1]);
       return next;
     });
+
+  const patchAt = (i: number, fn: (t: Turn) => Turn) =>
+    setTurns((prev) => {
+      const next = [...prev];
+      next[i] = fn(next[i]);
+      return next;
+    });
+
+  async function onFeedback(i: number, vote: Feedback["vote"], note: string | null) {
+    if (!chatId) return;
+    patchAt(i, (t) => ({ ...t, feedback: { vote, note } }));
+    try {
+      await setFeedback(chatId, i, vote, note);
+    } catch (e) {
+      console.error("Failed to save feedback", e);
+    }
+  }
 
   async function send() {
     const q = input.trim();
@@ -310,6 +338,18 @@ export default function ChatPage() {
                     </Group>
                   ) : null}
                   {!t.streaming && t.citations && <SourceCards citations={t.citations} />}
+                  {!t.streaming && t.content && chatId && (
+                    <FeedbackControl
+                      // Scoped to chatId, not just the array index — otherwise switching
+                      // chats reuses this component instance (ChatPage doesn't remount on
+                      // a chatId param change) and its local draft/note-open state leaks
+                      // from the previous chat's turn at the same index.
+                      key={`${chatId}-${i}`}
+                      vote={t.feedback?.vote ?? null}
+                      note={t.feedback?.note ?? null}
+                      onChange={(vote, note) => onFeedback(i, vote, note)}
+                    />
+                  )}
                 </Box>
               ),
             )}

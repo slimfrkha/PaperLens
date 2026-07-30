@@ -23,7 +23,7 @@ from rag.search import Searcher
 
 from .agent import ChatAgent
 from .chats import ChatStore, generate_name
-from .schemas import ChatRequest
+from .schemas import ChatRequest, FeedbackRequest
 from .worker import IngestionWorker
 
 
@@ -155,6 +155,14 @@ def create_app(cfg: Config) -> FastAPI:
     def delete_chat(chat_id: str):
         chats.delete(chat_id)
         return {"ok": True}
+
+    @app.post("/api/chats/{chat_id}/feedback")
+    def post_feedback(chat_id: str, req: FeedbackRequest):
+        try:
+            c = chats.set_feedback(chat_id, req.index, req.vote, req.note)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        return c or JSONResponse({"error": "not found"}, status_code=404)
 
     @app.post("/api/chat")
     async def chat(req: ChatRequest):

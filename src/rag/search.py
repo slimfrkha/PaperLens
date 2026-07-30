@@ -43,6 +43,7 @@ class Result:
     paper_id: str
     breadcrumb: str
     section_title: str
+    section_number: str
     text: str  # breadcrumb + body (what was embedded)
     body: str  # body only
     source: str = "dense"  # "dense" | "sparse" | "both" — which retrieval pool(s) surfaced this
@@ -170,6 +171,7 @@ class Searcher:
                 paper_id=m["paper_id"],
                 breadcrumb=m["breadcrumb"],
                 section_title=m["section_title"],
+                section_number=m["section_number"],
                 text=doc,
                 body=m["body"],
             )
@@ -232,6 +234,7 @@ class Searcher:
                             paper_id=m["paper_id"],
                             breadcrumb=m["breadcrumb"],
                             section_title=m["section_title"],
+                            section_number=m["section_number"],
                             text=doc,
                             body=m["body"],
                         )
@@ -288,6 +291,7 @@ class Searcher:
                                 paper_id=m["paper_id"],
                                 breadcrumb=m["breadcrumb"],
                                 section_title=m["section_title"],
+                                section_number=m["section_number"],
                                 text=doc,
                                 body=m["body"],
                             )

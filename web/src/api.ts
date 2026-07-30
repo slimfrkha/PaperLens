@@ -27,8 +27,10 @@ export interface Citation {
   title: string;
   breadcrumb: string;
   section_title: string;
+  section_number?: string;
   source?: RetrievalSource;
   snippet: string;
+  body?: string;
   faithfulness?: FaithfulnessClaim[];
 }
 
@@ -56,12 +58,18 @@ export interface ChatSummary {
   updated_at: string;
 }
 
+export interface Feedback {
+  vote: "up" | "down" | null;
+  note: string | null;
+}
+
 export interface ChatSession {
   id: string;
   name: string;
   messages: { role: "user" | "assistant"; content: string }[];
   citations: (Citation[] | null)[];
   traces?: (TraceEntry[] | null)[];
+  feedback?: (Feedback | null)[];
 }
 
 async function j<T>(r: Response): Promise<T> {
@@ -85,6 +93,17 @@ export const getChat = (id: string) =>
 export const createChat = () => fetch("/api/chats", { method: "POST" }).then(j<ChatSession>);
 export const deleteChat = (id: string) =>
   fetch(`/api/chats/${encodeURIComponent(id)}`, { method: "DELETE" }).then((r) => r.json());
+export const setFeedback = (
+  chatId: string,
+  index: number,
+  vote: "up" | "down" | null,
+  note: string | null,
+) =>
+  fetch(`/api/chats/${encodeURIComponent(chatId)}/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ index, vote, note }),
+  }).then(j<ChatSession>);
 
 export interface TraceEntry {
   type: "thought" | "action" | "observation";

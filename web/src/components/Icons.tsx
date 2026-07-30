@@ -2,7 +2,11 @@
  *  aria-hidden (decorative). Sized via the `size` prop (default 18). */
 type IconProps = { size?: number | string; className?: string; style?: React.CSSProperties };
 
-function Svg({ size = 18, children, ...rest }: IconProps & { children: React.ReactNode }) {
+function Svg({
+  size = 18,
+  children,
+  ...rest
+}: IconProps & { children: React.ReactNode; fill?: string }) {
   return (
     <svg
       width={size}
@@ -97,5 +101,24 @@ export const IconBook = (p: IconProps) => (
   <Svg {...p}>
     <path d="M4 5a2 2 0 0 1 2-2h9a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H6a2 2 0 0 0-2 2z" />
     <path d="M4 19a2 2 0 0 1 2-2h10" />
+  </Svg>
+);
+
+/** `filled`, when given, is a CSS color used as the solid fill (e.g. a Mantine
+ *  `--mantine-color-*-filled` token) — pass a fixed, scheme-aware token here rather
+ *  than `currentColor`; `currentColor` inherits the ActionIcon "subtle" variant's
+ *  *text* shade, which is tuned for a thin stroke, not a large solid fill, and reads
+ *  washed-out once filled in dark mode. */
+export const IconThumbUp = ({ filled, ...p }: IconProps & { filled?: string }) => (
+  <Svg {...p} fill={filled ?? "none"}>
+    <path d="M7 10v11" />
+    <path d="M7 10l4-7a2 2 0 0 1 2 2v4h5a2 2 0 0 1 2 2.2l-1.2 8A2 2 0 0 1 17 21H7" />
+  </Svg>
+);
+
+export const IconThumbDown = ({ filled, ...p }: IconProps & { filled?: string }) => (
+  <Svg {...p} fill={filled ?? "none"}>
+    <path d="M17 14V3" />
+    <path d="M17 14l-4 7a2 2 0 0 1-2-2v-4H6a2 2 0 0 1-2-2.2l1.2-8A2 2 0 0 1 7 3h10" />
   </Svg>
 );

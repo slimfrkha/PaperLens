@@ -48,6 +48,15 @@ class _RaisingCrossEncoderReranker:
         raise OSError("model not found")
 
 
+def test_result_carries_section_number(make_searcher, seed_chunks):
+    # section_number is stored on every chunk's metadata but was previously dropped on the
+    # way back into Result — needed downstream for section-identity scoring (paperlens-eval)
+    # and for a mined feedback record to be usable for that purpose.
+    ctx = make_searcher([seed_chunks("paper-a", "Attention", "latent attention over the kv cache")])
+    results = ctx.searcher.search("attention", k=1, candidates=10, rerank=False)
+    assert results[0].section_number == "1"
+
+
 def test_rerank_lazy_reranker_load_failure_falls_back(monkeypatch, make_searcher, seed_chunks):
     # The default reranker is built lazily, on first access to Searcher.reranker — this proves
     # the fallback also covers that construction, not just an already-injected reranker's score().
@@ -96,6 +105,7 @@ def _seed_vec_docs(cfg, embedder):
             "paper_id": f"paper-{doc_id}",
             "breadcrumb": f"Paper > {section}",
             "section_title": section,
+            "section_number": "1",
             "body": text,
         }
         for doc_id, text, section in docs

@@ -309,4 +309,5 @@ Served under `/api`; any other path falls through to the SPA.
 | POST | `/api/chats` | Create a chat session. |
 | GET | `/api/chats/{chat_id}` | Fetch one chat session. |
 | DELETE | `/api/chats/{chat_id}` | Delete a chat session. |
+| POST | `/api/chats/{chat_id}/feedback` | Set or clear 👍/👎 + note feedback on one turn. |
 | POST | `/api/chat` | Run the agent; streams the answer + trace over SSE. |

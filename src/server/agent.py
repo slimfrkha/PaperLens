@@ -173,8 +173,10 @@ class ChatAgent:
                     "title": rec["title"] if rec else r.paper_id,
                     "breadcrumb": r.breadcrumb,
                     "section_title": r.section_title,
+                    "section_number": r.section_number,
                     "source": r.source,
                     "snippet": r.body[:500],
+                    "body": r.body,
                 }
                 # Full passage, kept for the faithfulness check (split into sentences there).
                 bodies[ref] = r.body

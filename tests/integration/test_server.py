@@ -164,3 +164,59 @@ def test_chat_continues_citation_numbering_across_turns(make_config, monkeypatch
     )
     cits2 = json.loads(next(e["data"] for e in _parse_sse(resp2.text) if e["event"] == "citations"))
     assert cits2[0]["ref"] == "r2"
+
+
+def test_feedback_route_sets_clears_and_rejects_invalid_index(make_config, monkeypatch):
+    import importlib
+
+    main_mod = importlib.import_module("server.main")
+
+    class FakeAgent:
+        def __init__(self, *a, **k):
+            pass
+
+        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0):
+            on_text("answer")
+            return "answer", []
+
+    monkeypatch.setattr(main_mod, "build_llm", lambda *a, **k: object())
+    monkeypatch.setattr(main_mod, "build_reranker", lambda *a, **k: object())
+    monkeypatch.setattr(main_mod, "Searcher", lambda *a, **k: object())
+    monkeypatch.setattr(main_mod, "ChatAgent", FakeAgent)
+
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    client = TestClient(create_app(cfg))
+
+    chat_id = client.post("/api/chats").json()["id"]
+    client.post(
+        "/api/chat", json={"messages": [{"role": "user", "content": "q"}], "chat_id": chat_id}
+    )
+    # messages[0] is the user turn, messages[1] is the assistant turn.
+
+    resp = client.post(
+        f"/api/chats/{chat_id}/feedback", json={"index": 1, "vote": "up", "note": "nice cite"}
+    )
+    assert resp.status_code == 200
+    saved = resp.json()["feedback"][1]
+    assert saved["vote"] == "up"
+    assert saved["note"] == "nice cite"
+
+    cleared = client.post(f"/api/chats/{chat_id}/feedback", json={"index": 1})
+    assert cleared.json()["feedback"][1] is None
+
+    # index 0 is the user turn — feedback only applies to assistant turns.
+    rejected = client.post(f"/api/chats/{chat_id}/feedback", json={"index": 0, "vote": "up"})
+    assert rejected.status_code == 400
+
+    out_of_range = client.post(f"/api/chats/{chat_id}/feedback", json={"index": 99, "vote": "up"})
+    assert out_of_range.status_code == 400
+
+
+def test_feedback_route_404_for_unknown_chat(make_config):
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    client = TestClient(create_app(cfg))
+
+    resp = client.post("/api/chats/missing/feedback", json={"index": 0, "vote": "up"})
+    assert resp.status_code == 404

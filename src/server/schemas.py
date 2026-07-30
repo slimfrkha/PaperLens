@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel
 
 
@@ -15,3 +17,9 @@ class ChatRequest(BaseModel):
     tags: list[str] = []
     papers: list[str] = []  # restrict search to these paper_ids (empty = all)
     chat_id: str | None = None
+
+
+class FeedbackRequest(BaseModel):
+    index: int  # position in the session's messages/citations/traces arrays
+    vote: Literal["up", "down"] | None = None
+    note: str | None = None

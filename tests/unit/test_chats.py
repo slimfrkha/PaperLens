@@ -74,6 +74,77 @@ def test_write_failure_leaves_prior_file_intact(tmp_path, monkeypatch):
     assert list(tmp_path.glob("*.tmp")) == []  # no orphaned temp left behind
 
 
+def test_set_feedback_on_assistant_turn(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat = store.append_turn(store.create()["id"], "q", "a", [], [])
+
+    saved = store.set_feedback(chat["id"], 1, "up", "great citation")
+    assert saved["feedback"] == [
+        None,
+        {"vote": "up", "note": "great citation", "updated_at": saved["feedback"][1]["updated_at"]},
+    ]
+
+
+def test_set_feedback_rejects_user_message_index(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat = store.append_turn(store.create()["id"], "q", "a", [], [])
+    with pytest.raises(ValueError):
+        store.set_feedback(chat["id"], 0, "up", None)
+
+
+def test_set_feedback_rejects_out_of_range_index(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat = store.append_turn(store.create()["id"], "q", "a", [], [])
+    with pytest.raises(ValueError):
+        store.set_feedback(chat["id"], 5, "up", None)
+
+
+def test_set_feedback_rejects_note_without_vote(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat = store.append_turn(store.create()["id"], "q", "a", [], [])
+    with pytest.raises(ValueError):
+        store.set_feedback(chat["id"], 1, None, "a note with no vote")
+
+
+def test_set_feedback_rejects_invalid_vote_value(tmp_path):
+    # Pydantic's Literal["up", "down"] gates the HTTP route, but ChatStore is the
+    # persistence layer and shouldn't trust an arbitrary direct caller either.
+    store = ChatStore(str(tmp_path))
+    chat = store.append_turn(store.create()["id"], "q", "a", [], [])
+    with pytest.raises(ValueError):
+        store.set_feedback(chat["id"], 1, "sideways", None)
+
+
+def test_set_feedback_clears_vote(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat = store.append_turn(store.create()["id"], "q", "a", [], [])
+    store.set_feedback(chat["id"], 1, "down", "wrong section")
+
+    cleared = store.set_feedback(chat["id"], 1, None, None)
+    assert cleared["feedback"][1] is None
+
+
+def test_set_feedback_returns_none_for_missing_chat(tmp_path):
+    store = ChatStore(str(tmp_path))
+    assert store.set_feedback("missing", 0, "up", None) is None
+
+
+def test_set_feedback_pads_legacy_sessions_without_feedback(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat = store.append_turn(store.create()["id"], "q", "a", [], [])
+    # Simulate a pre-feedback session: feedback key missing entirely.
+    del chat["feedback"]
+    store._write(chat)
+
+    saved = store.set_feedback(chat["id"], 1, "up", None)
+    assert len(saved["feedback"]) == len(saved["messages"])
+    assert saved["feedback"][1] == {
+        "vote": "up",
+        "note": None,
+        "updated_at": saved["feedback"][1]["updated_at"],
+    }
+
+
 def test_generate_name_falls_back_when_llm_errors(monkeypatch):
     from rag.config import AnthropicSpec
 

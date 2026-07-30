@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { chat } from "./api";
+import { chat, setFeedback } from "./api";
 
 function mockStreamResponse(sse: string): Response {
   let sent = false;
@@ -53,5 +53,32 @@ describe("chat", () => {
     await chat([], [], [], null, { onToken, onCitations: vi.fn() });
 
     expect(onToken).toHaveBeenCalledWith("Hi");
+  });
+});
+
+describe("setFeedback", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("POSTs index/vote/note to the chat's feedback route", async () => {
+    const session = { id: "c1", name: "T", messages: [], citations: [] };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(session),
+    } as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await setFeedback("c1", 1, "up", "great citation");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/chats/c1/feedback",
+      expect.objectContaining({
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ index: 1, vote: "up", note: "great citation" }),
+      }),
+    );
+    expect(result).toEqual(session);
   });
 });
