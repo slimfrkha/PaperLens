@@ -210,10 +210,25 @@ class Searcher:
             results = list(by_id.values())
 
         if rerank:
-            scores = self.reranker.score(query, [r.text for r in results])
-            for r, s in zip(results, scores, strict=True):
-                r.score = s
-            results.sort(key=lambda r: r.score, reverse=True)
+            try:
+                scores = self.reranker.score(query, [r.text for r in results])
+                if len(scores) != len(results):
+                    raise ValueError(
+                        f"reranker returned {len(scores)} scores for {len(results)} docs"
+                    )
+                # Lengths are already checked equal above; strict=False since a mismatch is
+                # handled there, not here.
+                for r, s in zip(results, scores, strict=False):
+                    r.score = s
+                results.sort(key=lambda r: r.score, reverse=True)
+            except Exception as e:
+                # Reranker failure (model load, inference error, network/rate-limit/auth from an
+                # LLM reranker, or a malformed score list) — degrade to the pre-rerank (dense/RRF)
+                # order rather than failing the whole search.
+                print(
+                    f"  [warn] reranking failed for query {query!r},"
+                    f" falling back to pre-rerank order: {e}"
+                )
 
         return results[:k]
 

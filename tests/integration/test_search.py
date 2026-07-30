@@ -76,6 +76,21 @@ class _KeywordReranker(Reranker):
         return cls("")
 
 
+class _RaisingReranker(Reranker):
+    """Fails every call, to exercise Searcher.search's fallback."""
+
+    def score(self, query, docs):
+        raise RuntimeError("boom")
+
+
+class _ShortReranker(Reranker):
+    """Returns one score short of what's needed — a malformed-output contract violation,
+    distinct from an outright raise (proves the length check catches it too)."""
+
+    def score(self, query, docs):
+        return [1.0] * (len(docs) - 1)
+
+
 def test_rerank_uses_injected_reranker(make_searcher, fake_embedder, seed_chunks):
     # An injected reranker reorders results (and proves the seam runs offline —
     # no cross-encoder model is loaded). The passage carrying the needle wins.
@@ -95,6 +110,62 @@ def test_rerank_uses_injected_reranker(make_searcher, fake_embedder, seed_chunks
     assert results[0].paper_id == "paper-b"
     assert results[0].score == 1.0
     assert results[0].score >= results[-1].score
+
+
+def test_rerank_failure_falls_back_to_pre_rerank_order(make_searcher, fake_embedder, seed_chunks):
+    # A reranker that raises must not crash the search — it should degrade to the same
+    # order (and scores) a dense-only, rerank=False query would have returned.
+    ctx = make_searcher(
+        [
+            seed_chunks("paper-a", "Attention", "latent attention over the kv cache"),
+            seed_chunks("paper-b", "Rewards", "reinforcement learning UNIQUENEEDLE recipe"),
+        ]
+    )
+    dense_searcher = Searcher(
+        db_dir=ctx.cfg.paths.rag_db, collection=ctx.cfg.collection, embedder=fake_embedder
+    )
+    dense_order = dense_searcher.search("learning", k=2, candidates=10, rerank=False)
+
+    searcher = Searcher(
+        db_dir=ctx.cfg.paths.rag_db,
+        collection=ctx.cfg.collection,
+        embedder=fake_embedder,
+        reranker=_RaisingReranker(),
+    )
+    results = searcher.search("learning", k=2, candidates=10, rerank=True)
+
+    assert [r.paper_id for r in results] == [r.paper_id for r in dense_order]
+    assert [r.score for r in results] == [r.score for r in dense_order]
+
+
+def test_rerank_wrong_length_scores_falls_back_to_pre_rerank_order(
+    make_searcher, fake_embedder, seed_chunks
+):
+    # A reranker that returns the wrong number of scores must not partially overwrite
+    # Result.score before the fallback kicks in — the whole point of the explicit length
+    # check in Searcher.search (a naive zip(strict=True) would raise only after mutating
+    # every result but the last, leaving a mix of rerank-scale and pre-rerank-scale scores).
+    ctx = make_searcher(
+        [
+            seed_chunks("paper-a", "Attention", "latent attention over the kv cache"),
+            seed_chunks("paper-b", "Rewards", "reinforcement learning UNIQUENEEDLE recipe"),
+        ]
+    )
+    dense_searcher = Searcher(
+        db_dir=ctx.cfg.paths.rag_db, collection=ctx.cfg.collection, embedder=fake_embedder
+    )
+    dense_order = dense_searcher.search("learning", k=2, candidates=10, rerank=False)
+
+    searcher = Searcher(
+        db_dir=ctx.cfg.paths.rag_db,
+        collection=ctx.cfg.collection,
+        embedder=fake_embedder,
+        reranker=_ShortReranker(),
+    )
+    results = searcher.search("learning", k=2, candidates=10, rerank=True)
+
+    assert [r.paper_id for r in results] == [r.paper_id for r in dense_order]
+    assert [r.score for r in results] == [r.score for r in dense_order]
 
 
 class _DirectionalEmbedder:

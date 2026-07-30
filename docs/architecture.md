@@ -111,8 +111,11 @@ is a floor: when the model asks for a large `top_k`, the agent scales the recall
 
 Both stages are swappable via config through the **registry** pattern (see below). The
 reranker can even be the chat LLM (`reranker.type: llm`), scoring passages 0–10 in one
-batched call — and if its response can't be parsed it falls back to the dense order rather
-than injecting noise. A `paper`/`paper_ids` filter (used by the tag filter) scopes recall.
+batched call and falling back to the dense order if its response can't be parsed.
+More generally, `Searcher.search` degrades to the pre-rerank (dense/RRF) order rather than
+failing the request whenever the reranker fails outright — a cross-encoder model-load
+error, or an LLM-backend call erroring (timeout, rate limit, auth). A `paper`/`paper_ids`
+filter (used by the tag filter) scopes recall.
 
 **Hybrid dense+sparse retrieval** (`sparse.enabled`, opt-in, off by default) inserts a fusion
 step before reranking: a BM25 lexical search (`src/rag/sparse.py`) runs alongside dense recall
