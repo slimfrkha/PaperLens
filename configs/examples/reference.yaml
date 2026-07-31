@@ -18,20 +18,20 @@
 # time; CLI overrides on paperlens-serve/-ingest (e.g. `--server.port=9000`) feed it too.
 
 # --- Data root + collection (the paths below interpolate these) ---
-data_path: data                    # base dir for all runtime data (referenced as ${data_path})
-collection: arxiv_papers           # Chroma collection name; also namespaces the data paths
+data_path: data # base dir for all runtime data (referenced as ${data_path})
+collection: arxiv_papers # Chroma collection name; also namespaces the data paths
 
 # --- Filesystem paths (relative -> anchored to this file's dir; absolute -> used as-is) ---
 # Setting the ${data_path}/${collection} prefix below is what keeps each collection's data
 # isolated — it is NOT automatic. Omit a path and you get the flat dataclass default for it
 # (e.g. `data/rag_db`, un-namespaced), not a derived one. Edit freely.
 paths:
-  rag_db: ${data_path}/${collection}/rag_db             # Chroma persistent dir + papers.json manifest
-  pdf_dir: ${data_path}/${collection}/papers/pdf        # downloaded PDFs (<paper_id>.pdf)
-  markdown_dir: ${data_path}/${collection}/papers/text  # Docling-extracted markdown (<paper_id>.md)
+  rag_db: ${data_path}/${collection}/rag_db # Chroma persistent dir + papers.json manifest
+  pdf_dir: ${data_path}/${collection}/papers/pdf # downloaded PDFs (<paper_id>.pdf)
+  markdown_dir: ${data_path}/${collection}/papers/text # Docling-extracted markdown (<paper_id>.md)
   chat_history: ${data_path}/${collection}/chat_history # per-session chat JSON files
-  annotations: ${data_path}/${collection}/annotations   # per-paper annotation JSON files
-  web_dist: web/dist                                     # built frontend SPA served by the backend
+  annotations: ${data_path}/${collection}/annotations # per-paper annotation JSON files
+  web_dist: web/dist # built frontend SPA served by the backend
 
 # --- Embedder: turns chunks (and queries) into vectors ---
 # `type` selects the variant; keys below are per-type (common: model, batch_size):
@@ -40,46 +40,46 @@ paths:
 #   gemini  model, batch_size, api_key_env               (GEMINI_API_KEY)
 #   ollama  model, batch_size, api_base                  (native /api/embed)
 embedding:
-  type: hf                # hf | openai | gemini | ollama
-  model: BAAI/bge-m3      # HF model id (or the API model name for api types)
-  batch_size: 32          # embedding batch size
-  max_seq_length: 1024    # hf only; token cap guarding the MPS 2**32 tensor limit on Apple Silicon
-  query_prefix: ""        # hf only; prepended to queries before embedding, e.g. "query: " (e5)
-  document_prefix: ""     # hf only; prepended to chunks before embedding; changing requires re-ingest
+  type: hf # hf | openai | gemini | ollama
+  model: BAAI/bge-m3 # HF model id (or the API model name for api types)
+  batch_size: 32 # embedding batch size
+  max_seq_length: 1024 # hf only; token cap guarding the MPS 2**32 tensor limit on Apple Silicon
+  query_prefix: "" # hf only; prepended to queries before embedding, e.g. "query: " (e5)
+  document_prefix: "" # hf only; prepended to chunks before embedding; changing requires re-ingest
 
 # --- Reranker: second retrieval stage, scores recalled chunks ---
 #   hf    model, enabled, max_length   (local cross-encoder)
 #   llm   enabled, max_chars           (reuses the chat LLM — no extra model/deps)
 reranker:
-  type: hf                # hf | llm
-  model: BAAI/bge-reranker-v2-m3  # cross-encoder model id (hf type only)
-  enabled: true           # turn the whole rerank stage on/off
-  max_length: 512         # hf only; cross-encoder input token cap — raise if chunking.max_tokens grows
+  type: hf # hf | llm
+  model: BAAI/bge-reranker-v2-m3 # cross-encoder model id (hf type only)
+  enabled: true # turn the whole rerank stage on/off
+  max_length: 512 # hf only; cross-encoder input token cap — raise if chunking.max_tokens grows
   # max_chars: 600        # llm only (not valid on type: hf); per-passage excerpt sent to the judge LLM
 
 # --- Sparse: opt-in hybrid dense+BM25 retrieval, fused via RRF before reranking ---
 # Unproven until screened: `enabled: false` by default — measure it first with
 # `paperlens-eval screen --tier retrieval --hybrid` (docs/harness.md), then flip it on.
 sparse:
-  type: bm25              # bm25 only, today
-  enabled: false           # opt-in — unlike reranker.enabled, this needs a harness screen first
-  rrf_k: 60                # reciprocal-rank-fusion constant; shared across sparse variants
-  fetch_multiplier: 3      # each system over-fetches fetch_multiplier * candidates before fusing
-  k1: 1.5                  # bm25 only; term-frequency saturation constant (rank_bm25 default)
-  b: 0.75                  # bm25 only; length-normalization constant (rank_bm25 default)
+  type: bm25 # bm25 only, today
+  enabled: false # opt-in — unlike reranker.enabled, this needs a harness screen first
+  rrf_k: 60 # reciprocal-rank-fusion constant; shared across sparse variants
+  fetch_multiplier: 3 # each system over-fetches fetch_multiplier * candidates before fusing
+  k1: 1.5 # bm25 only; term-frequency saturation constant (rank_bm25 default)
+  b: 0.75 # bm25 only; length-normalization constant (rank_bm25 default)
 
 # --- Faithfulness: opt-in post-generation check over [rN]-cited sentences ---
 # Passive labeling only — attaches a verdict to each checked citation, never changes the
 # answer. `enabled: false` by default, like sparse.enabled. See docs/architecture.md for why
 # this is a consistency-scoring cross-encoder rather than a generic NLI model.
 faithfulness:
-  type: hf                 # hf only, today
-  enabled: false            # opt-in — post-generation check is unproven/uncalibrated per-pool
-  model: vectara/hallucination_evaluation_model  # local consistency-scoring cross-encoder
-  revision: hhem-1.0-open   # pinned: the default revision needs trust_remote_code (won't load here)
-  max_length: 512           # cross-encoder input token cap (scoring is sentence-vs-sentence)
-  contradiction_max: 0.05   # score <= this -> "contradiction"
-  entailment_min: 0.3       # score >= this -> "entailment"; between -> "neutral"
+  type: hf # hf only, today
+  enabled: false # opt-in — post-generation check is unproven/uncalibrated per-pool
+  model: vectara/hallucination_evaluation_model # local consistency-scoring cross-encoder
+  revision: hhem-1.0-open # pinned: the default revision needs trust_remote_code (won't load here)
+  max_length: 512 # cross-encoder input token cap (scoring is sentence-vs-sentence)
+  contradiction_max: 0.05 # score <= this -> "contradiction"
+  entailment_min: 0.3 # score >= this -> "entailment"; between -> "neutral"
 
 # --- LLMs: two specs (tagging + chat), each a tagged union on `type` ---
 #   tagging -> labels papers at ingestion (cheap + fast is fine)
@@ -96,46 +96,53 @@ llm:
     api_key_env: ANTHROPIC_API_KEY
     max_tokens: 2048
     temperature: 0.0
-    timeout: 0.0            # seconds; 0 -> provider SDK default
-    max_retries: -1         # -1 -> provider SDK default
+    timeout: 0.0 # seconds; 0 -> provider SDK default
+    max_retries: -1 # -1 -> provider SDK default
   chat:
     type: anthropic
     model: claude-opus-4-8
     api_key_env: ANTHROPIC_API_KEY
     max_tokens: 2048
     temperature: 0.0
-    timeout: 0.0            # seconds; 0 -> provider SDK default
-    max_retries: -1         # -1 -> provider SDK default
+    timeout: 0.0 # seconds; 0 -> provider SDK default
+    max_retries: -1 # -1 -> provider SDK default
 
 # --- Chunking: corpus-dependent — the defaults are tuned for dense ML papers ---
 chunking:
-  max_tokens: 512          # target max tokens per chunk
-  overlap_tokens: 64       # overlap between sub-chunks of a large section
-  min_tokens: 24           # sections shorter than this are dropped (titles, stray captions)
-  noise_ratio: 0.4         # fraction of numeric/punctuation tokens that flags caption noise
-  extra_skip_titles: []    # extra case-insensitive regexes for section titles to always drop
+  max_tokens: 512 # target max tokens per chunk
+  overlap_tokens: 64 # overlap between sub-chunks of a large section
+  min_tokens: 24 # sections shorter than this are dropped (titles, stray captions)
+  noise_ratio: 0.4 # fraction of numeric/punctuation tokens that flags caption noise
+  extra_skip_titles: [] # extra case-insensitive regexes for section titles to always drop
     # - "author contributions"
 
 # --- Extraction: PDF -> markdown via Docling ---
 extraction:
-  ocr_enabled: false       # turn on for scanned/no-text-layer PDFs (slower, extra model download)
+  ocr_enabled: false # turn on for scanned/no-text-layer PDFs (slower, extra model download)
 
 # --- Retrieval: the agentic search loop (the model can request a different top_k) ---
 retrieval:
-  k: 5                     # passages returned per search_papers call; must be <= candidates
-  candidates: 20           # dense-recall pool size handed to the reranker (floor; a larger
-                           # top_k scales the pool to 4x it, so the reranker can still discard)
-  max_rounds: 8            # ReAct search/answer cycles before the agent must answer
+  k: 5 # passages returned per search_papers call; must be <= candidates
+  candidates:
+    20 # dense-recall pool size handed to the reranker (floor; a larger
+    # top_k scales the pool to 4x it, so the reranker can still discard)
+  max_rounds: 8 # ReAct search/answer cycles before the agent must answer
 
 # --- Tagging: how generate_tags shapes its LLM prompt (the model itself is llm.tagging) ---
 tagger:
   max_tags: 12
   min_tags: 5
-  max_excerpt_chars: 6000  # how much of the paper (title/abstract/headings) to tag from
+  max_excerpt_chars: 6000 # how much of the paper (title/abstract/headings) to tag from
+
+# --- Multi query retrieval ---
+multi_query:
+  enabled: true
+  n_paraphrases: 3
+  fetch_multiplier: 3
 
 # --- Ingestion worker ---
 ingestion:
-  auto_start: true        # start the background ingestion worker when the app launches
+  auto_start: true # start the background ingestion worker when the app launches
 
 # --- HTTP server ---
 server:
