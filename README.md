@@ -1,6 +1,6 @@
 # 🔎 PaperLens
 
-> **Local, config-driven RAG over arXiv model technical reports.**
+> **Local, config-driven RAG over arXiv papers.**
 
 Ask questions in a chat UI; an LLM does agentic retrieval over the papers and
 answers with **clickable citations** 📎 that jump to the exact passage. Browse the
