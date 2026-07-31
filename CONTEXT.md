@@ -160,6 +160,21 @@ the paper at the cited passage.
 - `_Avoid_:` reference number, footnote, source id. The marker is a `ref`; the rendered
   clickable thing is a `citation`.
 
+### 🖍️ Annotation
+
+A user-saved passage in the Paper Viewer, with an optional personal note attached. Anchored
+to the passage's **text** (a `snippet`, scoped to its section via `section_slug`), not a
+chunk id or character offset — the same reflow-resilient anchoring `ref`/citation jumps use
+— so it survives a re-extraction that changes chunk boundaries. Rendered as its own
+persistent, multi-range `"annotation"` highlight group, distinct from the single-range,
+transient `"citation"` highlight group used for a citation jump.
+
+- Code: `AnnotationStore` (`src/server/annotations.py`); anchor resolution + the
+  `"annotation"` highlight group in `web/src/highlight.ts`; UI in
+  `web/src/components/AnnotationPopover.tsx` and `web/src/pages/PaperViewer.tsx`.
+- `_Avoid_:` bookmark, note (alone — a note is what's *attached* to an annotation, not the
+  annotation itself), highlight (alone — ambiguous with the citation highlight group).
+
 ### ✅ Faithfulness check / verdict
 
 An opt-in post-generation check (`faithfulness.enabled`, off by default) verifying each

@@ -30,6 +30,7 @@ paths:
   pdf_dir: ${data_path}/${collection}/papers/pdf        # downloaded PDFs (<paper_id>.pdf)
   markdown_dir: ${data_path}/${collection}/papers/text  # Docling-extracted markdown (<paper_id>.md)
   chat_history: ${data_path}/${collection}/chat_history # per-session chat JSON files
+  annotations: ${data_path}/${collection}/annotations   # per-paper annotation JSON files
   web_dist: web/dist                                     # built frontend SPA served by the backend
 
 # --- Embedder: turns chunks (and queries) into vectors ---

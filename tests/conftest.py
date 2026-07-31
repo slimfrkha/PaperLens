@@ -143,6 +143,7 @@ def make_config(tmp_path):
             pdf_dir=str(tmp_path / "pdf"),
             markdown_dir=str(tmp_path / "md"),
             chat_history=str(tmp_path / "chats"),
+            annotations=str(tmp_path / "annotations"),
             web_dist=str(tmp_path / "web_dist"),
         )
         cfg = Config(

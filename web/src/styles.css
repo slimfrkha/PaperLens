@@ -64,6 +64,19 @@ body {
   background-color: rgba(240, 190, 70, 0.32);
 }
 
+/* Saved-annotation highlight — a quieter, persistent underline (distinct from the
+   citation-jump's stronger block tint, so a saved note doesn't read as an active citation). */
+::highlight(annotation) {
+  background-color: rgba(70, 140, 220, 0.12);
+  text-decoration: underline;
+  text-decoration-color: rgba(70, 140, 220, 0.55);
+  color: inherit;
+}
+[data-mantine-color-scheme="dark"] ::highlight(annotation) {
+  background-color: rgba(90, 160, 240, 0.16);
+  text-decoration-color: rgba(90, 160, 240, 0.6);
+}
+
 /* Serif reading surface for actual paper content — journal-like, capped measure. */
 .reading {
   font-family: "Newsreader", Georgia, "Times New Roman", serif;

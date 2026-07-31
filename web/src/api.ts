@@ -34,6 +34,16 @@ export interface Citation {
   faithfulness?: FaithfulnessClaim[];
 }
 
+export interface Annotation {
+  id: string;
+  snippet: string;
+  section_title: string;
+  section_slug: string;
+  note: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface AdminStatus {
   db: { n_papers: number; n_chunks: number };
   tags: TagCount[];
@@ -89,6 +99,40 @@ export const getPaper = (id: string) =>
   fetch(`/api/papers/${encodeURIComponent(id)}`).then(
     j<{ paper_id: string; title: string; tags: string[]; arxiv_id?: string; markdown: string }>,
   );
+export const getAnnotations = (paperId: string) =>
+  fetch(`/api/papers/${encodeURIComponent(paperId)}/annotations`).then(j<Annotation[]>);
+export const createAnnotation = (
+  paperId: string,
+  snippet: string,
+  sectionTitle: string,
+  sectionSlug: string,
+  note: string,
+) =>
+  fetch(`/api/papers/${encodeURIComponent(paperId)}/annotations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      snippet,
+      section_title: sectionTitle,
+      section_slug: sectionSlug,
+      note,
+    }),
+  }).then(j<Annotation>);
+export const updateAnnotation = (paperId: string, annotationId: string, note: string) =>
+  fetch(
+    `/api/papers/${encodeURIComponent(paperId)}/annotations/${encodeURIComponent(annotationId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note }),
+    },
+  ).then(j<Annotation>);
+export const deleteAnnotation = (paperId: string, annotationId: string) =>
+  fetch(
+    `/api/papers/${encodeURIComponent(paperId)}/annotations/${encodeURIComponent(annotationId)}`,
+    { method: "DELETE" },
+  ).then(j<{ ok: boolean }>);
+
 export const getTags = () => fetch("/api/tags").then(j<TagCount[]>);
 export const getStatus = () => fetch("/api/admin/status").then(j<AdminStatus>);
 export const rescan = () =>

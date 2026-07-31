@@ -24,3 +24,14 @@ class FeedbackRequest(BaseModel):
     index: int  # position in the session's messages/citations/traces arrays
     vote: Literal["up", "down"] | None = None
     note: str | None = None
+
+
+class AnnotationCreate(BaseModel):
+    snippet: str
+    section_title: str = ""
+    section_slug: str = ""
+    note: str = ""
+
+
+class AnnotationUpdate(BaseModel):
+    note: str

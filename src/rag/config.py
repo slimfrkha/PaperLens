@@ -44,7 +44,7 @@ CONFIG_FILENAME = "config.yaml"
 CONFIG_ENV_VAR = "PAPERLENS_CONFIG"
 
 # Path fields anchored to the project root (relative values) at load time.
-_PATH_FIELDS = ("rag_db", "pdf_dir", "markdown_dir", "chat_history", "web_dist")
+_PATH_FIELDS = ("rag_db", "pdf_dir", "markdown_dir", "chat_history", "annotations", "web_dist")
 
 
 @dataclass
@@ -53,6 +53,7 @@ class Paths:
     pdf_dir: str = "data/papers/pdf"
     markdown_dir: str = "data/papers/text"
     chat_history: str = "data/chat_history"  # per-session ChatML JSON files
+    annotations: str = "data/annotations"  # per-paper annotation JSON files
     web_dist: str = "web/dist"  # built frontend SPA served by the backend
 
 

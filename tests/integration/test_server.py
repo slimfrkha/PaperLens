@@ -517,3 +517,57 @@ def test_feedback_route_404_for_unknown_chat(make_config):
 
     resp = client.post("/api/chats/missing/feedback", json={"index": 0, "vote": "up"})
     assert resp.status_code == 404
+
+
+def test_annotation_routes_create_list_update_delete(make_config):
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    client = TestClient(create_app(cfg))
+
+    created = client.post(
+        "/api/papers/paper1/annotations",
+        json={
+            "snippet": "a passage worth remembering",
+            "section_title": "2.1 Attention",
+            "section_slug": "2-1-attention",
+            "note": "check this against Table 3",
+        },
+    )
+    assert created.status_code == 200
+    annotation = created.json()
+    assert annotation["note"] == "check this against Table 3"
+    assert annotation["section_slug"] == "2-1-attention"
+
+    listed = client.get("/api/papers/paper1/annotations")
+    assert [a["id"] for a in listed.json()] == [annotation["id"]]
+    assert client.get("/api/papers/other-paper/annotations").json() == []
+
+    updated = client.patch(
+        f"/api/papers/paper1/annotations/{annotation['id']}", json={"note": "updated note"}
+    )
+    assert updated.status_code == 200
+    assert updated.json()["note"] == "updated note"
+
+    deleted = client.delete(f"/api/papers/paper1/annotations/{annotation['id']}")
+    assert deleted.status_code == 200
+    assert deleted.json() == {"ok": True}
+    assert client.get("/api/papers/paper1/annotations").json() == []
+
+
+def test_annotation_update_404_for_unknown_annotation(make_config):
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    client = TestClient(create_app(cfg))
+
+    resp = client.patch("/api/papers/paper1/annotations/missing-id", json={"note": "x"})
+    assert resp.status_code == 404
+
+
+def test_annotation_delete_returns_false_for_unknown_annotation(make_config):
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    client = TestClient(create_app(cfg))
+
+    resp = client.delete("/api/papers/paper1/annotations/missing-id")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": False}

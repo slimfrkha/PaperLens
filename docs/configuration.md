@@ -57,6 +57,7 @@ Copy-me templates for common setups (local gpt-oss, Anthropic, Gemini, Ollama) l
 | `pdf_dir` | path | `data/papers/pdf` | Downloaded PDFs (named `<paper_id>.pdf`). |
 | `markdown_dir` | path | `data/papers/text` | Docling-extracted markdown (`<paper_id>.md`). |
 | `chat_history` | path | `data/chat_history` | Per-session chat JSON files. |
+| `annotations` | path | `data/annotations` | Per-paper annotation JSON files. |
 | `web_dist` | path | `web/dist` | Built frontend SPA served by the backend. |
 
 ### 🔝 top level

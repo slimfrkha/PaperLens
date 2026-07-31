@@ -23,8 +23,9 @@ from rag.reranker import build_reranker
 from rag.search import Searcher
 
 from .agent import ChatAgent
+from .annotations import AnnotationStore
 from .chats import ChatStore, generate_name
-from .schemas import ChatRequest, FeedbackRequest
+from .schemas import AnnotationCreate, AnnotationUpdate, ChatRequest, FeedbackRequest
 from .worker import IngestionWorker
 
 
@@ -32,6 +33,7 @@ def create_app(cfg: Config) -> FastAPI:
     web_dist = Path(cfg.paths.web_dist)
     manifest = Manifest(cfg.paths.rag_db)
     chats = ChatStore(cfg.paths.chat_history)
+    annotations = AnnotationStore(cfg.paths.annotations)
     icfg = cfg.for_ingest()  # ingestion-only view for the worker + pending-paper checks
     worker = IngestionWorker(icfg, manifest)
     # Ensure the collection exists so the chat Searcher can open it even when the
@@ -116,6 +118,27 @@ def create_app(cfg: Config) -> FastAPI:
             "arxiv_id": rec.get("arxiv_id"),
             "markdown": md,
         }
+
+    # ---- annotations ----
+    @app.get("/api/papers/{paper_id}/annotations")
+    def list_annotations(paper_id: str):
+        return annotations.list_all(paper_id)
+
+    @app.post("/api/papers/{paper_id}/annotations")
+    def create_annotation(paper_id: str, req: AnnotationCreate):
+        return annotations.create(
+            paper_id, req.snippet, req.section_title, req.section_slug, req.note
+        )
+
+    @app.patch("/api/papers/{paper_id}/annotations/{annotation_id}")
+    def update_annotation(paper_id: str, annotation_id: str, req: AnnotationUpdate):
+        a = annotations.update(paper_id, annotation_id, req.note)
+        return a or JSONResponse({"error": "not found"}, status_code=404)
+
+    @app.delete("/api/papers/{paper_id}/annotations/{annotation_id}")
+    def delete_annotation(paper_id: str, annotation_id: str):
+        ok = annotations.delete(paper_id, annotation_id)
+        return {"ok": ok}
 
     @app.get("/api/tags")
     def list_tags():

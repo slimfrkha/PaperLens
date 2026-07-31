@@ -10,6 +10,7 @@ paths:
   pdf_dir: ${data_path}/${collection}/papers/pdf
   markdown_dir: ${data_path}/${collection}/papers/text
   chat_history: ${data_path}/${collection}/chat_history
+  annotations: ${data_path}/${collection}/annotations
   web_dist: web/dist
 
 embedding:
