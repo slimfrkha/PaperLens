@@ -69,7 +69,7 @@ src/
     search.py          # Searcher: retrieval + rerank (+ paper filter)
     tagger.py          # LLM tag generation
     pipeline.py        # download → extract → index → tag → manifest
-    ingest.py          # headless ingestion CLI (+ --retag)
+    ingest.py          # headless ingestion CLI (+ --retag, --reindex)
   server/              # FastAPI backend + in-process ingestion worker (composes rag)
     main.py agent.py worker.py chats.py schemas.py
   eval/                # per-pool config optimizer (composes rag; see docs/harness.md)
@@ -147,5 +147,6 @@ change**:
 - design/behavior change → [docs/architecture.md](docs/architecture.md)
 - a new or renamed domain term → [CONTEXT.md](CONTEXT.md)
 - a change to `src/eval/` or the `paperlens-eval` flow → [docs/harness.md](docs/harness.md)
+- any new user-facing or internal feature → [docs/features.md](docs/features.md)
 
 Docs that contradict the code are worse than no docs. A change isn't done until they agree.

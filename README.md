@@ -27,12 +27,15 @@ config.yaml ─┬─> ingestion worker: download → markdown (Docling) → ind
 - ✂️ **Chunking** is section-aware with hierarchical breadcrumbs rebuilt from the
   paper's section numbering (`src/rag/chunking.py`).
 - 🎯 **Retrieval** is two-stage: dense embedding recall + a cross-encoder reranker
-  (`src/rag/search.py`). Both stages are config-swappable — the embedder
+  (`src/rag/search.py`), with opt-in hybrid dense+BM25 fusion and multi-query
+  paraphrase expansion. Both core stages are config-swappable — the embedder
   (`embedding.type`: `hf` · `openai` · `gemini` · `ollama`) and the reranker
   (`reranker.type`: `hf` cross-encoder · `llm`, which reuses the chat model).
 - 🏷️ **Tags** are LLM-generated at ingestion and power a tag filter that restricts
   search to matching papers.
-- 🔌 **The LLM is an opaque config value** (`provider`, `api_base`, `model`) — point
+- ✅ **Faithfulness (opt-in)** verifies each cited sentence against the passage it
+  cites and flags entailment/neutral/contradiction — a signal, not a gate.
+- 🔌 **The LLM is an opaque config value** (`type`, `api_base`, `model`) — point
   it at Anthropic, or any OpenAI-compatible server (LM Studio, Ollama, vLLM, cloud).
 
 ## 📦 Setup
@@ -92,13 +95,14 @@ agent calls a `search_papers` tool). Every key, command, and API route:
 
 ## 🖥️ Pages
 
-- 💬 **Chat** — agentic RAG with streaming answers; `[rN]` citations are clickable
-  and open the paper with the passage highlighted. Optional tag filter scopes
-  the search.
+- 💬 **Chat** — agentic RAG with streaming answers and a Thought → Action →
+  Observation trace; `[rN]` citations are clickable, with faithfulness flags and
+  source cards. Filter by paper or tag, 👍/👎 feedback, edit and resend a prior
+  question, and copy an answer as Markdown or BibTeX.
 - 📄 **Papers** — every paper in the DB with tags; open one to read the full
-  markdown (tables + LaTeX rendered).
-- 📊 **Admin** — paper/chunk counts, tag explorer, pending papers, and a live
-  ingestion progress bar.
+  markdown (tables + LaTeX rendered), highlight passages, and attach notes.
+- 📊 **Admin** — add/remove papers, paper/chunk counts, tag explorer, pending
+  papers, and a live ingestion progress bar.
 
 ## 📚 Documentation
 
@@ -107,9 +111,11 @@ Full docs live in [`docs/`](docs/README.md):
 | Page | What you'll find |
 |---|---|
 | 🎓 [Getting started](docs/getting-started.md) | Install and ask your first question. |
+| 📋 [Features](docs/features.md) | Everything the app does, feature by feature. |
 | ⚙️ [Configuration & commands](docs/configuration.md) | Every `config.yaml` key, command, and API route. |
 | 🧩 [How-to guides](docs/how-to.md) | Add papers, swap backends, use a cloud provider. |
 | 🏛️ [Architecture](docs/architecture.md) | Chunking, two-stage retrieval, the agent loop. |
+| 🎛️ [Eval harness](docs/harness.md) | Tune retrieval config for your own paper pool. |
 | 🤝 [CONTRIBUTING](CONTRIBUTING.md) | Dev setup, the gate, conventions. |
 | 📖 [CONTEXT](CONTEXT.md) | Domain glossary. |
 

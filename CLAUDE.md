@@ -165,8 +165,8 @@ server hosts the worker, so it reads every field). Don't widen `IngestConfig` fo
   supported backend → [docs/configuration.md](docs/configuration.md); a new task/backend →
   [docs/how-to.md](docs/how-to.md); a design change → [docs/architecture.md](docs/architecture.md);
   a new/renamed term → [CONTEXT.md](CONTEXT.md); a change to `src/eval/` or the
-  `paperlens-eval` flow → [docs/harness.md](docs/harness.md). A change isn't done until docs
-  agree.
+  `paperlens-eval` flow → [docs/harness.md](docs/harness.md); any new feature (user-facing or
+  internal) → [docs/features.md](docs/features.md). A change isn't done until docs agree.
 
 Full contributor guide: [CONTRIBUTING.md](CONTRIBUTING.md). Recipes for adding a paper,
 LLM backend, or embedder: [docs/how-to.md](docs/how-to.md).

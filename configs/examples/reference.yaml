@@ -135,8 +135,12 @@ tagger:
   max_excerpt_chars: 6000 # how much of the paper (title/abstract/headings) to tag from
 
 # --- Multi query retrieval ---
+# Opt-in in code (`enabled: false` by default) —
+# extra LLM call + n_paraphrases extra retrievals per search_papers call
+# measure your own pool with `paperlens-eval screen --tier retrieval --multi-query` (docs/harness.md)
+# before trusting this blindly, same as sparse/faithfulness ask you to for their own opt-ins.
 multi_query:
-  enabled: true
+  enabled: true # recommended default, not measured for your specific pool — see comment above
   n_paraphrases: 3
   fetch_multiplier: 3
 

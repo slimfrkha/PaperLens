@@ -303,6 +303,10 @@ Served under `/api`; any other path falls through to the SPA.
 |---|---|---|
 | GET | `/api/papers` | List ingested papers with tags. |
 | GET | `/api/papers/{paper_id}` | One paper's full markdown. |
+| GET | `/api/papers/{paper_id}/annotations` | List a paper's saved annotations. |
+| POST | `/api/papers/{paper_id}/annotations` | Create an annotation (snippet + section + optional note). |
+| PATCH | `/api/papers/{paper_id}/annotations/{annotation_id}` | Update an annotation's note. |
+| DELETE | `/api/papers/{paper_id}/annotations/{annotation_id}` | Delete an annotation. |
 | GET | `/api/tags` | Tags with paper counts, excluding any tag present on every paper (no filtering value). |
 | GET | `/api/admin/status` | Paper/chunk counts, pending papers, ingestion progress. |
 | POST | `/api/admin/rescan` | Re-scan `config.yaml` and ingest new papers. |
