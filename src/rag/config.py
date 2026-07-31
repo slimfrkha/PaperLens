@@ -286,7 +286,7 @@ class MultiQueryCfg:
     pluggable part is which LLM powers it, and that's already a ``ChoiceRegistry`` one
     level down (``llm.chat``, reused rather than duplicated here)."""
 
-    enabled: bool = False  # opt-in — unproven until screened, like sparse.enabled
+    enabled: bool = False  # opt-in
     n_paraphrases: int = 3
     # Each variant over-fetches fetch_multiplier * candidates before the flat RRF fuse,
     # independent of sparse.fetch_multiplier — needed even when sparse is off, or the fuse
