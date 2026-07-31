@@ -23,7 +23,9 @@ def make_agent(make_searcher, seed_chunks):
         if faithfulness is not None:
             ctx.cfg.faithfulness = HFFaithfulnessCfg(enabled=True)
         manifest = Manifest(ctx.cfg.paths.rag_db)
-        manifest.upsert({"paper_id": "paper-a", "title": "Paper A", "tags": ["moe"]})
+        manifest.upsert(
+            {"paper_id": "paper-a", "title": "Paper A", "tags": ["moe"], "arxiv_id": "2412.19437"}
+        )
         manifest.upsert({"paper_id": "paper-b", "title": "Paper B", "tags": ["rl"]})
         agent = ChatAgent(ctx.cfg, ctx.searcher, manifest, client=llm, faithfulness=faithfulness)
         return agent
@@ -55,6 +57,7 @@ def test_search_call_builds_citations_and_trace(make_agent, fake_llm):
     assert citations[0]["ref"] == "r1"
     assert citations[0]["paper_id"] == "paper-a"
     assert citations[0]["title"] == "Paper A"
+    assert citations[0]["arxiv_id"] == "2412.19437"
     assert citations[0]["source"] == "dense"
     assert citations[0]["section_number"] == "1"
     assert citations[0]["body"] == "multi head latent attention kv cache"

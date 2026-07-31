@@ -173,6 +173,7 @@ class ChatAgent:
                     "ref": ref,
                     "paper_id": r.paper_id,
                     "title": rec["title"] if rec else r.paper_id,
+                    "arxiv_id": rec.get("arxiv_id") if rec else None,
                     "breadcrumb": r.breadcrumb,
                     "section_title": r.section_title,
                     "section_number": r.section_number,

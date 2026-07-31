@@ -32,6 +32,7 @@ import {
   type UsageInfo,
 } from "../api";
 import Answer from "../components/Answer";
+import AnswerActions from "../components/AnswerActions";
 import ChatSidebar from "../components/ChatSidebar";
 import FeedbackControl from "../components/FeedbackControl";
 import SourceCards from "../components/SourceCards";
@@ -481,6 +482,9 @@ export default function ChatPage() {
                       note={t.feedback?.note ?? null}
                       onChange={(vote, note) => onFeedback(i, vote, note)}
                     />
+                  )}
+                  {!t.streaming && t.content && (
+                    <AnswerActions text={t.content} citations={t.citations ?? []} />
                   )}
                 </Box>
               ),

@@ -6,6 +6,7 @@
 
 - 📄 [Add papers](#add-papers)
 - 🏷️ [Re-tag papers](#re-tag-papers)
+- 📋 [Export an answer](#export-an-answer)
 - 🎛️ [Tune retrieval config for your pool (the eval harness)](#tune-retrieval-config-for-your-pool)
 - 🧪 [Calibrate the faithfulness checker](#calibrate-the-faithfulness-checker)
 - 🤖 [Switch the chat or tagging LLM](#switch-the-chat-or-tagging-llm)
@@ -56,6 +57,30 @@ all papers, so the tag filter isn't fragmented by spelling variants.
 
 ✅ Verify: the printed tags per paper change, the `X -> Y` merges are listed under
 `== Normalizing tags ==`, and the **Papers** page / tag filter reflect them.
+
+---
+
+## Export an answer
+
+Every assistant answer has two copy actions below it, in their own row underneath the
+👍/👎 feedback control:
+
+- **Copy as Markdown** — the answer text with each `[rN]` marker turned into a `[^N]`
+  footnote, plus a `## References` block linking each cited passage's paper on arXiv. Works
+  on any answer, cited or not (a small-talk reply just copies as plain text).
+- **Copy BibTeX** — one `@misc` entry per distinct paper actually cited in the answer
+  (`title` + `eprint`/`archivePrefix` + a `year` derived from the arXiv ID's `YYMM` prefix).
+  Disabled when the answer cited nothing.
+
+Both are client-side only — no network call, nothing persisted. **Known limitation:** the
+BibTeX entries have no `author` field. The manifest doesn't store paper authors (only
+`paper_id`/`title`/`arxiv_id`/`tags`), so this is a fully-offline stub rather than a
+complete citation — paste it in and fill in authors by hand, or resolve them from the
+`arxiv_id` yourself.
+
+✅ Verify: ask a question that triggers at least one search, click both buttons, and paste
+the clipboard contents somewhere — the footnote numbers should match what's shown on screen,
+and the BibTeX should have one entry per distinct cited paper.
 
 ---
 

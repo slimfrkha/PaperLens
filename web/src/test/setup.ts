@@ -26,3 +26,11 @@ window.ResizeObserver = class {
   unobserve() {}
   disconnect() {}
 };
+
+// jsdom implements no Clipboard API at all; Mantine's useClipboard (CopyButton) guards
+// with `"clipboard" in navigator`, then chains `.then()` on the write — writeText must
+// resolve, not just exist, or that chain throws on a bare mock's undefined return.
+Object.defineProperty(navigator, "clipboard", {
+  value: { writeText: vi.fn(() => Promise.resolve()) },
+  configurable: true,
+});

@@ -25,6 +25,7 @@ export interface Citation {
   ref: string;
   paper_id: string;
   title: string;
+  arxiv_id?: string | null;
   breadcrumb: string;
   section_title: string;
   section_number?: string;
