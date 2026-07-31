@@ -306,6 +306,8 @@ Served under `/api`; any other path falls through to the SPA.
 | GET | `/api/tags` | Tags with paper counts, excluding any tag present on every paper (no filtering value). |
 | GET | `/api/admin/status` | Paper/chunk counts, pending papers, ingestion progress. |
 | POST | `/api/admin/rescan` | Re-scan `config.yaml` and ingest new papers. |
+| POST | `/api/admin/papers` | Add a paper by arXiv id or URL: writes it into `config.yaml` and queues ingestion. |
+| DELETE | `/api/admin/papers/{paper_id}` | Remove a paper: manifest entry, Chroma chunks, cached PDF/markdown, annotations, and its `config.yaml` entry. |
 | GET | `/api/chats` | List chat sessions. |
 | POST | `/api/chats` | Create a chat session. |
 | GET | `/api/chats/{chat_id}` | Fetch one chat session. |

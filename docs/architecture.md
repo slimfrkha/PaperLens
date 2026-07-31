@@ -62,6 +62,18 @@ chunk metadata, so neither needs the other's output; they meet at the manifest w
 compute-bound embedder and the I/O-bound LLM call overlap for free. (This is also why
 `--retag` can regenerate tags without re-indexing.)
 
+The `papers:` list in config.yaml is what `pending_papers` diffs against the manifest to
+decide what's left to ingest — hand-edit it and hit "Re-scan config", or use the Admin
+UI's add/remove-paper actions (`POST`/`DELETE /api/admin/papers`), which write that same
+list through `rag.config_writer` (a comment-preserving `ruamel.yaml` round-trip, so a
+UI-driven edit doesn't clobber the rest of the file's formatting) and mutate the running
+process's in-memory `cfg.papers` in place — `IngestConfig.papers` is the same list object
+by reference, so the worker picks the change up immediately, no restart needed. Remove is
+the inverse of the six stages above: it deletes the paper's Chroma chunks, manifest entry,
+cached PDF/markdown, annotations, and `config.yaml` entry together, so it can't reappear as
+"pending" on the next rescan and doesn't leave annotations orphaned against a paper that no
+longer exists.
+
 After the per-paper loop finishes, a single library-level **tag normalization** pass runs
 (`normalize_manifest_tags`): it shows the LLM the whole tag vocabulary, gets back a
 `{tag -> canonical}` map that merges only near-duplicates (spelling variants, acronym vs

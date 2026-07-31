@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { chat, setFeedback } from "./api";
+import { addPaper, chat, removePaper, setFeedback } from "./api";
 
 function mockStreamResponse(sse: string): Response {
   let sent = false;
@@ -145,5 +145,74 @@ describe("setFeedback", () => {
       }),
     );
     expect(result).toEqual(session);
+  });
+});
+
+describe("addPaper", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("POSTs the raw id/URL and returns the queued name", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ queued: true, name: "2412.19437" }),
+    } as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await addPaper("https://arxiv.org/abs/2412.19437");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/admin/papers",
+      expect.objectContaining({
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ arxiv_id_or_url: "https://arxiv.org/abs/2412.19437" }),
+      }),
+    );
+    expect(result).toEqual({ queued: true, name: "2412.19437" });
+  });
+
+  it("throws the backend's error message on a 409 duplicate", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 409,
+        statusText: "Conflict",
+        json: () => Promise.resolve({ error: "already curated as deepseek-v3" }),
+      } as Response),
+    );
+
+    await expect(addPaper("2412.19437")).rejects.toThrow("already curated as deepseek-v3");
+  });
+});
+
+describe("removePaper", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("DELETEs the paper and tolerates a bodyless 204", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 204 } as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(removePaper("paper-a")).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith("/api/admin/papers/paper-a", { method: "DELETE" });
+  });
+
+  it("throws the backend's error message on a 404", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        statusText: "Not Found",
+        json: () => Promise.resolve({ error: "not found" }),
+      } as Response),
+    );
+
+    await expect(removePaper("missing")).rejects.toThrow("not found");
   });
 });

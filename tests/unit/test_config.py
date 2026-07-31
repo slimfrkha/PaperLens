@@ -42,6 +42,7 @@ def test_relative_paths_anchored_to_config_dir(tmp_path):
     # Relative rag_db is resolved under the config file's directory.
     assert cfg.paths.rag_db == str((tmp_path / "data/db").resolve())
     assert cfg.root == tmp_path.resolve()
+    assert cfg.source_path == cfg_path.resolve()
 
 
 def test_relative_paths_anchored_to_pyproject_root_not_config_dir(tmp_path):
@@ -117,6 +118,17 @@ def test_cli_override_feeds_interpolation(tmp_path):
     cfg = parse_config(["--config_path", str(p), "--server.port=1234"])
     assert cfg.server.port == 1234
     assert cfg.collection == "papers_1234"
+
+
+def test_config_path_cli_flag_does_not_collide_with_source_path_field(tmp_path):
+    # Config.source_path (added for the admin add/remove-paper config rewrite) must
+    # stay a pure loader-set bookkeeping field, not a second CLI override that fights
+    # draccus's own reserved --config_path bootstrap flag (utils.CONFIG_ARG). The
+    # explicit --config_path must still resolve to *that* file and source_path must
+    # reflect it, not the upward-search default.
+    p = _write_config(tmp_path)
+    cfg = parse_config(["--config_path", str(p)])
+    assert cfg.source_path == p.resolve()
 
 
 def test_unknown_key_rejected(tmp_path):

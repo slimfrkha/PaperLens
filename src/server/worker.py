@@ -62,41 +62,63 @@ class IngestionWorker:
 
     def _run(self) -> None:
         try:
-            pending = pending_papers(self.cfg, self.manifest)
-            self._set(
-                total=len(pending), done=0, current=None, state="running" if pending else "idle"
-            )
-            if not pending:
-                return
+            embedder = None
+            collection = None
+            # A name this run has already attempted (success or failure) — excluded
+            # from every later re-check so a paper that keeps failing can't spin the
+            # loop below forever; pending_papers() would keep returning it, since a
+            # failed ingest never reaches the manifest write.
+            attempted: set[str] = set()
+            first_batch = True
+            # Loop over batches, not just one pass: a paper can be added (admin
+            # add-paper route mutates cfg.papers in place) while this run is already
+            # in flight, and trigger() is single-flight — without re-checking here,
+            # that paper would sit in `pending` until someone happens to click
+            # rescan again. Re-scanning right before going idle picks it up for free.
+            while True:
+                pending = [
+                    p for p in pending_papers(self.cfg, self.manifest) if p.name not in attempted
+                ]
+                if not pending:
+                    # Only reset total/done on the very first (empty) pass — once a
+                    # batch has run, its final counts are what the snapshot should
+                    # keep reporting, not get zeroed out by this re-check.
+                    if first_batch:
+                        self._set(total=0, done=0, current=None, state="idle")
+                    else:
+                        self._set(current=None, state="idle")
+                    return
+                first_batch = False
+                self._set(total=len(pending), done=0, current=None, state="running")
 
-            embedder = build_embedder_from_config(self.cfg)
-            collection = open_collection(
-                self.cfg.paths.rag_db, self.cfg.collection, embedder_name=embedder.name()
-            )
-
-            for i, paper in enumerate(pending):
-                self._set(current={"name": paper.name, "stage": "queued", "pct": 0.0})
-                try:
-                    ingest_paper(
-                        paper,
-                        self.cfg,
-                        embedder,
-                        collection,
-                        self.manifest,
-                        on_stage=lambda s, pct, name=paper.name: self._set(
-                            current={"name": name, "stage": s, "pct": pct}
-                        ),
+                if embedder is None:
+                    embedder = build_embedder_from_config(self.cfg)
+                    collection = open_collection(
+                        self.cfg.paths.rag_db, self.cfg.collection, embedder_name=embedder.name()
                     )
-                except Exception as e:
-                    self._error(paper.name, str(e))
-                self._set(done=i + 1)
 
-            # Consolidate near-duplicate tags across the library once, after all
-            # pending papers are tagged.
-            self._set(current={"name": "library", "stage": "normalize", "pct": 0.0})
-            normalize_manifest_tags(self.cfg, self.manifest)
+                for i, paper in enumerate(pending):
+                    attempted.add(paper.name)
+                    self._set(current={"name": paper.name, "stage": "queued", "pct": 0.0})
+                    try:
+                        ingest_paper(
+                            paper,
+                            self.cfg,
+                            embedder,
+                            collection,
+                            self.manifest,
+                            on_stage=lambda s, pct, name=paper.name: self._set(
+                                current={"name": name, "stage": s, "pct": pct}
+                            ),
+                        )
+                    except Exception as e:
+                        self._error(paper.name, str(e))
+                    self._set(done=i + 1)
 
-            self._set(state="idle", current=None)
+                # Consolidate near-duplicate tags across the library once, after all
+                # pending papers in this batch are tagged.
+                self._set(current={"name": "library", "stage": "normalize", "pct": 0.0})
+                normalize_manifest_tags(self.cfg, self.manifest)
         except Exception:
             self._set(state="error", current=None)
             self._error("worker", traceback.format_exc())

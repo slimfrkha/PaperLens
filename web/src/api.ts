@@ -95,6 +95,17 @@ async function j<T>(r: Response): Promise<T> {
   return r.json();
 }
 
+/** Like j<T>, but on failure surfaces the backend's `{"error": "..."}` body (e.g. the
+ *  admin add/remove-paper routes' "already curated as X" / "not found") instead of a
+ *  bare status line, and tolerates a bodyless 204 on success. */
+async function jOrError<T>(r: Response): Promise<T> {
+  if (!r.ok) {
+    const body = (await r.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `${r.status} ${r.statusText}`);
+  }
+  return r.status === 204 ? (undefined as T) : r.json();
+}
+
 export const getPapers = () => fetch("/api/papers").then(j<Paper[]>);
 export const getPaper = (id: string) =>
   fetch(`/api/papers/${encodeURIComponent(id)}`).then(
@@ -138,6 +149,16 @@ export const getTags = () => fetch("/api/tags").then(j<TagCount[]>);
 export const getStatus = () => fetch("/api/admin/status").then(j<AdminStatus>);
 export const rescan = () =>
   fetch("/api/admin/rescan", { method: "POST" }).then(j<{ started: boolean }>);
+export const addPaper = (arxivIdOrUrl: string) =>
+  fetch("/api/admin/papers", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ arxiv_id_or_url: arxivIdOrUrl }),
+  }).then(jOrError<{ queued: boolean; name: string }>);
+export const removePaper = (paperId: string) =>
+  fetch(`/api/admin/papers/${encodeURIComponent(paperId)}`, { method: "DELETE" }).then(
+    jOrError<void>,
+  );
 
 export const listChats = () => fetch("/api/chats").then(j<ChatSummary[]>);
 export const getChat = (id: string) =>

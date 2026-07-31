@@ -59,6 +59,23 @@ def test_delete_returns_false_for_missing_annotation(tmp_path):
     assert store.delete("paper1", "missing-id") is False
 
 
+def test_remove_paper_drops_all_its_annotations(tmp_path):
+    store = AnnotationStore(str(tmp_path))
+    store.create("paper1", "passage one", "Intro", "intro", "")
+    store.create("paper1", "passage two", "Intro", "intro", "")
+    store.create("paper2", "unrelated", "Intro", "intro", "")
+
+    store.remove_paper("paper1")
+
+    assert store.list_all("paper1") == []
+    assert len(store.list_all("paper2")) == 1  # untouched
+
+
+def test_remove_paper_is_a_noop_for_a_paper_with_no_annotations(tmp_path):
+    store = AnnotationStore(str(tmp_path))
+    store.remove_paper("never-had-any")  # must not raise
+
+
 def test_write_failure_leaves_prior_file_intact(tmp_path, monkeypatch):
     import server.annotations as annotations_mod
 

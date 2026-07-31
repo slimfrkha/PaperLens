@@ -49,6 +49,12 @@ def _existing_chunk_ids(collection, paper_id: str) -> set[str]:
     return set(got["ids"])
 
 
+def remove_paper_chunks(collection, paper_id: str) -> None:
+    """Delete every chunk for one paper — full removal, unlike ``index_markdown``'s
+    stale-diff cleanup (which only drops chunks the *new* chunking no longer produces)."""
+    collection.delete(where={"paper_id": paper_id})
+
+
 def collect_chunks(docs_dir: str, **chunk_kwargs) -> list[Chunk]:
     chunks: list[Chunk] = []
     for path in sorted(glob.glob(os.path.join(docs_dir, "*.md"))):

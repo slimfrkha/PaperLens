@@ -101,7 +101,7 @@ the leaf modules — the internal layout may change.
 `rag` modules import in **one direction only, no cycles** (graph in `src/rag/__init__.py`):
 
 ```text
-config  chunking  embedders  extract  manifest  →  llm  index  reranker
+config  chunking  embedders  extract  manifest  config_writer  →  llm  index  reranker
    →  tagger  search  pipeline  →  ingest
 ```
 

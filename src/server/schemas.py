@@ -35,3 +35,7 @@ class AnnotationCreate(BaseModel):
 
 class AnnotationUpdate(BaseModel):
     note: str
+
+
+class AddPaperRequest(BaseModel):
+    arxiv_id_or_url: str

@@ -11,23 +11,44 @@ import {
   SimpleGrid,
   Stack,
   Text,
+  TextInput,
   Title,
 } from "@mantine/core";
-import { IconRescan } from "../components/Icons";
-import { getStatus, rescan, type AdminStatus } from "../api";
+import { IconPlus, IconRescan } from "../components/Icons";
+import { addPaper, getStatus, rescan, type AdminStatus } from "../api";
 
 export default function AdminPage() {
   const [status, setStatus] = useState<AdminStatus | null>(null);
+  const [newPaper, setNewPaper] = useState("");
+  const [addError, setAddError] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+
+  const load = () =>
+    getStatus()
+      .then(setStatus)
+      .catch(() => {});
 
   useEffect(() => {
-    const load = () =>
-      getStatus()
-        .then(setStatus)
-        .catch(() => {});
     load();
     const iv = setInterval(load, 1500);
     return () => clearInterval(iv);
   }, []);
+
+  const handleAddPaper = async () => {
+    const raw = newPaper.trim();
+    if (!raw) return;
+    setAdding(true);
+    setAddError(null);
+    try {
+      await addPaper(raw);
+      setNewPaper("");
+      load(); // show the new pending paper without waiting for the next poll tick
+    } catch (e) {
+      setAddError(e instanceof Error ? e.message : "failed to add paper");
+    } finally {
+      setAdding(false);
+    }
+  };
 
   if (!status)
     return (
@@ -47,6 +68,30 @@ export default function AdminPage() {
           Re-scan config
         </Button>
       </Group>
+
+      <Card withBorder radius="md">
+        <Text fw={600} mb="sm">
+          Add paper
+        </Text>
+        <Group align="flex-end" gap="sm">
+          <TextInput
+            placeholder="arXiv id or URL, e.g. 2412.19437"
+            value={newPaper}
+            onChange={(e) => setNewPaper(e.currentTarget.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleAddPaper()}
+            disabled={adding}
+            style={{ flex: 1 }}
+          />
+          <Button leftSection={<IconPlus size={16} />} onClick={handleAddPaper} loading={adding}>
+            Add paper
+          </Button>
+        </Group>
+        {addError && (
+          <Text size="sm" c="red" mt="xs">
+            {addError}
+          </Text>
+        )}
+      </Card>
 
       <SimpleGrid cols={{ base: 1, sm: 3 }} spacing="md">
         <Stat label="Papers" value={status.db.n_papers} />

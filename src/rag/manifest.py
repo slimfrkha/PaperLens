@@ -38,6 +38,15 @@ class Manifest:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.path.write_text(json.dumps(data, indent=2))
 
+    def remove(self, paper_id: str) -> bool:
+        with self._lock:
+            data = self._load()
+            if paper_id not in data:
+                return False
+            del data[paper_id]
+            self.path.write_text(json.dumps(data, indent=2))
+            return True
+
     def all_tags(self) -> list[dict]:
         """Tags with paper counts, most common first."""
         counts: dict[str, int] = {}

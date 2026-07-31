@@ -82,6 +82,13 @@ class AnnotationStore:
             self._write(paper_id, remaining)
             return True
 
+    def remove_paper(self, paper_id: str) -> None:
+        """Drop every annotation for one paper — used when the paper itself is removed
+        (admin remove-paper route), so annotations don't outlive the paper they anchor
+        to and keep showing up against a now-404ing paper_id."""
+        with self._lock:
+            self._path(paper_id).unlink(missing_ok=True)
+
     def _write(self, paper_id: str, annotations: list[dict]) -> None:
         # Write-temp-then-rename so a crash or full disk mid-write can't leave a
         # truncated JSON file that list() would then fail to parse forever.

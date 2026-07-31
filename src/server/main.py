@@ -10,12 +10,13 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from sse_starlette.sse import EventSourceResponse
 
-from rag.config import BM25Cfg, Config, HFEmbeddingCfg, parse_config
-from rag.index import open_collection
+from rag import config_writer
+from rag.config import BM25Cfg, Config, HFEmbeddingCfg, Paper, parse_config
+from rag.index import open_collection, remove_paper_chunks
 from rag.llm import build_llm
 from rag.manifest import Manifest
 from rag.pipeline import pending_papers
@@ -25,8 +26,31 @@ from rag.search import Searcher
 from .agent import ChatAgent
 from .annotations import AnnotationStore
 from .chats import ChatStore, generate_name
-from .schemas import AnnotationCreate, AnnotationUpdate, ChatRequest, FeedbackRequest
+from .schemas import (
+    AddPaperRequest,
+    AnnotationCreate,
+    AnnotationUpdate,
+    ChatRequest,
+    FeedbackRequest,
+)
 from .worker import IngestionWorker
+
+# Modern arXiv id shape only (YYMM.NNNNN[N]); old-style slashed ids (e.g.
+# hep-th/9901001) are rejected, not just unsupported — `name = arxiv_id` below
+# becomes a filename stem (pipeline.py's pdf/md paths), and a `/` in that string
+# would turn into a path component instead of a filename.
+_ARXIV_ID_RE = re.compile(r"^\d{4}\.\d{4,5}$")
+
+
+def _normalize_arxiv_id(raw: str) -> str | None:
+    """Extract a bare arXiv id from a raw id or an arxiv.org abs/pdf URL.
+
+    Returns None if the result isn't a modern-format id."""
+    s = raw.strip()
+    s = re.sub(r"^https?://arxiv\.org/(abs|pdf)/", "", s)
+    s = re.sub(r"\.pdf$", "", s)
+    s = re.sub(r"v\d+$", "", s)
+    return s if _ARXIV_ID_RE.match(s) else None
 
 
 def create_app(cfg: Config) -> FastAPI:
@@ -38,7 +62,9 @@ def create_app(cfg: Config) -> FastAPI:
     worker = IngestionWorker(icfg, manifest)
     # Ensure the collection exists so the chat Searcher can open it even when the
     # DB is still empty (ingestion creates it too, but chat may be hit first).
-    open_collection(cfg.paths.rag_db, cfg.collection)
+    # Also reused as-is by the admin remove-paper route below — no need to build an
+    # embedder just to delete chunks by a paper_id metadata filter.
+    collection = open_collection(cfg.paths.rag_db, cfg.collection)
 
     # Chat models (embedder + reranker + LLM) are heavy — build once on first use.
     # The lock keeps the build single-shot when the startup warmer (below) and an
@@ -160,6 +186,52 @@ def create_app(cfg: Config) -> FastAPI:
     @app.post("/api/admin/rescan")
     def admin_rescan():
         return {"started": worker.trigger()}
+
+    @app.post("/api/admin/papers")
+    def add_paper(req: AddPaperRequest):
+        arxiv_id = _normalize_arxiv_id(req.arxiv_id_or_url)
+        if arxiv_id is None:
+            return JSONResponse({"error": "not a recognizable arXiv id or URL"}, status_code=400)
+        name = arxiv_id
+        # config_writer's dedup is by arxiv_id (not name) against every existing
+        # papers: entry, so a paper already curated under a human-chosen name (e.g.
+        # `deepseek-v3`) is still caught even though this route's generated `name`
+        # won't match it textually. Only on success does cfg.papers get the new
+        # entry — an unconditional append here would double-append (and
+        # double-ingest) on a race between two near-simultaneous requests for the
+        # same arxiv_id.
+        existing_name = config_writer.add_paper(cfg.source_path, name, arxiv_id)
+        if existing_name is not None:
+            return JSONResponse({"error": f"already curated as {existing_name}"}, status_code=409)
+        # In-place append: icfg.papers (the worker's view) is the same list object
+        # by reference (see Config.for_ingest), so this is immediately visible to
+        # pending_papers() without any config reload.
+        cfg.papers.append(Paper(name=name, arxiv_id=arxiv_id))
+        worker.trigger()
+        return {"queued": True, "name": name}
+
+    @app.delete("/api/admin/papers/{paper_id}")
+    def remove_paper(paper_id: str):
+        if manifest.get(paper_id) is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        # config_writer goes first, deliberately: it's the step most likely to fail
+        # (parsing/rewriting a config.yaml a human may have hand-edited into
+        # something ruamel chokes on), and it's also the step that decides whether
+        # this paper can ever be re-ingested. Doing it before anything destructive
+        # means a failure here leaves chunks/manifest/files untouched instead of
+        # half-deleting the paper and then having it silently reappear on the next
+        # rescan (config.yaml still lists it, but the manifest no longer does).
+        config_writer.remove_paper(cfg.source_path, paper_id)
+        # In-place slice assignment (not `cfg.papers = [...]`) — must keep the same
+        # list object so icfg.papers stays aliased, or the removed paper silently
+        # reappears as "pending" on the next rescan/trigger.
+        cfg.papers[:] = [p for p in cfg.papers if p.name != paper_id]
+        remove_paper_chunks(collection, paper_id)
+        manifest.remove(paper_id)
+        annotations.remove_paper(paper_id)
+        Path(cfg.paths.pdf_dir, f"{paper_id}.pdf").unlink(missing_ok=True)
+        Path(cfg.paths.markdown_dir, f"{paper_id}.md").unlink(missing_ok=True)
+        return Response(status_code=204)
 
     # ---- chat sessions ----
     @app.get("/api/chats")

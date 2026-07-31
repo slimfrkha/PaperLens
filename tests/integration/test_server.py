@@ -14,7 +14,10 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from rag.config import Paper
+from rag.index import open_collection
 from rag.llm import Usage
+from rag.manifest import Manifest
 from server.main import create_app
 
 
@@ -571,3 +574,118 @@ def test_annotation_delete_returns_false_for_unknown_annotation(make_config):
     resp = client.delete("/api/papers/paper1/annotations/missing-id")
     assert resp.status_code == 200
     assert resp.json() == {"ok": False}
+
+
+def _admin_app(make_config, tmp_path, papers_yaml: str = "papers: []\n"):
+    """A create_app() instance wired to a real config.yaml on disk, so the
+    admin add/remove-paper routes (which rewrite that file via config_writer) have
+    something real to read/write — unlike make_config()'s in-memory-only Config."""
+    cfg = make_config()
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"collection: {cfg.collection}\n{papers_yaml}")
+    cfg.source_path = config_path
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    return cfg, TestClient(create_app(cfg))
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("2412.19437", "2412.19437"),
+        ("https://arxiv.org/abs/2412.19437", "2412.19437"),
+        ("https://arxiv.org/pdf/2412.19437", "2412.19437"),
+        ("https://arxiv.org/pdf/2412.19437.pdf", "2412.19437"),
+        ("https://arxiv.org/abs/2412.19437v2", "2412.19437"),
+        ("  2412.19437  ", "2412.19437"),
+    ],
+)
+def test_add_paper_route_normalizes_id_or_url(make_config, tmp_path, raw, expected):
+    cfg, client = _admin_app(make_config, tmp_path)
+    resp = client.post("/api/admin/papers", json={"arxiv_id_or_url": raw})
+    assert resp.status_code == 200
+    assert resp.json() == {"queued": True, "name": expected}
+    assert [p.name for p in cfg.papers] == [expected]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "hep-th/9901001",  # old-style slashed id — would corrupt name-derived file paths
+        "not-an-arxiv-id",
+        "",
+    ],
+)
+def test_add_paper_route_rejects_unrecognizable_input(make_config, tmp_path, raw):
+    cfg, client = _admin_app(make_config, tmp_path)
+    resp = client.post("/api/admin/papers", json={"arxiv_id_or_url": raw})
+    assert resp.status_code == 400
+    assert cfg.papers == []
+
+
+def test_add_paper_route_dedups_by_arxiv_id_against_curated_entry(make_config, tmp_path):
+    # Pre-curated under a human-chosen name that won't textually match a
+    # UI-generated name == arxiv_id.
+    cfg, client = _admin_app(
+        make_config,
+        tmp_path,
+        papers_yaml='papers:\n  - { name: deepseek-v3, arxiv_id: "2412.19437" }\n',
+    )
+    # A route-created Config doesn't re-parse the file it was handed source_path
+    # for, so seed cfg.papers to match what a real load_config() would have done.
+    cfg.papers.append(Paper(name="deepseek-v3", arxiv_id="2412.19437"))
+
+    resp = client.post("/api/admin/papers", json={"arxiv_id_or_url": "2412.19437"})
+
+    assert resp.status_code == 409
+    assert resp.json() == {"error": "already curated as deepseek-v3"}
+    assert [p.name for p in cfg.papers] == ["deepseek-v3"]  # no duplicate appended
+
+
+def test_remove_paper_route_cleans_manifest_chunks_files_and_config(make_config, tmp_path):
+    cfg, client = _admin_app(
+        make_config,
+        tmp_path,
+        papers_yaml='papers:\n  - { name: paper-a, arxiv_id: "2412.19437" }\n',
+    )
+    cfg.papers.append(Paper(name="paper-a", arxiv_id="2412.19437"))
+
+    manifest = Manifest(cfg.paths.rag_db)
+    manifest.upsert({"paper_id": "paper-a", "title": "Paper A", "tags": [], "n_chunks": 1})
+
+    Path(cfg.paths.pdf_dir).mkdir(parents=True, exist_ok=True)
+    Path(cfg.paths.markdown_dir).mkdir(parents=True, exist_ok=True)
+    pdf_path = Path(cfg.paths.pdf_dir) / "paper-a.pdf"
+    md_path = Path(cfg.paths.markdown_dir) / "paper-a.md"
+    pdf_path.write_bytes(b"%PDF")
+    md_path.write_text("## Paper A")
+
+    collection = open_collection(cfg.paths.rag_db, cfg.collection)
+    collection.upsert(
+        ids=["chunk-1"],
+        embeddings=[[0.0] * 8],
+        documents=["a passage"],
+        metadatas=[{"paper_id": "paper-a"}],
+    )
+
+    client.post(
+        "/api/papers/paper-a/annotations",
+        json={"snippet": "a passage worth remembering", "section_title": "", "note": ""},
+    )
+    assert len(client.get("/api/papers/paper-a/annotations").json()) == 1
+
+    resp = client.delete("/api/admin/papers/paper-a")
+
+    assert resp.status_code == 204
+    assert manifest.get("paper-a") is None
+    assert collection.get(where={"paper_id": "paper-a"}, include=[])["ids"] == []
+    assert not pdf_path.exists()
+    assert not md_path.exists()
+    assert [p.name for p in cfg.papers] == []
+    assert "paper-a" not in cfg.source_path.read_text()
+    assert client.get("/api/papers/paper-a/annotations").json() == []
+
+
+def test_remove_paper_route_404_for_unknown_paper(make_config, tmp_path):
+    cfg, client = _admin_app(make_config, tmp_path)
+    resp = client.delete("/api/admin/papers/does-not-exist")
+    assert resp.status_code == 404

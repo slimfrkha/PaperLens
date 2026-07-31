@@ -373,6 +373,12 @@ class Config:
     # Set by the loader, not read from YAML; init=False keeps it off the CLI and
     # decode input.
     root: Path = field(default_factory=Path.cwd, init=False)
+    # The actual config.yaml file this Config was decoded from. Set by the loader,
+    # same init=False treatment as root. Named source_path, not config_path — draccus
+    # already reserves --config_path (utils.CONFIG_ARG) as its own bootstrap flag for
+    # locating the file *before* decoding; reusing that name here would risk a CLI
+    # override colliding with (or silently overriding) that reserved flag.
+    source_path: Path = field(default_factory=Path, init=False)
 
     def for_ingest(self) -> IngestConfig:
         """Project this Config to the ingestion-only view (CLI + in-process worker).
@@ -464,8 +470,10 @@ def _project_root(cfg_path: Path) -> Path:
 
 def _anchor(cfg: Config, cfg_path: Path) -> Config:
     """Anchor every relative path to the project root (nearest ``pyproject.toml``
-    ancestor); absolute paths are left untouched. Also records ``cfg.root``."""
+    ancestor); absolute paths are left untouched. Also records ``cfg.root`` and
+    ``cfg.source_path``."""
     cfg.root = _project_root(cfg_path)
+    cfg.source_path = cfg_path.resolve()
     for name in _PATH_FIELDS:
         p = Path(getattr(cfg.paths, name))
         if not p.is_absolute():

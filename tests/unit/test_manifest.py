@@ -52,6 +52,24 @@ def test_discriminating_tags_keeps_all_for_single_paper(tmp_path):
     assert m.discriminating_tags() == m.all_tags()
 
 
+def test_remove_deletes_entry_and_leaves_others(tmp_path):
+    m = Manifest(str(tmp_path))
+    m.upsert(_rec("a", ["moe"]))
+    m.upsert(_rec("b", ["rl"]))
+
+    assert m.remove("a") is True
+    assert m.get("a") is None
+    assert not m.is_ingested("a")
+    assert [p["paper_id"] for p in m.papers()] == ["b"]
+
+
+def test_remove_unknown_id_returns_false(tmp_path):
+    m = Manifest(str(tmp_path))
+    m.upsert(_rec("a", ["moe"]))
+    assert m.remove("missing") is False
+    assert [p["paper_id"] for p in m.papers()] == ["a"]
+
+
 def test_paper_ids_for_tags_is_or_semantics(tmp_path):
     m = Manifest(str(tmp_path))
     m.upsert(_rec("a", ["moe"]))

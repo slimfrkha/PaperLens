@@ -6,8 +6,8 @@ internal detail and may change.
 
 Module layering — imports flow one way (top -> bottom); there are no cycles::
 
-    config  chunking  extract  manifest  sparse       (leaves: no intra-rag deps)
-       |        |         |         |        |
+    config  chunking  extract  manifest  sparse  config_writer   (leaves: no intra-rag deps)
+       |        |         |         |        |         |
     embedders(config)   llm(config)   index(chunking, embedders)   reranker(config, llm)
        |                                              |
     tagger(llm)   query_expansion(llm)   search(embedders, reranker, sparse, query_expansion)
@@ -20,6 +20,13 @@ Module layering — imports flow one way (top -> bottom); there are no cycles::
 ``llm`` (depends only on ``config``), but isn't part of the retrieval flow above —
 it's composed directly by ``server.agent``, not by ``search``/``pipeline``.
 
+``config_writer`` is a leaf like ``sparse`` (no intra-rag deps — it round-trips
+config.yaml directly, not through the ``Config`` dataclass), composed only by the
+admin add/remove-paper routes in ``server.main``. Accessed as
+``rag.config_writer.add_paper`` / ``.remove_paper`` rather than flattened into this
+package's namespace: those names would collide with the identically-named HTTP
+route handlers that call them.
+
 The embedder/reranker/llm backends are selected by ``draccus.ChoiceRegistry``
 config variants (``embedding.type`` / ``reranker.type`` / ``llm.*.type``); the
 ``build_*`` functions match on the variant. ``server`` composes ``rag``; ``rag``
@@ -28,6 +35,7 @@ never imports ``server``.
 
 from __future__ import annotations
 
+from . import config_writer
 from .chunking import Chunk, chunk_markdown
 from .config import (
     AnthropicSpec,
@@ -90,6 +98,7 @@ __all__ = [
     "ChunkingCfg",
     "Config",
     "Embedder",
+    "config_writer",
     "EmbeddingCfg",
     "FaithfulnessCfg",
     "FaithfulnessChecker",
