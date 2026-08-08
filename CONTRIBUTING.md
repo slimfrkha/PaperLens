@@ -91,8 +91,8 @@ The `rag` modules import in **one direction only — no cycles**. The graph is d
 `src/rag/__init__.py` and explained in [docs/architecture.md](docs/architecture.md):
 
 ```text
-config  chunking  embedders  extract  manifest   →   llm  index  reranker
-   →   tagger  search  pipeline   →   ingest
+config  chunking  extract  manifest  sparse  config_writer   →   embedders  llm  index  reranker
+   →   tagger  query_expansion  search   →   pipeline   →   ingest
 ```
 
 `server` **composes** `rag` behind an HTTP API; `rag` never imports `server`. `eval` (the

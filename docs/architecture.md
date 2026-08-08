@@ -138,7 +138,7 @@ smear into semantic space. Unlike the reranker, a BM25 index is a **snapshot** o
 build time (its IDF needs global corpus stats) — `Searcher.sparse` is a lazy property that
 rebuilds whenever the collection has grown since the snapshot was taken, so a live
 `/api/admin/rescan` can't leave it silently stale. Ship-worthiness is measured, not assumed:
-`paperlens-eval screen --tier retrieval --hybrid` (see [harness](harness.md)) adds a
+`paperlens-eval screen --hybrid` (see [harness](harness.md)) adds a
 `"hybrid=on"` arm to the retrieval screen so the config change is proposed with evidence before
 `sparse.enabled` flips to `true`. Each fused `Result` also records which pool(s) surfaced it
 (`source`: `"dense"` / `"sparse"` / `"both"`), threaded into the citation registry and shown as a
@@ -275,10 +275,11 @@ every field.
 The Python packages import in one direction only — no cycles:
 
 ```text
-config  chunking  extract  manifest  sparse       (leaves: no intra-rag deps)
-  embedders(config)   llm(config)   index   reranker(llm)
-  tagger   search(embedders, reranker, sparse)   pipeline
-  ingest
+config  chunking  extract  manifest  sparse  config_writer       (leaves: no intra-rag deps)
+  embedders(config)   llm(config)   index(chunking, embedders)   reranker(config, llm)
+  tagger(llm)   query_expansion(llm)   search(embedders, reranker, sparse, query_expansion)
+  pipeline(extract, index, manifest, tagger)
+  ingest(pipeline, index, manifest, tagger)
 ```
 
 `faithfulness(config)` is a sibling leaf-plus-config module (depends only on `config`, like

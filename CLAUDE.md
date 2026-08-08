@@ -101,8 +101,8 @@ the leaf modules — the internal layout may change.
 `rag` modules import in **one direction only, no cycles** (graph in `src/rag/__init__.py`):
 
 ```text
-config  chunking  embedders  extract  manifest  config_writer  →  llm  index  reranker
-   →  tagger  search  pipeline  →  ingest
+config  chunking  extract  manifest  sparse  config_writer  →  embedders  llm  index  reranker
+   →  tagger  query_expansion  search  →  pipeline  →  ingest
 ```
 
 `server` **composes** `rag` behind the HTTP API; `rag` **never** imports `server`. `eval`

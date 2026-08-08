@@ -112,7 +112,7 @@ one. (Changing the embedder alone likewise invalidates the index; see the embedd
 
 Opt-in hybrid dense+BM25 retrieval: a lexical (BM25) search runs alongside dense recall and
 the two rankings are fused via reciprocal rank fusion (RRF) before reranking. Unproven until
-screened — `enabled` defaults to `false`; use `paperlens-eval screen --tier retrieval --hybrid`
+screened — `enabled` defaults to `false`; use `paperlens-eval screen --hybrid`
 to measure it on your pool before flipping it on (see [harness](harness.md)).
 
 | Key | Type | Default | Description |
