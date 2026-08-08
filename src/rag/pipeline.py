@@ -2,8 +2,10 @@
 
 Indexing and tagging are independent given the markdown (tags live in the
 manifest, not in chunk metadata), so they run concurrently and meet at the
-manifest write. Idempotent per stage (existing PDF/markdown are reused). Shared
-by the headless CLI (`rag.ingest`) and the in-process worker (`server.worker`).
+manifest write. Idempotent per stage (existing PDF/markdown are reused).
+`ingest_paper` runs one paper through the stages; `run_batch` runs a batch of
+papers through it, owning the embedder/collection lifecycle. Shared by the
+headless CLI (`rag.ingest`) and the in-process worker (`server.worker`).
 """
 
 from __future__ import annotations
@@ -13,13 +15,15 @@ import re
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import httpx
 
 from .config import IngestConfig, Paper
 from .extract import pdf_to_markdown
-from .index import index_markdown
+from .index import index_markdown, open_collection
 from .manifest import Manifest
 from .tagger import generate_tags, normalize_tags
 
@@ -27,6 +31,13 @@ ARXIV_PDF = "https://arxiv.org/pdf/{id}"
 
 # on_stage(stage_name, fraction_complete)
 OnStage = Callable[[str, float], None]
+
+# on_paper_start(paper)
+OnPaperStart = Callable[[Paper], None]
+# on_paper_stage(paper, stage_name, fraction_complete)
+OnPaperStage = Callable[[Paper, str, float], None]
+# on_paper_done(paper, record_or_None_on_failure, exception_or_None_on_success)
+OnPaperDone = Callable[[Paper, dict | None, Exception | None], None]
 
 
 def build_embedder_from_config(cfg: IngestConfig):
@@ -156,6 +167,79 @@ def ingest_paper(
     manifest.upsert(record)
     stage("done", 1.0)
     return record
+
+
+@dataclass
+class BatchResult:
+    records: list[dict]
+    embedder: Any
+    collection: Any
+
+
+def run_batch(
+    cfg: IngestConfig,
+    manifest: Manifest,
+    papers: list[Paper],
+    embedder=None,
+    collection=None,
+    on_paper_start: OnPaperStart | None = None,
+    on_stage: OnPaperStage | None = None,
+    on_paper_done: OnPaperDone | None = None,
+    retag: bool = True,
+    stop_on_error: bool = True,
+) -> BatchResult:
+    """Run ``papers`` through ``ingest_paper``, building embedder/collection if not supplied.
+
+    The CLI (plain-ingest, ``--reindex``) and the background worker all build-if-needed,
+    loop, and report per paper — they differ only in *how* they report
+    (``on_paper_start``/``on_stage``/``on_paper_done``) and in what a per-paper failure
+    should do to the batch (``stop_on_error``).
+
+    ``stop_on_error=True`` (default, the CLI's fail-fast behavior) re-raises the first
+    per-paper exception after notifying ``on_paper_done`` — no manifest write for that
+    paper, the run crashes with a traceback. ``stop_on_error=False`` (the worker) instead
+    swallows it there and continues the batch.
+
+    Embedder/collection are built once if not passed in (each independently — passing
+    one without the other reuses just that one). A caller that re-polls for new papers
+    across multiple ``run_batch`` calls (the worker) passes the previous call's
+    ``result.embedder``/``result.collection`` back in to avoid rebuilding.
+
+    Does NOT call ``normalize_manifest_tags`` — callers want different reporting around
+    it (and ``--reindex`` skips it entirely), so it stays a separate call after the batch.
+    """
+    if embedder is None:
+        embedder = build_embedder_from_config(cfg)
+    if collection is None:
+        collection = open_collection(
+            cfg.paths.rag_db, cfg.collection, embedder_name=embedder.name()
+        )
+
+    records: list[dict] = []
+    for paper in papers:
+        if on_paper_start:
+            on_paper_start(paper)
+        try:
+            rec = ingest_paper(
+                paper,
+                cfg,
+                embedder,
+                collection,
+                manifest,
+                on_stage=(lambda s, pct, _p=paper: on_stage(_p, s, pct)) if on_stage else None,
+                retag=retag,
+            )
+        except Exception as exc:
+            if on_paper_done:
+                on_paper_done(paper, None, exc)
+            if stop_on_error:
+                raise
+            continue
+        records.append(rec)
+        if on_paper_done:
+            on_paper_done(paper, rec, None)
+
+    return BatchResult(records=records, embedder=embedder, collection=collection)
 
 
 def normalize_manifest_tags(cfg: IngestConfig, manifest: Manifest) -> dict[str, str]:

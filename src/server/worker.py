@@ -12,14 +12,8 @@ import traceback
 from typing import Any
 
 from rag.config import IngestConfig
-from rag.index import open_collection
 from rag.manifest import Manifest
-from rag.pipeline import (
-    build_embedder_from_config,
-    ingest_paper,
-    normalize_manifest_tags,
-    pending_papers,
-)
+from rag.pipeline import normalize_manifest_tags, pending_papers, run_batch
 
 
 class IngestionWorker:
@@ -91,29 +85,34 @@ class IngestionWorker:
                 first_batch = False
                 self._set(total=len(pending), done=0, current=None, state="running")
 
-                if embedder is None:
-                    embedder = build_embedder_from_config(self.cfg)
-                    collection = open_collection(
-                        self.cfg.paths.rag_db, self.cfg.collection, embedder_name=embedder.name()
-                    )
+                done_count = 0
 
-                for i, paper in enumerate(pending):
+                def _on_start(paper):
                     attempted.add(paper.name)
                     self._set(current={"name": paper.name, "stage": "queued", "pct": 0.0})
-                    try:
-                        ingest_paper(
-                            paper,
-                            self.cfg,
-                            embedder,
-                            collection,
-                            self.manifest,
-                            on_stage=lambda s, pct, name=paper.name: self._set(
-                                current={"name": name, "stage": s, "pct": pct}
-                            ),
-                        )
-                    except Exception as e:
-                        self._error(paper.name, str(e))
-                    self._set(done=i + 1)
+
+                def _on_stage(paper, s, pct):
+                    self._set(current={"name": paper.name, "stage": s, "pct": pct})
+
+                def _on_done(paper, rec, exc):
+                    nonlocal done_count
+                    if exc is not None:
+                        self._error(paper.name, str(exc))
+                    done_count += 1
+                    self._set(done=done_count)
+
+                result = run_batch(
+                    self.cfg,
+                    self.manifest,
+                    pending,
+                    embedder=embedder,
+                    collection=collection,
+                    on_paper_start=_on_start,
+                    on_stage=_on_stage,
+                    on_paper_done=_on_done,
+                    stop_on_error=False,
+                )
+                embedder, collection = result.embedder, result.collection
 
                 # Consolidate near-duplicate tags across the library once, after all
                 # pending papers in this batch are tagged.

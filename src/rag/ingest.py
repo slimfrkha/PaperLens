@@ -15,14 +15,8 @@ import sys
 from pathlib import Path
 
 from .config import IngestConfig, parse_config
-from .index import open_collection
 from .manifest import Manifest
-from .pipeline import (
-    build_embedder_from_config,
-    ingest_paper,
-    normalize_manifest_tags,
-    pending_papers,
-)
+from .pipeline import normalize_manifest_tags, pending_papers, run_batch
 from .tagger import generate_tags
 
 
@@ -76,23 +70,27 @@ def main() -> None:
             print("Nothing to reindex — no configured papers are in the DB yet.")
             return
         print(f"== Reindexing {len(papers)} paper(s) under the current config ==")
-        embedder = build_embedder_from_config(cfg)
-        collection = open_collection(
-            cfg.paths.rag_db, cfg.collection, embedder_name=embedder.name()
-        )
-        for paper in papers:
+
+        def _on_start(paper):
             print(f"\n-- {paper.name} ({paper.arxiv_id}) --")
-            rec = ingest_paper(
-                paper,
-                cfg,
-                embedder,
-                collection,
-                manifest,
-                on_stage=lambda s, pct: print(f"   {s:9s} {int(pct * 100):3d}%"),
-                retag=False,
-            )
-            tags = ", ".join(rec["tags"]) or "(none)"
-            print(f"   -> {rec['n_chunks']} chunks (tags unchanged: {tags})")
+
+        def _on_stage(paper, s, pct):
+            print(f"   {s:9s} {int(pct * 100):3d}%")
+
+        def _on_done(paper, rec, exc):
+            if rec is not None:
+                tags = ", ".join(rec["tags"]) or "(none)"
+                print(f"   -> {rec['n_chunks']} chunks (tags unchanged: {tags})")
+
+        run_batch(
+            cfg,
+            manifest,
+            papers,
+            on_paper_start=_on_start,
+            on_stage=_on_stage,
+            on_paper_done=_on_done,
+            retag=False,
+        )
         print("\nDone.")
         return
 
@@ -102,20 +100,20 @@ def main() -> None:
         return
 
     print(f"== Ingesting {len(pending)} paper(s): {', '.join(p.name for p in pending)} ==")
-    embedder = build_embedder_from_config(cfg)
-    collection = open_collection(cfg.paths.rag_db, cfg.collection, embedder_name=embedder.name())
 
-    for paper in pending:
+    def _on_start(paper):
         print(f"\n-- {paper.name} ({paper.arxiv_id}) --")
-        rec = ingest_paper(
-            paper,
-            cfg,
-            embedder,
-            collection,
-            manifest,
-            on_stage=lambda s, pct: print(f"   {s:9s} {int(pct * 100):3d}%"),
-        )
-        print(f"   -> {rec['n_chunks']} chunks, tags: {', '.join(rec['tags']) or '(none)'}")
+
+    def _on_stage(paper, s, pct):
+        print(f"   {s:9s} {int(pct * 100):3d}%")
+
+    def _on_done(paper, rec, exc):
+        if rec is not None:
+            print(f"   -> {rec['n_chunks']} chunks, tags: {', '.join(rec['tags']) or '(none)'}")
+
+    run_batch(
+        cfg, manifest, pending, on_paper_start=_on_start, on_stage=_on_stage, on_paper_done=_on_done
+    )
 
     _normalize_step(cfg, manifest)
     print("\nDone.")

@@ -48,7 +48,10 @@ and manifest, so you can re-ingest without touching the server and vice versa.
 ## 📥 Ingestion: from arXiv to searchable chunks
 
 One function, `ingest_paper` (`src/rag/pipeline.py`), runs each paper through named
-**stages**; both the headless CLI and the background **worker** call it.
+**stages**; `run_batch` (same module) runs a batch of papers through it, owning the
+embedder/collection lifecycle and picking fail-fast vs. isolate-and-continue per paper
+via `stop_on_error`. Both the headless CLI and the background **worker** call
+`run_batch`, each supplying its own progress/error reporting hooks.
 
 1. **Download** the PDF by `arxiv_id`.
 2. **Extract** to markdown with Docling. Cached — re-ingesting reuses existing markdown.
