@@ -179,6 +179,53 @@ class Searcher:
         }
         return dense_ids, by_id
 
+    def _backfill_missing(self, by_id: dict[str, Result], candidate_ids: list[str]) -> None:
+        """Fetch any candidate id Chroma didn't already return from dense recall — reached
+        via BM25 (hybrid retrieval); in multi-query this is always this variant's own BM25
+        hits, since a hit already found by another variant's dense recall is already in
+        ``by_id`` — and add it with a placeholder score. Mutates ``by_id`` in place (not a
+        return-a-new-dict design): the multi-query loop calls this once per variant, and an
+        in-place mutation lets each call accumulate onto what earlier variants already
+        backfilled without a reassignment at every call site. The placeholder score (0.0)
+        is overwritten immediately after by ``_tag_and_collect``; only
+        paper_id/breadcrumb/section/text/body need to be real here.
+        """
+        missing = [cid for cid in candidate_ids if cid not in by_id]
+        if not missing:
+            return
+        got = cast(
+            dict[str, Any],
+            self.collection.get(ids=missing, include=["documents", "metadatas"]),
+        )
+        for cid, doc, m in zip(got["ids"], got["documents"], got["metadatas"], strict=True):
+            by_id[cid] = Result(
+                score=0.0,
+                paper_id=m["paper_id"],
+                breadcrumb=m["breadcrumb"],
+                section_title=m["section_title"],
+                section_number=m["section_number"],
+                text=doc,
+                body=m["body"],
+            )
+
+    def _tag_and_collect(
+        self,
+        by_id: dict[str, Result],
+        fused_ids: list[str],
+        scores: dict[str, float],
+        dense_set: set[str],
+        sparse_set: set[str],
+    ) -> list[Result]:
+        """Called once, after fusion is fully resolved: stamp each fused id's RRF score and
+        dense/sparse/both source into ``by_id``, then collect in fused order."""
+        for cid in fused_ids:
+            by_id[cid].score = scores[cid]
+            in_dense, in_sparse = cid in dense_set, cid in sparse_set
+            by_id[cid].source = (
+                "both" if in_dense and in_sparse else "sparse" if in_sparse else "dense"
+            )
+        return [by_id[cid] for cid in fused_ids]
+
     def search(
         self,
         query: str,
@@ -220,35 +267,12 @@ class Searcher:
                 fused_ids = reciprocal_rank_fusion([dense_ids, sparse_ids], k=self._rrf_k)[
                     :candidates
                 ]
-                missing = [cid for cid in fused_ids if cid not in by_id]
-                if missing:
-                    got = cast(
-                        dict[str, Any],
-                        self.collection.get(ids=missing, include=["documents", "metadatas"]),
-                    )
-                    for cid, doc, m in zip(
-                        got["ids"], got["documents"], got["metadatas"], strict=True
-                    ):
-                        by_id[cid] = Result(
-                            score=0.0,
-                            paper_id=m["paper_id"],
-                            breadcrumb=m["breadcrumb"],
-                            section_title=m["section_title"],
-                            section_number=m["section_number"],
-                            text=doc,
-                            body=m["body"],
-                        )
+                self._backfill_missing(by_id, fused_ids)
                 # RRF score uniformly across the whole fused set — don't mix cosine similarity and
                 # RRF scales (Result.score's docstring covers this: "rerank score if reranked, else
                 # cosine similarity" stops being true for a hybrid+no-rerank query).
                 scores = rrf_scores([dense_ids, sparse_ids], k=self._rrf_k)
-                for cid in fused_ids:
-                    by_id[cid].score = scores[cid]
-                    in_dense, in_sparse = cid in dense_set, cid in sparse_set
-                    by_id[cid].source = (
-                        "both" if in_dense and in_sparse else "sparse" if in_sparse else "dense"
-                    )
-                results = [by_id[cid] for cid in fused_ids]
+                results = self._tag_and_collect(by_id, fused_ids, scores, dense_set, sparse_set)
             else:
                 results = list(by_id.values())
         else:
@@ -277,35 +301,12 @@ class Searcher:
                     sparse_ids_v = self.sparse.search(v, n=variant_fetch_n, allowed_ids=allowed)
                     rankings.append(sparse_ids_v)
                     sparse_ids_all += sparse_ids_v
-                    missing = [cid for cid in sparse_ids_v if cid not in by_id]
-                    if missing:
-                        got = cast(
-                            dict[str, Any],
-                            self.collection.get(ids=missing, include=["documents", "metadatas"]),
-                        )
-                        for cid, doc, m in zip(
-                            got["ids"], got["documents"], got["metadatas"], strict=True
-                        ):
-                            by_id[cid] = Result(
-                                score=0.0,
-                                paper_id=m["paper_id"],
-                                breadcrumb=m["breadcrumb"],
-                                section_title=m["section_title"],
-                                section_number=m["section_number"],
-                                text=doc,
-                                body=m["body"],
-                            )
+                    self._backfill_missing(by_id, sparse_ids_v)
             fused_ids = reciprocal_rank_fusion(rankings, k=self._rrf_k)[:candidates]
             scores = rrf_scores(rankings, k=self._rrf_k)
             dense_set = set(dense_ids_all)
             sparse_set = set(sparse_ids_all)
-            for cid in fused_ids:
-                by_id[cid].score = scores[cid]
-                in_dense, in_sparse = cid in dense_set, cid in sparse_set
-                by_id[cid].source = (
-                    "both" if in_dense and in_sparse else "sparse" if in_sparse else "dense"
-                )
-            results = [by_id[cid] for cid in fused_ids]
+            results = self._tag_and_collect(by_id, fused_ids, scores, dense_set, sparse_set)
 
         if rerank:
             try:
