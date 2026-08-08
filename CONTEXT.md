@@ -205,6 +205,17 @@ Thought → Action → Observation **trace**.
 - Code: `ChatAgent` in `src/server/agent.py`.
 - `_Avoid_:` chatbot, RAG chain, assistant loop. The single tool is `search_papers`.
 
+### 🔄 Turn
+
+One request/response cycle of the chat loop: get-or-build the **agent**, run it, persist the
+result, and stream it. Orchestrated by `run_turn`, called from `/api/chat`'s route handler; the
+route itself owns only the single-flight guard (`ChatStore.try_acquire`/`release`) and the SSE
+plumbing around it, since both are tied to the HTTP response, not the turn's logic.
+
+- Code: `run_turn` in `src/server/chat_turn.py`.
+- `_Avoid_:` request, exchange, round-trip (say "turn" — it's the established term in
+  `docs/architecture.md`'s single-flight-guard note).
+
 ### 🔧 Pipeline
 
 The per-paper ingestion sequence: **download → extract (Docling) → index → tag →

@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 import threading
-import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -25,7 +23,8 @@ from rag.search import Searcher
 
 from .agent import ChatAgent
 from .annotations import AnnotationStore
-from .chats import ChatStore, generate_name
+from .chat_turn import run_turn
+from .chats import ChatStore
 from .schemas import (
     AddPaperRequest,
     AnnotationCreate,
@@ -273,69 +272,9 @@ def create_app(cfg: Config) -> FastAPI:
             loop.call_soon_threadsafe(queue.put_nowait, {"event": event, "data": data})
 
         def work():
-            trace_entries: list = []
-
-            def on_trace(e):
-                trace_entries.append(e)
-                emit("trace", json.dumps(e))
-
             try:
-                # Built here, not before scheduling this thread: get_agent() is the
-                # first-touch lazy model build and can throw (bad key, cold cloud
-                # client) — done outside this try/finally, a failure here would never
-                # release the try_acquire guard above, wedging the chat permanently.
-                agent = get_agent()
-                # An edit-and-resume truncates the stored tail before this turn is
-                # computed, so ref_start below reads only the retained history — the
-                # try_acquire guard above ensures no concurrent request can interleave.
-                if req.edit_index is not None and req.chat_id:
-                    chats.truncate_at(req.chat_id, req.edit_index)
-                # Existing chats already carry ref-numbered citations for prior turns —
-                # offset this turn's numbering past them so a follow-up question
-                # continues (r4, r5, ...) instead of restarting at r1 and colliding
-                # with refs already shown for a different paper earlier in the chat.
-                existing = chats.get(req.chat_id) if req.chat_id else None
-                ref_start = (
-                    sum(len(c) for c in existing.get("citations", []) if c) if existing else 0
-                )
-                # Spans the whole turn (retrieval + rerank + LLM + faithfulness check),
-                # not just LLM think time — that's the wait the user actually feels.
-                t0 = time.perf_counter()
-                text, citations, usage = agent.run(
-                    [m.model_dump() for m in req.messages],
-                    req.tags,
-                    req.papers,
-                    on_text=lambda t: emit("token", t),
-                    on_trace=on_trace,
-                    ref_start=ref_start,
-                )
-                latency_ms = int((time.perf_counter() - t0) * 1000)
-                usage_payload = {
-                    "input_tokens": usage.input_tokens,
-                    "output_tokens": usage.output_tokens,
-                    "latency_ms": latency_ms,
-                }
-                emit("citations", json.dumps(citations))
-                emit("usage", json.dumps(usage_payload))
-                # Persist the turn (append user + assistant) and name new sessions.
-                if req.chat_id and req.messages:
-                    name = None
-                    if not existing or not existing.get("name"):
-                        name = generate_name(req.messages[0].content, cfg.llm.tagging)
-                    saved = chats.append_turn(
-                        req.chat_id,
-                        req.messages[-1].content,
-                        text,
-                        citations,
-                        trace_entries,
-                        usage_payload,
-                        name=name,
-                    )
-                    emit("meta", json.dumps({"chat_id": saved["id"], "name": saved["name"]}))
-            except Exception as e:  # surface errors to the client
-                emit("error", f"{type(e).__name__}: {e}")
+                run_turn(get_agent, chats, req, emit, cfg.llm.tagging)
             finally:
-                emit("done", "")
                 if req.chat_id:
                     chats.release(req.chat_id)
 
