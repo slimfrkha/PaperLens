@@ -37,6 +37,55 @@ def _parse_sse(text: str) -> list[dict]:
     return events
 
 
+class _RefStartAgent:
+    """Shared fake ChatAgent: echoes ref_start into the returned citation's ref, so tests
+    can assert ref numbering continues correctly across turns/edits."""
+
+    def __init__(self, *a, **k):
+        pass
+
+    def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0):
+        ref = f"r{ref_start + 1}"
+        text = f"See [{ref}]."
+        on_text(text)
+        return text, [{"ref": ref, "paper_id": "p", "title": "P"}], Usage(10, 5)
+
+
+class _EchoAgent:
+    """Shared fake ChatAgent: emits one token "answer", empty citations, Usage(10, 5)."""
+
+    def __init__(self, *a, **k):
+        pass
+
+    def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0):
+        on_text("answer")
+        return "answer", [], Usage(10, 5)
+
+
+@pytest.fixture
+def patch_agent_seam(monkeypatch):
+    """Factory: patch server.main's get_agent() seam (build_llm/build_reranker/Searcher/
+    ChatAgent) so /api/chat never builds real models or hits a network. Pass `chat_agent`
+    to substitute ChatAgent (omit to leave it unpatched — e.g. when `build_llm` itself is
+    made to raise before ChatAgent would ever be reached); pass `build_llm` to override
+    the trivial default stand-in. Returns the `server.main` module object."""
+
+    def _patch(chat_agent=None, build_llm=None):
+        import importlib
+
+        # `import server.main` binds the re-exported main() function, not the module;
+        # import_module returns the real module so the agent seam can be stubbed.
+        main_mod = importlib.import_module("server.main")
+        monkeypatch.setattr(main_mod, "build_llm", build_llm or (lambda *a, **k: object()))
+        monkeypatch.setattr(main_mod, "build_reranker", lambda *a, **k: object())
+        monkeypatch.setattr(main_mod, "Searcher", lambda *a, **k: object())
+        if chat_agent is not None:
+            monkeypatch.setattr(main_mod, "ChatAgent", chat_agent)
+        return main_mod
+
+    return _patch
+
+
 @pytest.fixture
 def spa_client(make_config):
     cfg = make_config()
@@ -75,15 +124,9 @@ def test_spa_serves_a_legit_asset(spa_client):
     assert resp.text == "ASSET"
 
 
-def test_chat_streams_token_citations_done(make_config, monkeypatch):
+def test_chat_streams_token_citations_done(make_config, patch_agent_seam):
     # Pin the SSE contract: a scripted turn emits token(s), then citations, then a
     # terminal done — the cross-thread emit -> queue -> event_stream machinery.
-    import importlib
-
-    # `import server.main` binds the re-exported main() function, not the module;
-    # import_module returns the real module so the agent seam can be stubbed.
-    main_mod = importlib.import_module("server.main")
-
     class FakeAgent:
         def __init__(self, *a, **k):
             pass
@@ -95,10 +138,7 @@ def test_chat_streams_token_citations_done(make_config, monkeypatch):
                 on_trace({"type": "action", "query": "q"})
             return "foobar", [{"ref": "r1", "paper_id": "p", "title": "P"}], Usage(10, 5)
 
-    monkeypatch.setattr(main_mod, "build_llm", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "build_reranker", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "Searcher", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "ChatAgent", FakeAgent)
+    patch_agent_seam(chat_agent=FakeAgent)
 
     cfg = make_config()
     Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
@@ -119,11 +159,7 @@ def test_chat_streams_token_citations_done(make_config, monkeypatch):
     assert cits[0]["ref"] == "r1"
 
 
-def test_chat_streams_usage_event_and_persists_it(make_config, monkeypatch):
-    import importlib
-
-    main_mod = importlib.import_module("server.main")
-
+def test_chat_streams_usage_event_and_persists_it(make_config, patch_agent_seam):
     class FakeAgent:
         def __init__(self, *a, **k):
             pass
@@ -132,10 +168,7 @@ def test_chat_streams_usage_event_and_persists_it(make_config, monkeypatch):
             on_text("answer")
             return "answer", [], Usage(42, 7)
 
-    monkeypatch.setattr(main_mod, "build_llm", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "build_reranker", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "Searcher", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "ChatAgent", FakeAgent)
+    patch_agent_seam(chat_agent=FakeAgent)
 
     cfg = make_config()
     Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
@@ -157,28 +190,11 @@ def test_chat_streams_usage_event_and_persists_it(make_config, monkeypatch):
     assert saved["usage"][1]["input_tokens"] == 42
 
 
-def test_chat_continues_citation_numbering_across_turns(make_config, monkeypatch):
+def test_chat_continues_citation_numbering_across_turns(make_config, patch_agent_seam):
     # Reproduces the reported bug: a second question in the same chat must not
     # restart citation numbering at r1 — main.py must offset ref numbering by
     # what's already stored for this chat_id.
-    import importlib
-
-    main_mod = importlib.import_module("server.main")
-
-    class FakeAgent:
-        def __init__(self, *a, **k):
-            pass
-
-        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0):
-            ref = f"r{ref_start + 1}"
-            text = f"See [{ref}]."
-            on_text(text)
-            return text, [{"ref": ref, "paper_id": "p", "title": "P"}], Usage(10, 5)
-
-    monkeypatch.setattr(main_mod, "build_llm", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "build_reranker", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "Searcher", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "ChatAgent", FakeAgent)
+    patch_agent_seam(chat_agent=_RefStartAgent)
 
     cfg = make_config()
     Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
@@ -208,28 +224,11 @@ def test_chat_continues_citation_numbering_across_turns(make_config, monkeypatch
     assert cits2[0]["ref"] == "r2"
 
 
-def test_chat_edit_index_truncates_and_restarts_ref_numbering(make_config, monkeypatch):
+def test_chat_edit_index_truncates_and_restarts_ref_numbering(make_config, patch_agent_seam):
     # Edit the FIRST turn of a two-turn chat: the second exchange (and its r2 citation)
     # must be dropped, and the edited turn's citation must renumber from r1, not r3 —
     # ref_start has to be read off the truncated history, not the pre-edit one.
-    import importlib
-
-    main_mod = importlib.import_module("server.main")
-
-    class FakeAgent:
-        def __init__(self, *a, **k):
-            pass
-
-        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0):
-            ref = f"r{ref_start + 1}"
-            text = f"See [{ref}]."
-            on_text(text)
-            return text, [{"ref": ref, "paper_id": "p", "title": "P"}], Usage(10, 5)
-
-    monkeypatch.setattr(main_mod, "build_llm", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "build_reranker", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "Searcher", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "ChatAgent", FakeAgent)
+    patch_agent_seam(chat_agent=_RefStartAgent)
 
     cfg = make_config()
     Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
@@ -268,27 +267,10 @@ def test_chat_edit_index_truncates_and_restarts_ref_numbering(make_config, monke
     assert [m["content"] for m in after["messages"]] == ["q1 edited", "See [r1]."]
 
 
-def test_chat_edit_index_mid_conversation_keeps_earlier_refs(make_config, monkeypatch):
+def test_chat_edit_index_mid_conversation_keeps_earlier_refs(make_config, patch_agent_seam):
     # Edit the SECOND turn of a two-turn chat: the first exchange (and its r1
     # citation) is retained, so the edited turn's ref must continue at r2.
-    import importlib
-
-    main_mod = importlib.import_module("server.main")
-
-    class FakeAgent:
-        def __init__(self, *a, **k):
-            pass
-
-        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0):
-            ref = f"r{ref_start + 1}"
-            text = f"See [{ref}]."
-            on_text(text)
-            return text, [{"ref": ref, "paper_id": "p", "title": "P"}], Usage(10, 5)
-
-    monkeypatch.setattr(main_mod, "build_llm", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "build_reranker", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "Searcher", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "ChatAgent", FakeAgent)
+    patch_agent_seam(chat_agent=_RefStartAgent)
 
     cfg = make_config()
     Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
@@ -334,25 +316,10 @@ def test_chat_edit_index_mid_conversation_keeps_earlier_refs(make_config, monkey
     ]
 
 
-def test_chat_edit_index_on_assistant_turn_surfaces_sse_error(make_config, monkeypatch):
+def test_chat_edit_index_on_assistant_turn_surfaces_sse_error(make_config, patch_agent_seam):
     # truncate_at's ValueError (bad index) must come back as an SSE `error` event, not
     # an HTTP 4xx — the streaming response has already started by the time it's raised.
-    import importlib
-
-    main_mod = importlib.import_module("server.main")
-
-    class FakeAgent:
-        def __init__(self, *a, **k):
-            pass
-
-        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0):
-            on_text("answer")
-            return "answer", [], Usage(10, 5)
-
-    monkeypatch.setattr(main_mod, "build_llm", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "build_reranker", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "Searcher", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "ChatAgent", FakeAgent)
+    patch_agent_seam(chat_agent=_EchoAgent)
 
     cfg = make_config()
     Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
@@ -373,21 +340,15 @@ def test_chat_edit_index_on_assistant_turn_surfaces_sse_error(make_config, monke
     assert events[-1]["event"] == "done"
 
 
-def test_chat_route_releases_guard_when_agent_build_fails(make_config, monkeypatch):
+def test_chat_route_releases_guard_when_agent_build_fails(make_config, patch_agent_seam):
     # get_agent() is the first-touch lazy model build and can throw (bad key, cold
     # cloud client). That must not leak the single-flight guard: a failed turn has to
     # release its chat_id, or every later request against it gets stuck behind a
     # permanent 409 with nothing actually running.
-    import importlib
-
-    main_mod = importlib.import_module("server.main")
-
     def boom(*a, **k):
         raise RuntimeError("boom: agent build failed")
 
-    monkeypatch.setattr(main_mod, "build_llm", boom)
-    monkeypatch.setattr(main_mod, "build_reranker", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "Searcher", lambda *a, **k: object())
+    patch_agent_seam(build_llm=boom)
 
     cfg = make_config()
     Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
@@ -411,15 +372,12 @@ def test_chat_route_releases_guard_when_agent_build_fails(make_config, monkeypat
     assert second.status_code != 409
 
 
-def test_chat_route_rejects_concurrent_turn_on_same_chat(make_config, monkeypatch):
+def test_chat_route_rejects_concurrent_turn_on_same_chat(make_config, patch_agent_seam):
     # The single-flight guard exists so an edit's truncate+append can't interleave
     # with another in-flight turn on the same chat. Force real overlap: block the
     # first request's agent mid-turn, confirm a second request on the same chat_id
     # is rejected with 409 while the first is still running, then let it finish.
-    import importlib
     import threading
-
-    main_mod = importlib.import_module("server.main")
 
     started = threading.Event()
     release_agent = threading.Event()
@@ -434,10 +392,7 @@ def test_chat_route_rejects_concurrent_turn_on_same_chat(make_config, monkeypatc
             on_text("answer")
             return "answer", [], Usage(10, 5)
 
-    monkeypatch.setattr(main_mod, "build_llm", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "build_reranker", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "Searcher", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "ChatAgent", SlowFakeAgent)
+    patch_agent_seam(chat_agent=SlowFakeAgent)
 
     cfg = make_config()
     Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
@@ -466,23 +421,8 @@ def test_chat_route_rejects_concurrent_turn_on_same_chat(make_config, monkeypatc
     assert "done" in results["first"].text
 
 
-def test_feedback_route_sets_clears_and_rejects_invalid_index(make_config, monkeypatch):
-    import importlib
-
-    main_mod = importlib.import_module("server.main")
-
-    class FakeAgent:
-        def __init__(self, *a, **k):
-            pass
-
-        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0):
-            on_text("answer")
-            return "answer", [], Usage(10, 5)
-
-    monkeypatch.setattr(main_mod, "build_llm", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "build_reranker", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "Searcher", lambda *a, **k: object())
-    monkeypatch.setattr(main_mod, "ChatAgent", FakeAgent)
+def test_feedback_route_sets_clears_and_rejects_invalid_index(make_config, patch_agent_seam):
+    patch_agent_seam(chat_agent=_EchoAgent)
 
     cfg = make_config()
     Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
