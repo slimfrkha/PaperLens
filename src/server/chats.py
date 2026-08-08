@@ -8,7 +8,8 @@ Each session is one JSON file in the configured `chat_history` directory:
       "messages":  [{"role": "user", "content": "..."}, ...],   # ChatML
       "citations": [null, [<citation>, ...], ...],              # parallel to messages
       "feedback":  [null, {"vote": "up", "note": "...", "updated_at": "..."}, ...],
-      "usage":     [null, {"input_tokens": 512, "output_tokens": 128, "latency_ms": 2100}, ...]
+      "usage":     [null, {"input_tokens": 512, "output_tokens": 128, "latency_ms": 2100}, ...],
+      "per_paper": [null, true, ...]
     }
 
 `messages` is a plain ChatML list; `citations[i]` holds the grounded sources for
@@ -16,7 +17,10 @@ Each session is one JSON file in the configured `chat_history` directory:
 holds the 👍/👎 + optional note left on that assistant turn, set via `set_feedback`
 (null until a vote is cast, and always null for user turns). `usage[i]` holds the token
 counts + latency for that assistant turn (null for user turns; token counts may also be
-null if the LLM backend never reported usage).
+null if the LLM backend never reported usage). `per_paper[i]` holds the per-paper-retrieval
+toggle's value for that assistant turn (null for user turns) — the UI reads the last entry
+to restore the toggle to what the conversation's latest message actually used, rather than
+resetting it to a default that may not match.
 """
 
 from __future__ import annotations
@@ -91,6 +95,7 @@ class ChatStore:
             "traces": [],
             "feedback": [],
             "usage": [],
+            "per_paper": [],
         }
         self._write(chat)
         return chat
@@ -104,6 +109,7 @@ class ChatStore:
         trace: list,
         usage: dict | None = None,
         name: str | None = None,
+        per_paper: bool = False,
     ) -> dict:
         """Append one user+assistant exchange, preserving prior turns."""
         with self._lock:
@@ -117,19 +123,24 @@ class ChatStore:
             }
             chat.setdefault("traces", [])
             chat.setdefault("usage", [])
+            chat.setdefault("per_paper", [])
             # Keep parallel arrays aligned even for sessions created before traces/usage.
             while len(chat["traces"]) < len(chat["messages"]):
                 chat["traces"].append(None)
             while len(chat["usage"]) < len(chat["messages"]):
                 chat["usage"].append(None)
+            while len(chat["per_paper"]) < len(chat["messages"]):
+                chat["per_paper"].append(None)
             chat["messages"].append({"role": "user", "content": user_content})
             chat["citations"].append(None)
             chat["traces"].append(None)
             chat["usage"].append(None)
+            chat["per_paper"].append(None)
             chat["messages"].append({"role": "assistant", "content": assistant_content})
             chat["citations"].append(citations)
             chat["traces"].append(trace)
             chat["usage"].append(usage)
+            chat["per_paper"].append(per_paper)
             if name is not None:
                 chat["name"] = name
             chat["updated_at"] = _now()
@@ -186,7 +197,7 @@ class ChatStore:
                 raise ValueError("index out of range")
             if chat["messages"][index]["role"] != "user":
                 raise ValueError("edit index must be a user turn")
-            for key in ("messages", "citations", "traces", "feedback", "usage"):
+            for key in ("messages", "citations", "traces", "feedback", "usage", "per_paper"):
                 chat[key] = chat.get(key, [])[:index]
             chat["updated_at"] = _now()
             self._write(chat)

@@ -42,6 +42,7 @@ llm:
     api_key_env: ${llm.tagging.api_key_env}
 
 retrieval:
+  k: 10
   candidates: 50 # tuned via paperlens-eval confirm; default 20 measurably under-recalls on this pool
 
 sparse:

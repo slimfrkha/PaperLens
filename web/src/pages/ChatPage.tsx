@@ -7,6 +7,7 @@ import {
   Loader,
   MultiSelect,
   Stack,
+  Switch,
   Text,
   Textarea,
   Title,
@@ -59,6 +60,7 @@ export default function ChatPage() {
   const [tagOptions, setTagOptions] = useState<string[]>([]);
   const [papers, setPapers] = useState<string[]>([]);
   const [paperOptions, setPaperOptions] = useState<{ value: string; label: string }[]>([]);
+  const [perPaper, setPerPaper] = useState(false);
   const [busy, setBusy] = useState(false);
   const [empty, setEmpty] = useState(false);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
@@ -86,6 +88,7 @@ export default function ChatPage() {
       setTurns([]);
       setTags([]);
       setPapers([]);
+      setPerPaper(false);
     }
   }
 
@@ -114,6 +117,13 @@ export default function ChatPage() {
         // another session's stale (and now locked) filter values.
         setTags([]);
         setPapers([]);
+        // Per-paper isn't a locked filter — it should reflect what the conversation's
+        // latest message actually used, not silently reset to a default that may not
+        // match (e.g. reloading a chat whose last message used per-paper mode would
+        // otherwise show the toggle off, misleading the user about what's about to happen
+        // if they send another message without checking).
+        const lastPerPaper = s.per_paper?.length ? s.per_paper[s.per_paper.length - 1] : null;
+        setPerPaper(lastPerPaper ?? false);
         loadedId.current = chatId;
       })
       .catch(() => setTurns([]));
@@ -177,6 +187,7 @@ export default function ChatPage() {
         history,
         tags,
         papers,
+        perPaper,
         id,
         {
           onToken: (tok) => patchLast((t) => ({ ...t, content: t.content + tok })),
@@ -259,11 +270,27 @@ export default function ChatPage() {
   function newChat() {
     setTags([]);
     setPapers([]);
+    setPerPaper(false);
     navigate("/");
   }
 
   const composer = (
     <Box className="composer" p={6}>
+      <Group gap={6} justify="flex-end" mb={4}>
+        <Tooltip
+          label="Runs retrieval once per paper instead of once over the whole library, so one paper with many relevant chunks can't crowd out the others before reranking."
+          multiline
+          w={260}
+        >
+          <Switch
+            size="xs"
+            checked={perPaper}
+            onChange={(e) => setPerPaper(e.currentTarget.checked)}
+            label="Search each paper separately"
+            aria-label="Search each paper separately"
+          />
+        </Tooltip>
+      </Group>
       <Group align="flex-end" gap={6} wrap="nowrap">
         <Textarea
           flex={1}

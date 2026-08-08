@@ -240,6 +240,112 @@ def test_max_rounds_flows_from_retrieval_config(make_agent, fake_llm):
     assert llm.run_tools_calls[0]["max_rounds"] == 3
 
 
+def test_per_paper_trace_records_the_flag(make_agent, fake_llm):
+    llm = fake_llm(
+        answer="See [r1].",
+        tool_calls=[("search_papers", {"query": "latent attention kv cache"})],
+    )
+    agent = make_agent(llm)
+
+    trace = []
+    agent.run(
+        [{"role": "user", "content": "x"}],
+        tags=[],
+        papers=[],
+        on_text=lambda _t: None,
+        on_trace=trace.append,
+        per_paper=True,
+    )
+
+    action = next(e for e in trace if e["type"] == "action")
+    assert action["per_paper"] is True
+
+
+def test_per_paper_trace_defaults_to_false(make_agent, fake_llm):
+    llm = fake_llm(
+        answer="See [r1].",
+        tool_calls=[("search_papers", {"query": "latent attention kv cache"})],
+    )
+    agent = make_agent(llm)
+
+    trace = []
+    agent.run(
+        [{"role": "user", "content": "x"}],
+        tags=[],
+        papers=[],
+        on_text=lambda _t: None,
+        on_trace=trace.append,
+    )
+
+    action = next(e for e in trace if e["type"] == "action")
+    assert action["per_paper"] is False
+
+
+def test_per_paper_falls_back_to_every_manifest_paper_when_no_filter(make_agent, fake_llm):
+    llm = fake_llm(answer="ok", tool_calls=[("search_papers", {"query": "x"})])
+    agent = make_agent(llm)
+
+    calls: list[dict] = []
+    real_search = agent.searcher.search
+
+    def spy(query, **kw):
+        calls.append(kw)
+        return real_search(query, **kw)
+
+    agent.searcher.search = spy
+    agent.run(
+        [{"role": "user", "content": "x"}],
+        tags=[],
+        papers=[],
+        on_text=lambda _t: None,
+        per_paper=True,
+    )
+
+    assert sorted(calls[0]["paper_ids"]) == ["paper-a", "paper-b"]
+    assert calls[0]["per_paper"] is True
+
+
+def test_per_paper_does_not_override_an_already_resolved_filter(make_agent, fake_llm):
+    llm = fake_llm(answer="ok", tool_calls=[("search_papers", {"query": "x"})])
+    agent = make_agent(llm)
+
+    calls: list[dict] = []
+    real_search = agent.searcher.search
+
+    def spy(query, **kw):
+        calls.append(kw)
+        return real_search(query, **kw)
+
+    agent.searcher.search = spy
+    agent.run(
+        [{"role": "user", "content": "x"}],
+        tags=[],
+        papers=["paper-a"],
+        on_text=lambda _t: None,
+        per_paper=True,
+    )
+
+    assert calls[0]["paper_ids"] == ["paper-a"]
+
+
+def test_per_paper_false_leaves_paper_ids_none_when_no_filter(make_agent, fake_llm):
+    llm = fake_llm(answer="ok", tool_calls=[("search_papers", {"query": "x"})])
+    agent = make_agent(llm)
+
+    calls: list[dict] = []
+    real_search = agent.searcher.search
+
+    def spy(query, **kw):
+        calls.append(kw)
+        return real_search(query, **kw)
+
+    agent.searcher.search = spy
+    agent.run([{"role": "user", "content": "x"}], tags=[], papers=[], on_text=lambda _t: None)
+
+    assert calls[0]["paper_ids"] is None
+    assert calls[0]["per_paper"] is False
+
+
 def test_faithfulness_disabled_by_default_no_verdict_and_checker_not_called(
     make_agent, fake_llm, fake_faithfulness_checker
 ):

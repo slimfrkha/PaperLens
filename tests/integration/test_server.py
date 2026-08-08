@@ -44,7 +44,7 @@ class _RefStartAgent:
     def __init__(self, *a, **k):
         pass
 
-    def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0):
+    def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0, per_paper=False):
         ref = f"r{ref_start + 1}"
         text = f"See [{ref}]."
         on_text(text)
@@ -57,7 +57,7 @@ class _EchoAgent:
     def __init__(self, *a, **k):
         pass
 
-    def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0):
+    def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0, per_paper=False):
         on_text("answer")
         return "answer", [], Usage(10, 5)
 
@@ -131,7 +131,7 @@ def test_chat_streams_token_citations_done(make_config, patch_agent_seam):
         def __init__(self, *a, **k):
             pass
 
-        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0):
+        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0, per_paper=False):
             on_text("foo")
             on_text("bar")
             if on_trace:
@@ -159,12 +159,65 @@ def test_chat_streams_token_citations_done(make_config, patch_agent_seam):
     assert cits[0]["ref"] == "r1"
 
 
+def test_chat_per_paper_true_reaches_the_agent(make_config, patch_agent_seam):
+    received: dict = {}
+
+    class RecordingAgent:
+        def __init__(self, *a, **k):
+            pass
+
+        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0, per_paper=False):
+            received["per_paper"] = per_paper
+            on_text("ok")
+            return "ok", [], Usage(10, 5)
+
+    patch_agent_seam(chat_agent=RecordingAgent)
+
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    client = TestClient(create_app(cfg))
+
+    resp = client.post(
+        "/api/chat",
+        json={"messages": [{"role": "user", "content": "hi"}], "per_paper": True},
+    )
+
+    assert resp.status_code == 200
+    assert received["per_paper"] is True
+
+
+def test_chat_without_per_paper_field_defaults_false(make_config, patch_agent_seam):
+    # A request body predating this field (no "per_paper" key at all) must still 200 and
+    # default server-side to False — ChatRequest.per_paper's pydantic default covers it.
+    received: dict = {}
+
+    class RecordingAgent:
+        def __init__(self, *a, **k):
+            pass
+
+        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0, per_paper=False):
+            received["per_paper"] = per_paper
+            on_text("ok")
+            return "ok", [], Usage(10, 5)
+
+    patch_agent_seam(chat_agent=RecordingAgent)
+
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    client = TestClient(create_app(cfg))
+
+    resp = client.post("/api/chat", json={"messages": [{"role": "user", "content": "hi"}]})
+
+    assert resp.status_code == 200
+    assert received["per_paper"] is False
+
+
 def test_chat_streams_usage_event_and_persists_it(make_config, patch_agent_seam):
     class FakeAgent:
         def __init__(self, *a, **k):
             pass
 
-        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0):
+        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0, per_paper=False):
             on_text("answer")
             return "answer", [], Usage(42, 7)
 
@@ -386,7 +439,7 @@ def test_chat_route_rejects_concurrent_turn_on_same_chat(make_config, patch_agen
         def __init__(self, *a, **k):
             pass
 
-        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0):
+        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0, per_paper=False):
             started.set()
             assert release_agent.wait(timeout=5), "test deadlocked waiting for release"
             on_text("answer")

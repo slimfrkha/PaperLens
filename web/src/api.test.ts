@@ -36,7 +36,7 @@ describe("chat", () => {
     const onCitations = vi.fn();
     const onDone = vi.fn();
 
-    await chat([], [], [], null, { onToken, onCitations, onDone });
+    await chat([], [], [], false, null, { onToken, onCitations, onDone });
 
     expect(onToken).toHaveBeenCalledWith("Hello");
     expect(onCitations).toHaveBeenCalledWith([
@@ -50,7 +50,7 @@ describe("chat", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockStreamResponse(sse)));
 
     const onUsage = vi.fn();
-    await chat([], [], [], null, { onToken: vi.fn(), onCitations: vi.fn(), onUsage });
+    await chat([], [], [], false, null, { onToken: vi.fn(), onCitations: vi.fn(), onUsage });
 
     expect(onUsage).toHaveBeenCalledWith({
       input_tokens: 100,
@@ -64,7 +64,7 @@ describe("chat", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockStreamResponse(sse)));
 
     const onToken = vi.fn();
-    await chat([], [], [], null, { onToken, onCitations: vi.fn() });
+    await chat([], [], [], false, null, { onToken, onCitations: vi.fn() });
 
     expect(onToken).toHaveBeenCalledWith("Hi");
   });
@@ -73,21 +73,7 @@ describe("chat", () => {
     const fetchMock = vi.fn().mockResolvedValue(mockStreamResponse("event: done\ndata: \n\n"));
     vi.stubGlobal("fetch", fetchMock);
 
-    await chat([], [], [], "c1", { onToken: vi.fn(), onCitations: vi.fn() }, 2);
-
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/chat",
-      expect.objectContaining({
-        body: JSON.stringify({ messages: [], tags: [], papers: [], chat_id: "c1", edit_index: 2 }),
-      }),
-    );
-  });
-
-  it("sends edit_index: null for a normal (non-edit) send", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(mockStreamResponse("event: done\ndata: \n\n"));
-    vi.stubGlobal("fetch", fetchMock);
-
-    await chat([], [], [], "c1", { onToken: vi.fn(), onCitations: vi.fn() });
+    await chat([], [], [], false, "c1", { onToken: vi.fn(), onCitations: vi.fn() }, 2);
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/chat",
@@ -96,6 +82,49 @@ describe("chat", () => {
           messages: [],
           tags: [],
           papers: [],
+          per_paper: false,
+          chat_id: "c1",
+          edit_index: 2,
+        }),
+      }),
+    );
+  });
+
+  it("sends edit_index: null for a normal (non-edit) send", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockStreamResponse("event: done\ndata: \n\n"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await chat([], [], [], false, "c1", { onToken: vi.fn(), onCitations: vi.fn() });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/chat",
+      expect.objectContaining({
+        body: JSON.stringify({
+          messages: [],
+          tags: [],
+          papers: [],
+          per_paper: false,
+          chat_id: "c1",
+          edit_index: null,
+        }),
+      }),
+    );
+  });
+
+  it("sends per_paper: true in the request body when passed", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockStreamResponse("event: done\ndata: \n\n"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await chat([], [], [], true, "c1", { onToken: vi.fn(), onCitations: vi.fn() });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/chat",
+      expect.objectContaining({
+        body: JSON.stringify({
+          messages: [],
+          tags: [],
+          papers: [],
+          per_paper: true,
           chat_id: "c1",
           edit_index: null,
         }),
@@ -114,7 +143,12 @@ describe("chat", () => {
 
     const onError = vi.fn();
     const onDone = vi.fn();
-    await chat([], [], [], "c1", { onToken: vi.fn(), onCitations: vi.fn(), onError, onDone });
+    await chat([], [], [], false, "c1", {
+      onToken: vi.fn(),
+      onCitations: vi.fn(),
+      onError,
+      onDone,
+    });
 
     expect(onError).toHaveBeenCalledWith("a turn is already in progress for this chat");
     expect(onDone).toHaveBeenCalledOnce();

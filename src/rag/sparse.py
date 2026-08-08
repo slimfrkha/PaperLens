@@ -37,7 +37,10 @@ class BM25Index:
     bm25: BM25Okapi = field(repr=False)
 
     def search(self, query: str, n: int, allowed_ids: set[str] | None = None) -> list[str]:
-        """Top-``n`` chunk ids for ``query``, optionally restricted to ``allowed_ids``.
+        """Top-``n`` chunk ids for ``query``, optionally restricted to chunks whose
+        ``paper_id`` is in ``allowed_ids`` — every real caller (``Searcher.search``) builds
+        this from a resolved ``paper``/``paper_ids`` filter, so it's paper ids, not chunk ids;
+        that's what ``paper_ids`` (parallel to ``ids``) exists for.
 
         ``BM25Okapi.get_scores`` always scores the full corpus it was built from — there is no
         cheaper "restrict-then-score" API — so filtering by ``allowed_ids`` necessarily happens
@@ -50,11 +53,13 @@ class BM25Index:
         into RRF fusion instead of leaving that slot to dense recall.
         """
         scores = self.bm25.get_scores(_tokenize(query))
-        ranked = sorted(zip(self.ids, scores, strict=True), key=lambda t: t[1], reverse=True)
-        ranked = [(cid, s) for cid, s in ranked if s > 0]
+        ranked = sorted(
+            zip(self.ids, self.paper_ids, scores, strict=True), key=lambda t: t[2], reverse=True
+        )
+        ranked = [(cid, pid, s) for cid, pid, s in ranked if s > 0]
         if allowed_ids is not None:
-            ranked = [(cid, s) for cid, s in ranked if cid in allowed_ids]
-        return [cid for cid, _ in ranked[:n]]
+            ranked = [(cid, pid, s) for cid, pid, s in ranked if pid in allowed_ids]
+        return [cid for cid, _, _ in ranked[:n]]
 
 
 def build_sparse_index(collection, k1: float = 1.5, b: float = 0.75) -> BM25Index:

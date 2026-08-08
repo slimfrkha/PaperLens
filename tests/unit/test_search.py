@@ -383,3 +383,317 @@ def test_multi_query_enabled_without_llm_raises(tmp_path):
             collection="test_papers",
             multi_query_enabled=True,
         )
+
+
+# --- per_paper retrieval -----------------------------------------------------------------
+
+
+def test_per_paper_raises_without_resolved_paper_filter(make_searcher, seed_chunks):
+    ctx = make_searcher([seed_chunks("paper-a", "Attention", "latent attention over the kv cache")])
+    with pytest.raises(ValueError, match="per_paper"):
+        ctx.searcher.search("attention", per_paper=True)
+
+
+def test_per_paper_candidate_budget_floor_binds_at_k(make_searcher, seed_chunks, monkeypatch):
+    # candidates(6) // n_papers(3) = 2, below k(5) -> each paper's own fetch is floored to k.
+    docs = [
+        seed_chunks("paper-a", "S", "alpha content"),
+        seed_chunks("paper-b", "S", "beta content"),
+        seed_chunks("paper-c", "S", "gamma content"),
+    ]
+    ctx = make_searcher(docs)
+    seen_n_results: list[int] = []
+    original_query = ctx.searcher.collection.query
+
+    def spy_query(*args, **kwargs):
+        seen_n_results.append(kwargs["n_results"])
+        return original_query(*args, **kwargs)
+
+    monkeypatch.setattr(ctx.searcher.collection, "query", spy_query)
+
+    ctx.searcher.search(
+        "alpha",
+        k=5,
+        candidates=6,
+        paper_ids=["paper-a", "paper-b", "paper-c"],
+        per_paper=True,
+        rerank=False,
+    )
+
+    assert seen_n_results == [5, 5, 5]
+
+
+def test_per_paper_candidate_budget_mid_range_no_clamp_needed(
+    make_searcher, seed_chunks, monkeypatch
+):
+    # candidates(20) // n_papers(2) = 10, between k(5) and candidates(20) -> used as-is.
+    docs = [
+        seed_chunks("paper-a", "S", "alpha content"),
+        seed_chunks("paper-b", "S", "beta content"),
+    ]
+    ctx = make_searcher(docs)
+    seen_n_results: list[int] = []
+    original_query = ctx.searcher.collection.query
+
+    def spy_query(*args, **kwargs):
+        seen_n_results.append(kwargs["n_results"])
+        return original_query(*args, **kwargs)
+
+    monkeypatch.setattr(ctx.searcher.collection, "query", spy_query)
+
+    ctx.searcher.search(
+        "alpha",
+        k=5,
+        candidates=20,
+        paper_ids=["paper-a", "paper-b"],
+        per_paper=True,
+        rerank=False,
+    )
+
+    assert seen_n_results == [10, 10]
+
+
+def test_per_paper_single_resolved_paper_is_a_no_op(make_searcher, seed_chunks):
+    docs = [
+        seed_chunks("paper-a", "S1", "alpha one"),
+        seed_chunks("paper-a", "S2", "alpha two"),
+        seed_chunks("paper-b", "S1", "beta content"),
+    ]
+    ctx = make_searcher(docs)
+
+    whole_scope = ctx.searcher.search(
+        "alpha", k=2, candidates=5, paper="paper-a", per_paper=False, rerank=False
+    )
+    per_paper = ctx.searcher.search(
+        "alpha", k=2, candidates=5, paper="paper-a", per_paper=True, rerank=False
+    )
+
+    assert [(r.paper_id, r.score) for r in whole_scope] == [
+        (r.paper_id, r.score) for r in per_paper
+    ]
+
+
+class _CrowdingEmbedder:
+    """paper-a's two chunks both outrank paper-b's one chunk by raw cosine score — proves
+    per_paper's k-floor still surfaces paper-b's chunk when the nominal `candidates` budget
+    is small enough for paper-a's chunk count alone to exhaust it. A whole-scope search of
+    the same depth doesn't just rank paper-b's chunk lower — it never fetches it at all,
+    and even returns fewer than k results."""
+
+    _VECS = {
+        "orig": [1.0, 0.0],
+        "a1_text": [1.0, 0.0],  # cos(orig) = 1.0
+        "a2_text": [4.0, 1.0],  # cos(orig) = 4/sqrt(17) ~= 0.970
+        "b1_text": [1.0, 1.0],  # cos(orig) = 1/sqrt(2) ~= 0.707 (lowest of the three)
+    }
+
+    def name(self) -> str:
+        return "crowding"
+
+    def __call__(self, input: list[str]) -> list[list[float]]:
+        return [self._VECS[t] for t in input]
+
+
+def test_per_paper_prevents_one_paper_starving_another(make_config):
+    cfg = make_config()
+    embedder = _CrowdingEmbedder()
+    collection = open_collection(cfg.paths.rag_db, cfg.collection, embedder_name=embedder.name())
+    docs = [
+        ("a1", "a1_text", "paper-a", "S1"),
+        ("a2", "a2_text", "paper-a", "S2"),
+        ("b1", "b1_text", "paper-b", "S1"),
+    ]
+    metas = [
+        {
+            "paper_id": paper_id,
+            "breadcrumb": f"Paper > {section}",
+            "section_title": section,
+            "section_number": "1",
+            "body": text,
+        }
+        for _, text, paper_id, section in docs
+    ]
+    collection.upsert(
+        ids=[doc_id for doc_id, _, _, _ in docs],
+        embeddings=embedder([text for _, text, _, _ in docs]),
+        documents=[text for _, text, _, _ in docs],
+        metadatas=metas,
+    )
+    searcher = Searcher(db_dir=cfg.paths.rag_db, collection=cfg.collection, embedder=embedder)
+
+    whole_scope = searcher.search(
+        "orig", k=3, candidates=2, paper_ids=["paper-a", "paper-b"], rerank=False
+    )
+    assert "paper-b" not in [r.paper_id for r in whole_scope]
+    assert len(whole_scope) == 2  # under-filled: candidates=2 capped it below k=3
+
+    per_paper = searcher.search(
+        "orig",
+        k=3,
+        candidates=2,
+        paper_ids=["paper-a", "paper-b"],
+        per_paper=True,
+        rerank=False,
+    )
+    assert {r.paper_id for r in per_paper} == {"paper-a", "paper-b"}
+    assert len(per_paper) == 3
+
+
+class _UnsortedPoolEmbedder:
+    """paper-a's only chunk scores lower than paper-b's, but paper-a is fetched first (it's
+    earlier in paper_ids) — pools in ascending-score order unless per_paper explicitly
+    re-sorts before returning."""
+
+    _VECS = {
+        "orig": [1.0, 0.0],
+        "a1_text": [0.5, 0.5],  # cos(orig) ~= 0.707
+        "b1_text": [1.0, 0.0],  # cos(orig) = 1.0
+    }
+
+    def name(self) -> str:
+        return "unsorted-pool"
+
+    def __call__(self, input: list[str]) -> list[list[float]]:
+        return [self._VECS[t] for t in input]
+
+
+def _seed_unsorted_pool(cfg, embedder):
+    collection = open_collection(cfg.paths.rag_db, cfg.collection, embedder_name=embedder.name())
+    docs = [("a1", "a1_text", "paper-a"), ("b1", "b1_text", "paper-b")]
+    metas = [
+        {
+            "paper_id": paper_id,
+            "breadcrumb": "Paper > S1",
+            "section_title": "S1",
+            "section_number": "1",
+            "body": text,
+        }
+        for _, text, paper_id in docs
+    ]
+    collection.upsert(
+        ids=[doc_id for doc_id, _, _ in docs],
+        embeddings=embedder([text for _, text, _ in docs]),
+        documents=[text for _, text, _ in docs],
+        metadatas=metas,
+    )
+
+
+def test_per_paper_sorts_pooled_results_by_score_when_rerank_false(make_config):
+    cfg = make_config()
+    embedder = _UnsortedPoolEmbedder()
+    _seed_unsorted_pool(cfg, embedder)
+    searcher = Searcher(db_dir=cfg.paths.rag_db, collection=cfg.collection, embedder=embedder)
+
+    results = searcher.search(
+        "orig",
+        k=2,
+        candidates=2,
+        paper_ids=["paper-a", "paper-b"],
+        per_paper=True,
+        rerank=False,
+    )
+
+    assert [r.paper_id for r in results] == ["paper-b", "paper-a"]
+
+
+def test_per_paper_sorts_pooled_results_by_score_when_reranker_fails(monkeypatch, make_config):
+    monkeypatch.setattr("rag.search.CrossEncoderReranker", _RaisingCrossEncoderReranker)
+    cfg = make_config()
+    embedder = _UnsortedPoolEmbedder()
+    _seed_unsorted_pool(cfg, embedder)
+    searcher = Searcher(db_dir=cfg.paths.rag_db, collection=cfg.collection, embedder=embedder)
+
+    no_rerank = searcher.search(
+        "orig", k=2, candidates=2, paper_ids=["paper-a", "paper-b"], per_paper=True, rerank=False
+    )
+    reranked = searcher.search(
+        "orig", k=2, candidates=2, paper_ids=["paper-a", "paper-b"], per_paper=True, rerank=True
+    )
+
+    assert [r.paper_id for r in reranked] == [r.paper_id for r in no_rerank]
+
+
+def test_per_paper_generates_paraphrases_once_not_per_paper(
+    make_searcher, seed_chunks, fake_embedder, fake_llm
+):
+    docs = [
+        seed_chunks("paper-a", "S", "alpha content"),
+        seed_chunks("paper-b", "S", "beta content"),
+        seed_chunks("paper-c", "S", "gamma content"),
+    ]
+    ctx = make_searcher(docs)
+    llm = fake_llm(answer='["alternate phrasing"]')
+    searcher = Searcher(
+        db_dir=ctx.cfg.paths.rag_db,
+        collection=ctx.cfg.collection,
+        embedder=fake_embedder,
+        multi_query_enabled=True,
+        multi_query_n=1,
+        llm=llm,
+    )
+
+    searcher.search(
+        "alpha",
+        k=1,
+        candidates=3,
+        paper_ids=["paper-a", "paper-b", "paper-c"],
+        per_paper=True,
+        rerank=False,
+    )
+
+    # One paraphrase call for the whole search() call, not one per paper.
+    assert len(llm.complete_calls) == 1
+
+
+def test_per_paper_composes_with_hybrid_and_multi_query(make_config, fake_llm):
+    embedder = _FlatEmbedder()
+    cfg = make_config()
+    collection = open_collection(cfg.paths.rag_db, cfg.collection, embedder_name="flat")
+    docs = [
+        ("p1-chunk", "orig appears in this passage", "paper-p1"),
+        ("p2-chunk", "zzflorble appears in this passage", "paper-p2"),
+        # A third, out-of-scope doc so BM25's corpus isn't degenerate: with only 2 docs,
+        # a term appearing in exactly one of them gets IDF log((2-1+.5)/(1+.5)) == log(1) ==
+        # 0 exactly (BM25Okapi's unsmoothed IDF), so it would never rank above a zero score
+        # no matter what. Not included in paper_ids below, so it never enters the search scope.
+        ("filler-chunk", "neutral text sharing no terms with either query", "paper-filler"),
+    ]
+    metas = [
+        {
+            "paper_id": paper_id,
+            "breadcrumb": "Paper > S1",
+            "section_title": "S1",
+            "section_number": "1",
+            "body": text,
+        }
+        for _, text, paper_id in docs
+    ]
+    collection.upsert(
+        ids=[doc_id for doc_id, _, _ in docs],
+        embeddings=embedder([text for _, text, _ in docs]),
+        documents=[text for _, text, _ in docs],
+        metadatas=metas,
+    )
+    searcher = Searcher(
+        db_dir=cfg.paths.rag_db,
+        collection=cfg.collection,
+        embedder=embedder,
+        sparse_enabled=True,
+        multi_query_enabled=True,
+        multi_query_n=1,
+        llm=fake_llm(answer='["zzflorble"]'),
+    )
+
+    results = searcher.search(
+        "orig",
+        k=2,
+        candidates=2,
+        paper_ids=["paper-p1", "paper-p2"],
+        per_paper=True,
+        rerank=False,
+    )
+
+    by_paper = {r.paper_id: r.source for r in results}
+    assert set(by_paper) == {"paper-p1", "paper-p2"}
+    assert by_paper["paper-p1"] == "both"  # dense (flat embedder) + BM25 on "orig"
+    assert by_paper["paper-p2"] == "both"  # dense (flat embedder) + BM25 on the paraphrase

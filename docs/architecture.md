@@ -132,6 +132,15 @@ failing the request whenever the reranker fails outright — a cross-encoder mod
 error, or an LLM-backend call erroring (timeout, rate limit, auth). A `paper`/`paper_ids`
 filter (used by the tag filter) scopes recall.
 
+An opt-in, per-message **per-paper retrieval** mode (`Searcher.search(per_paper=True)`)
+changes *how* that scope is searched: instead of one recall pass over every allowed
+paper's chunks, it runs recall once per paper — each with its own candidate budget,
+clamped so no paper's contribution shrinks below a full `k`'s worth or exceeds `candidates`
+— and pools every paper's candidates flat before reranking. Trades a larger total candidate
+pool for protection against one chunk-heavy paper crowding the rest out of it before the
+reranker ever sees them; the final top-`k` selection is unchanged and global, with no
+per-paper quota.
+
 **Hybrid dense+sparse retrieval** (`sparse.enabled`, opt-in, off by default) inserts a fusion
 step before reranking: a BM25 lexical search (`src/rag/sparse.py`) runs alongside dense recall
 — each side over-fetching `sparse.fetch_multiplier × candidates` first — and the two rankings

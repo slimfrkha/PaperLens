@@ -59,6 +59,7 @@ def run_turn(
             on_text=lambda t: emit("token", t),
             on_trace=on_trace,
             ref_start=ref_start,
+            per_paper=req.per_paper,
         )
         latency_ms = int((time.perf_counter() - t0) * 1000)
         usage_payload = {
@@ -81,6 +82,7 @@ def run_turn(
                 trace_entries,
                 usage_payload,
                 name=name,
+                per_paper=req.per_paper,
             )
             emit("meta", json.dumps({"chat_id": saved["id"], "name": saved["name"]}))
     except Exception as e:  # surface errors to the client

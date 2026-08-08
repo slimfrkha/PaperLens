@@ -16,6 +16,7 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     tags: list[str] = []
     papers: list[str] = []  # restrict search to these paper_ids (empty = all)
+    per_paper: bool = False  # recall once per paper, pool flat, instead of once over the scope
     chat_id: str | None = None
     edit_index: int | None = None  # if set, truncate stored history to this index first
 

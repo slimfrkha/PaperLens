@@ -230,6 +230,240 @@ describe("ChatPage feedback control", () => {
   });
 });
 
+describe("ChatPage per-paper toggle", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("renders off by default", async () => {
+    vi.stubGlobal("fetch", mockFetch());
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+
+    await screen.findByText(/regression marker text/i);
+    expect(screen.getByLabelText("Search each paper separately")).not.toBeChecked();
+  });
+
+  it("toggling on and sending includes per_paper: true in the request body", async () => {
+    const sse = "event: citations\ndata: []\n\nevent: done\ndata: \n\n";
+    // `init` is unused but kept in the signature so fetchMock.mock.calls types as a 2-tuple
+    // below (call[1] / [, init]) instead of narrowing to just [input].
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      void init;
+      const url = String(input);
+      if (url === "/api/chat") return Promise.resolve(mockStreamResponse(sse));
+      const body =
+        url === "/api/chats/test-id"
+          ? chatSession
+          : url.startsWith("/api/tags") ||
+              url.startsWith("/api/papers") ||
+              url.startsWith("/api/chats")
+            ? []
+            : {};
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+    await screen.findByText(/regression marker text/i);
+
+    fireEvent.click(screen.getByLabelText("Search each paper separately"));
+    fireEvent.change(screen.getByPlaceholderText("Ask about a paper or a concept…"), {
+      target: { value: "a question" },
+    });
+    fireEvent.click(screen.getByLabelText("Send"));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/chat", expect.anything()));
+    const call = fetchMock.mock.calls.find(([u]) => String(u) === "/api/chat")!;
+    const sent = JSON.parse((call[1] as RequestInit).body as string);
+    expect(sent.per_paper).toBe(true);
+  });
+
+  it("stays on for a second message without re-toggling", async () => {
+    const sse = "event: citations\ndata: []\n\nevent: done\ndata: \n\n";
+    // `init` is unused but kept in the signature so fetchMock.mock.calls types as a 2-tuple
+    // below (call[1] / [, init]) instead of narrowing to just [input].
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      void init;
+      const url = String(input);
+      if (url === "/api/chat") return Promise.resolve(mockStreamResponse(sse));
+      const body =
+        url === "/api/chats/test-id"
+          ? chatSession
+          : url.startsWith("/api/tags") ||
+              url.startsWith("/api/papers") ||
+              url.startsWith("/api/chats")
+            ? []
+            : {};
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+    await screen.findByText(/regression marker text/i);
+    const composer = screen.getByPlaceholderText("Ask about a paper or a concept…");
+
+    fireEvent.click(screen.getByLabelText("Search each paper separately"));
+    fireEvent.change(composer, { target: { value: "first" } });
+    fireEvent.click(screen.getByLabelText("Send"));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/chat", expect.anything()));
+
+    fireEvent.change(composer, { target: { value: "second" } });
+    fireEvent.click(screen.getByLabelText("Send"));
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.filter(([u]) => String(u) === "/api/chat")).toHaveLength(2),
+    );
+
+    const bodies = fetchMock.mock.calls
+      .filter(([u]) => String(u) === "/api/chat")
+      .map(([, init]) => JSON.parse((init as RequestInit).body as string));
+    expect(bodies.map((b) => b.per_paper)).toEqual([true, true]);
+  });
+
+  it("resets to off on New chat", async () => {
+    vi.stubGlobal("fetch", mockFetch());
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/" element={<ChatPage />} />
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+    await screen.findByText(/regression marker text/i);
+    fireEvent.click(screen.getByLabelText("Search each paper separately"));
+    expect(screen.getByLabelText("Search each paper separately")).toBeChecked();
+
+    fireEvent.click(screen.getByRole("button", { name: /New chat/i }));
+
+    expect(await screen.findByLabelText("Search each paper separately")).not.toBeChecked();
+  });
+
+  it("restores the target conversation's own per_paper state when switching (not a blind reset)", async () => {
+    // otherSession's last message used per_paper: true — switching to it must show the
+    // toggle checked, not reset to off, proving this reflects the target conversation's
+    // own history rather than always defaulting.
+    const otherSession = {
+      id: "other-id",
+      name: "Other",
+      messages: [
+        { role: "user", content: "other question" },
+        { role: "assistant", content: "other answer" },
+      ],
+      citations: [null, []],
+      per_paper: [null, true],
+    };
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/chats") {
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve([
+              { id: "test-id", name: "Test", updated_at: "" },
+              { id: "other-id", name: "Other", updated_at: "" },
+            ]),
+        } as Response);
+      }
+      const body =
+        url === "/api/chats/test-id"
+          ? chatSession
+          : url === "/api/chats/other-id"
+            ? otherSession
+            : url.startsWith("/api/tags") || url.startsWith("/api/papers")
+              ? []
+              : {};
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+    await screen.findByText(/regression marker text/i);
+    // test-id has no per_paper history (chatSession predates the field) -> off by default.
+    expect(screen.getByLabelText("Search each paper separately")).not.toBeChecked();
+
+    fireEvent.click(await screen.findByText("Other"));
+
+    // other-id's last message used per_paper: true -> restored, not reset to off.
+    expect(await screen.findByLabelText("Search each paper separately")).toBeChecked();
+  });
+
+  it("restores true from an earlier turn but false from the latest turn (uses the latest, not the first)", async () => {
+    const mixedSession = {
+      id: "test-id",
+      name: "Test",
+      messages: [
+        { role: "user", content: "first question" },
+        { role: "assistant", content: "first answer" },
+        { role: "user", content: "second question" },
+        { role: "assistant", content: "second answer" },
+      ],
+      citations: [null, [], null, []],
+      per_paper: [null, true, null, false],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        const body =
+          url === "/api/chats/test-id"
+            ? mixedSession
+            : url.startsWith("/api/tags") ||
+                url.startsWith("/api/papers") ||
+                url.startsWith("/api/chats")
+              ? []
+              : {};
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
+      }),
+    );
+
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+
+    expect(await screen.findByLabelText("Search each paper separately")).not.toBeChecked();
+  });
+});
+
 describe("ChatPage edit-and-resume", () => {
   afterEach(() => {
     vi.unstubAllGlobals();

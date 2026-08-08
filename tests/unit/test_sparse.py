@@ -7,12 +7,13 @@ from rank_bm25 import BM25Okapi
 from rag.sparse import BM25Index, build_sparse_index, reciprocal_rank_fusion, rrf_scores
 
 
-def _bm25_index(docs: dict[str, str]) -> BM25Index:
+def _bm25_index(docs: dict[str, str], paper_ids: dict[str, str] | None = None) -> BM25Index:
     from rag.sparse import _tokenize
 
     ids = list(docs)
     bm25 = BM25Okapi([_tokenize(docs[i]) for i in ids])
-    return BM25Index(ids=ids, paper_ids=["p"] * len(ids), built_at_count=len(ids), bm25=bm25)
+    pids = [paper_ids[i] for i in ids] if paper_ids else ["p"] * len(ids)
+    return BM25Index(ids=ids, paper_ids=pids, built_at_count=len(ids), bm25=bm25)
 
 
 def test_reciprocal_rank_fusion_orders_by_fused_score():
@@ -70,14 +71,18 @@ def test_bm25index_search_filters_zero_score_docs():
 
 
 def test_bm25index_search_respects_allowed_ids():
+    # Regression: allowed_ids filters by paper_id, not by chunk id — chunk-a and chunk-b
+    # both match the query and would both survive a (buggy) chunk-id-keyed filter that
+    # happened to include "chunk-b", but only chunk-b's paper is actually allowed here.
     idx = _bm25_index(
         {
-            "p1": "latent attention over the kv cache",
-            "p2": "latent attention in a different paper",
-            "p3": "fp8 mixed precision training schedule",
-        }
+            "chunk-a": "latent attention over the kv cache",
+            "chunk-b": "latent attention in a different paper",
+            "chunk-c": "fp8 mixed precision training schedule",
+        },
+        paper_ids={"chunk-a": "paper-1", "chunk-b": "paper-2", "chunk-c": "paper-3"},
     )
-    assert idx.search("latent attention", n=3, allowed_ids={"p2"}) == ["p2"]
+    assert idx.search("latent attention", n=3, allowed_ids={"paper-2"}) == ["chunk-b"]
 
 
 def test_build_sparse_index_detects_staleness(make_searcher, seed_chunks):

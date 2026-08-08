@@ -129,6 +129,11 @@ function TraceLine({ e }: { e: TraceEntry }) {
               {e.paper}
             </Badge>
           )}
+          {e.per_paper && (
+            <Badge size="xs" variant="light" color="accent" radius="sm">
+              per-paper
+            </Badge>
+          )}
         </Group>
       </Box>
     );

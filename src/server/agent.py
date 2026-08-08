@@ -111,7 +111,14 @@ class ChatAgent:
         return SYSTEM_PROMPT.format(filter_note=note, papers=papers)
 
     def run(
-        self, messages, tags, papers, on_text, on_trace=None, ref_start: int = 0
+        self,
+        messages,
+        tags,
+        papers,
+        on_text,
+        on_trace=None,
+        ref_start: int = 0,
+        per_paper: bool = False,
     ) -> tuple[str, list[dict], Usage]:
         """Returns (answer_text, citations[], usage).
 
@@ -127,6 +134,10 @@ class ChatAgent:
         count of refs already used earlier in the same chat, so a follow-up
         question continues the numbering (r4, r5, ...) instead of restarting at
         r1 and colliding with refs already shown for a different paper.
+
+        `per_paper` (see `Searcher.search`) applies uniformly to every `search_papers`
+        call made during this turn's ReAct loop — the user toggles it per message, not
+        the model per call.
         """
         tag_ids = self.manifest.paper_ids_for_tags(tags) if tags else None
         selected = list(papers) if papers else None
@@ -137,6 +148,10 @@ class ChatAgent:
         else:
             wanted = set(selected)
             paper_ids = [p for p in tag_ids if p in wanted]
+        # per_paper needs a concrete paper list to loop over — Searcher has no manifest to
+        # fall back to "every paper" itself, so this is the one place that fallback happens.
+        if per_paper and paper_ids is None:
+            paper_ids = [p["paper_id"] for p in self.manifest.papers()]
         registry: dict[str, dict] = {}
         bodies: dict[str, str] = {}
         counter = {"n": ref_start}
@@ -151,7 +166,14 @@ class ChatAgent:
             query = (args.get("query") or "").strip()
             if not query:
                 return "Error: empty query."
-            trace({"type": "action", "query": query, "paper": args.get("paper") or None})
+            trace(
+                {
+                    "type": "action",
+                    "query": query,
+                    "paper": args.get("paper") or None,
+                    "per_paper": per_paper,
+                }
+            )
             k = int(args.get("top_k") or self.cfg.retrieval.k)
             results = self.searcher.search(
                 query,
@@ -160,6 +182,7 @@ class ChatAgent:
                 paper=args.get("paper") or None,
                 paper_ids=paper_ids,
                 rerank=self.cfg.reranker.enabled,
+                per_paper=per_paper,
             )
             if not results:
                 trace({"type": "observation", "text": "(no results)"})

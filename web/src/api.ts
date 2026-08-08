@@ -88,6 +88,7 @@ export interface ChatSession {
   traces?: (TraceEntry[] | null)[];
   feedback?: (Feedback | null)[];
   usage?: (UsageInfo | null)[];
+  per_paper?: (boolean | null)[];
 }
 
 async function j<T>(r: Response): Promise<T> {
@@ -183,6 +184,7 @@ export interface TraceEntry {
   text?: string;
   query?: string;
   paper?: string | null;
+  per_paper?: boolean;
 }
 
 export interface ChatHandlers {
@@ -201,6 +203,7 @@ export async function chat(
   messages: ChatMessage[],
   tags: string[],
   papers: string[],
+  perPaper: boolean,
   chatId: string | null,
   h: ChatHandlers,
   editIndex?: number,
@@ -212,6 +215,7 @@ export async function chat(
       messages,
       tags,
       papers,
+      per_paper: perPaper,
       chat_id: chatId,
       edit_index: editIndex ?? null,
     }),

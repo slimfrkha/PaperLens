@@ -138,22 +138,38 @@ class Searcher:
             self._sparse = build_sparse_index(self.collection, k1=self._bm25_k1, b=self._bm25_b)
         return self._sparse
 
+    def _embed_query(self, query: str) -> list[list[float]]:
+        """Embeds one query string — the shared primitive behind ``dense_recall``'s default
+        embedding and ``search``'s per-variant precompute (see there for why it's precomputed).
+
+        Asymmetric embedders (e.g. Gemini) embed queries differently from docs; symmetric
+        ones fall through to __call__.
+        """
+        embed_query = getattr(self.embedder, "embed_query", None)
+        return embed_query([query]) if embed_query else self.embedder([query])
+
     def dense_recall(
-        self, query: str, fetch_n: int, where: dict[str, Any] | None
+        self,
+        query: str,
+        fetch_n: int,
+        where: dict[str, Any] | None,
+        qvec: list[list[float]] | None = None,
     ) -> tuple[list[str], dict[str, Result]]:
         """One query's dense ranking: chunk ids in Chroma's distance order, plus their Results.
 
         The shared per-query-variant retrieval primitive. ``search`` calls this once per
-        variant (the single-query path below is the ``len(variants) == 1`` case of the same
-        call); ``eval.harness._retrieve`` and ``eval.optimizer.build_cache`` call it directly
-        to get the same dense pool ``search`` would compute — chunk ids and per-id Results
-        (``.text`` for reranking, ``.score`` for a no-rerank dense-only ranking) that
+        variant per scope (the single-query path below is the ``len(variants) == 1`` case of
+        the same call); ``eval.harness._retrieve`` and ``eval.optimizer.build_cache`` call it
+        directly to get the same dense pool ``search`` would compute — chunk ids and per-id
+        Results (``.text`` for reranking, ``.score`` for a no-rerank dense-only ranking) that
         ``search``'s own return value (a fused/reranked ``list[Result]``) doesn't expose.
+
+        ``qvec`` lets a caller pass an already-computed embedding for ``query`` — ``search``
+        precomputes one per variant and reuses it across every scope (e.g. every paper under
+        per-paper retrieval) instead of re-embedding identical query text per scope. Omit it
+        (the default) to embed ``query`` here, as before.
         """
-        # Asymmetric embedders (e.g. Gemini) embed queries differently from docs;
-        # symmetric ones fall through to __call__.
-        embed_query = getattr(self.embedder, "embed_query", None)
-        qvec = embed_query([query]) if embed_query else self.embedder([query])
+        qvec = qvec if qvec is not None else self._embed_query(query)
         # Chroma's type stubs narrow query_embeddings/results more tightly than
         # runtime accepts; the include= keys are always present and non-None here.
         res = cast(
@@ -240,6 +256,7 @@ class Searcher:
         paper: str | None = None,
         paper_ids: list[str] | None = None,
         rerank: bool = True,
+        per_paper: bool = False,
     ) -> list[Result]:
         # Resolve the paper filter. `paper_ids` (e.g. from a tag filter) and a
         # single `paper` intersect; an explicit empty set matches nothing.
@@ -251,68 +268,129 @@ class Searcher:
         where = {"paper_id": {"$in": ids}} if ids is not None else None
         allowed = set(ids) if ids is not None else None
 
+        # per_paper needs a concrete paper list to loop over — Searcher has no manifest to
+        # fall back to "every paper" itself (ChatAgent.run does that fallback before calling
+        # in, see agent.py). Fail here, before burning an LLM call on paraphrasing or an API
+        # call on embedding, rather than on a doomed empty-scope loop below.
+        if per_paper and ids is None:
+            raise ValueError(
+                "per_paper=True requires a resolved paper/paper_ids filter — Searcher has no "
+                "manifest to fall back to every paper (ChatAgent.run does that fallback "
+                "for you)."
+            )
+
         variants = [query]
         if self.multi_query_enabled:
             assert self.llm is not None  # enforced at construction
             variants += generate_paraphrases(query, self.llm, n=self.multi_query_n)
 
-        if len(variants) == 1:
-            # Fusion breadth: when hybrid is on, both sides over-fetch fetch_multiplier * candidates
-            # before RRF-fusing, so fusion has margin to promote a sparse-only hit that dense ranked
-            # outside its own top-`candidates` — the final truncation to `candidates` happens after
-            # fusion, not before, so downstream (rerank, k) sees the same pool shape either way.
-            fetch_n = candidates * self._fetch_multiplier if self.sparse_enabled else candidates
-            dense_ids, by_id = self.dense_recall(query, fetch_n, where)
-            if not dense_ids:
-                return []
+        # Embed every variant once, up front — reused across every scope below instead of
+        # re-embedding identical query text per scope (per_paper runs one scope per paper).
+        qvecs = {v: self._embed_query(v) for v in variants}
 
-            if self.sparse_enabled:
-                sparse_ids = self.sparse.search(query, n=fetch_n, allowed_ids=allowed)
-                dense_set = set(dense_ids)
-                sparse_set = set(sparse_ids)
-                fused_ids = reciprocal_rank_fusion([dense_ids, sparse_ids], k=self._rrf_k)[
-                    :candidates
-                ]
-                self.backfill_missing(by_id, fused_ids)
-                # RRF score uniformly across the whole fused set — don't mix cosine similarity and
-                # RRF scales (Result.score's docstring covers this: "rerank score if reranked, else
-                # cosine similarity" stops being true for a hybrid+no-rerank query).
-                scores = rrf_scores([dense_ids, sparse_ids], k=self._rrf_k)
-                results = self._tag_and_collect(by_id, fused_ids, scores, dense_set, sparse_set)
-            else:
-                results = list(by_id.values())
+        # Normally one scope: the whole resolved `where`/`allowed`, at the full `candidates`
+        # budget. Under per_paper, one scope per paper, each capped to its own share of the
+        # budget — floored at `k` so no paper's contribution shrinks below a full answer's
+        # worth, capped at `candidates` so no paper gets a bigger pool than a normal search
+        # would already pull (which also makes a single resolved paper a no-op, identical to
+        # per_paper=False). Assumes the caller's usual k <= candidates — if k > candidates,
+        # the floor wins and each paper's fetch exceeds candidates; every real caller
+        # (ChatAgent.execute) already guarantees candidates >= k, so this isn't guarded here.
+        if per_paper:
+            assert ids is not None  # enforced by the per_paper/ids guard above
+            n_papers = len(ids)
+            scopes = [
+                (
+                    {"paper_id": {"$in": [pid]}},
+                    {pid},
+                    max(k, min(candidates, candidates // n_papers)),
+                )
+                for pid in ids
+            ]
         else:
-            # Multi-query: one flat RRF pass over every ranking from every variant at once —
-            # dense_v1, sparse_v1, dense_v2, sparse_v2, ... — not a fusion of per-variant
-            # fusions. RRF is already generalized to N rankings, so nesting two RRF passes
-            # (fuse dense+sparse per variant, then fuse those fused results again) would
-            # double-apply its rank-decay to evidence that already went through one fusion
-            # round, with no clean interpretation of what that compounding means.
-            # `multi_query_fetch_multiplier` governs over-fetch depth for every ranking here
-            # (both a variant's dense and its sparse query), deliberately independent of
-            # `sparse.fetch_multiplier` — needed even when hybrid is off, or the fuse has no
-            # margin to promote a hit ranked just outside one variant's own top-`candidates`.
-            variant_fetch_n = candidates * self.multi_query_fetch_multiplier
-            rankings: list[list[str]] = []
-            dense_ids_all: list[str] = []
-            sparse_ids_all: list[str] = []
-            by_id = {}
-            for v in variants:
-                dense_ids_v, by_id_v = self.dense_recall(v, variant_fetch_n, where)
-                for cid, r in by_id_v.items():
-                    by_id.setdefault(cid, r)
-                rankings.append(dense_ids_v)
-                dense_ids_all += dense_ids_v
+            scopes = [(where, allowed, candidates)]
+
+        results: list[Result] = []
+        for scope_where, scope_allowed, scope_candidates in scopes:
+            if len(variants) == 1:
+                # Fusion breadth: when hybrid is on, both sides over-fetch fetch_multiplier *
+                # candidates before RRF-fusing, so fusion has margin to promote a sparse-only
+                # hit that dense ranked outside its own top-`candidates` — the final
+                # truncation to `candidates` happens after fusion, not before, so downstream
+                # (rerank, k) sees the same pool shape either way.
+                fetch_n = (
+                    scope_candidates * self._fetch_multiplier
+                    if self.sparse_enabled
+                    else scope_candidates
+                )
+                dense_ids, by_id = self.dense_recall(query, fetch_n, scope_where, qvec=qvecs[query])
+                if not dense_ids:
+                    continue
+
                 if self.sparse_enabled:
-                    sparse_ids_v = self.sparse.search(v, n=variant_fetch_n, allowed_ids=allowed)
-                    rankings.append(sparse_ids_v)
-                    sparse_ids_all += sparse_ids_v
-                    self.backfill_missing(by_id, sparse_ids_v)
-            fused_ids = reciprocal_rank_fusion(rankings, k=self._rrf_k)[:candidates]
-            scores = rrf_scores(rankings, k=self._rrf_k)
-            dense_set = set(dense_ids_all)
-            sparse_set = set(sparse_ids_all)
-            results = self._tag_and_collect(by_id, fused_ids, scores, dense_set, sparse_set)
+                    sparse_ids = self.sparse.search(query, n=fetch_n, allowed_ids=scope_allowed)
+                    dense_set = set(dense_ids)
+                    sparse_set = set(sparse_ids)
+                    fused_ids = reciprocal_rank_fusion([dense_ids, sparse_ids], k=self._rrf_k)[
+                        :scope_candidates
+                    ]
+                    self.backfill_missing(by_id, fused_ids)
+                    # RRF score uniformly across the whole fused set — don't mix cosine similarity
+                    # and RRF scales (Result.score's docstring covers this: "rerank score if
+                    # reranked, else cosine similarity" stops being true for a hybrid+no-rerank
+                    # query).
+                    scores = rrf_scores([dense_ids, sparse_ids], k=self._rrf_k)
+                    results += self._tag_and_collect(
+                        by_id, fused_ids, scores, dense_set, sparse_set
+                    )
+                else:
+                    results += list(by_id.values())
+            else:
+                # Multi-query: one flat RRF pass over every ranking from every variant at once —
+                # dense_v1, sparse_v1, dense_v2, sparse_v2, ... — not a fusion of per-variant
+                # fusions. RRF is already generalized to N rankings, so nesting two RRF passes
+                # (fuse dense+sparse per variant, then fuse those fused results again) would
+                # double-apply its rank-decay to evidence that already went through one fusion
+                # round, with no clean interpretation of what that compounding means.
+                # `multi_query_fetch_multiplier` governs over-fetch depth for every ranking here
+                # (both a variant's dense and its sparse query), deliberately independent of
+                # `sparse.fetch_multiplier` — needed even when hybrid is off, or the fuse has no
+                # margin to promote a hit ranked just outside one variant's own top-`candidates`.
+                variant_fetch_n = scope_candidates * self.multi_query_fetch_multiplier
+                rankings: list[list[str]] = []
+                dense_ids_all: list[str] = []
+                sparse_ids_all: list[str] = []
+                by_id = {}
+                for v in variants:
+                    dense_ids_v, by_id_v = self.dense_recall(
+                        v, variant_fetch_n, scope_where, qvec=qvecs[v]
+                    )
+                    for cid, r in by_id_v.items():
+                        by_id.setdefault(cid, r)
+                    rankings.append(dense_ids_v)
+                    dense_ids_all += dense_ids_v
+                    if self.sparse_enabled:
+                        sparse_ids_v = self.sparse.search(
+                            v, n=variant_fetch_n, allowed_ids=scope_allowed
+                        )
+                        rankings.append(sparse_ids_v)
+                        sparse_ids_all += sparse_ids_v
+                        self.backfill_missing(by_id, sparse_ids_v)
+                fused_ids = reciprocal_rank_fusion(rankings, k=self._rrf_k)[:scope_candidates]
+                scores = rrf_scores(rankings, k=self._rrf_k)
+                dense_set = set(dense_ids_all)
+                sparse_set = set(sparse_ids_all)
+                results += self._tag_and_collect(by_id, fused_ids, scores, dense_set, sparse_set)
+
+        if not results:
+            return []
+
+        if per_paper:
+            # Concatenation across papers isn't in any coherent score order yet — sort before
+            # rerank runs so a skipped/failed rerank still degrades to a sane cross-paper order
+            # instead of "papers back to back, each internally sorted." A successful rerank
+            # below overwrites this with its own sort, same as it always has.
+            results.sort(key=lambda r: r.score, reverse=True)
 
         if rerank:
             try:

@@ -130,6 +130,25 @@ retrieval confidence.
 - `_Avoid_:` query rewriting, query expansion alone (say "multi-query expansion"), paper
   voting (that's a different peer repo's design — PaperLens fuses chunks, not papers).
 
+### 🧩 Per-paper retrieval
+
+Opt-in, toggled per chat message (`ChatRequest.per_paper`, not a config knob): recall runs
+once per paper in the resolved `paper_ids` — each paper's own dense/sparse/**multi-query
+expansion** fusion, scoped via `where`, capped to a per-paper candidate budget
+(`clamp(candidates // n_papers, k, candidates)`) — instead of once over the whole scope,
+then pools every paper's candidates flat before the shared rerank/top-`k` step. Purpose:
+stop one paper with many relevant chunks from crowding the candidate budget out of other
+papers before the reranker ever sees them; the final top-`k` selection stays global, with
+no per-paper quota. When no paper/tag filter is active, `ChatAgent` falls back to every
+paper in the **manifest** — `Searcher` itself has no manifest awareness and raises if asked
+for per-paper recall with no resolved paper list.
+
+- Code: the `per_paper` branch in `Searcher.search` (`src/rag/search.py`); the manifest
+  fallback in `ChatAgent.run` (`src/server/agent.py`); `ChatRequest.per_paper`
+  (`src/server/schemas.py`).
+- `_Avoid_:` per-source retrieval (collides with `Result.source`'s dense/sparse/both
+  meaning), per-document retrieval, paper-level round-robin.
+
 ### 🔎 Searcher
 
 The object that runs two-stage retrieval: dense **embedder** recall of `candidates`, then

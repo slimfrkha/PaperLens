@@ -26,6 +26,7 @@ A working inventory of what PaperLens does today, organized into four sections:
 - **Restrict search by paper** — multi-select scoping retrieval, locked once a conversation has started (`web/src/pages/ChatPage.tsx`)
 - **Restrict search by tag** — multi-select scoping retrieval, likewise locked mid-conversation (`web/src/pages/ChatPage.tsx`)
 - **"Filters locked" tooltip** — explains why filters are disabled mid-conversation and that New Chat changes them (`web/src/pages/ChatPage.tsx`)
+- **Per-paper retrieval toggle** — runs `search_papers` recall once per paper and pools candidates flat before reranking instead of once over the whole scope, sticky per message (not locked mid-conversation like the filters above); reloading or switching to a conversation restores the toggle to its last message's actual value rather than resetting it, and it's off by default for a brand-new chat (`web/src/pages/ChatPage.tsx`, `src/server/agent.py`, `src/server/chats.py`)
 
 ### Chat — trace / observability
 
@@ -114,6 +115,7 @@ A working inventory of what PaperLens does today, organized into four sections:
 - **Result provenance tagging** — each fused result records whether it came from dense/sparse/both (`src/rag/search.py`)
 - **Multi-query expansion (opt-in)** — paraphrases the query into `n_paraphrases` variants, RRF-fuses all rankings in one pass (`src/rag/search.py`, `src/rag/query_expansion.py`, `src/rag/config.py`)
 - **Paper/tag-scoped search filter** — intersects a tag filter and explicit paper picker into Chroma's `where` clause (`src/rag/search.py`, `src/rag/manifest.py`)
+- **Per-paper retrieval (opt-in)** — recall runs once per paper (its own dense/sparse/multi-query fusion each, clamped to a per-paper candidate budget) instead of once over the whole scope, then pools flat before the shared rerank/top-k step (`src/rag/search.py`, `src/server/agent.py`)
 - **Section-aware chunking with breadcrumbs** (upstream of retrieval) — breadcrumb + body is what dense recall matches against (`src/rag/chunking.py`)
 
 ### Reranking

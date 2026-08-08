@@ -62,6 +62,35 @@ def test_append_turn_pads_legacy_sessions_without_usage(tmp_path):
     assert len(saved["usage"]) == len(saved["messages"])
 
 
+def test_append_turn_stores_per_paper_parallel_to_messages(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat = store.create()
+    saved = store.append_turn(chat["id"], "hi", "hello", [], [], per_paper=True)
+
+    assert saved["per_paper"] == [None, True]
+
+
+def test_append_turn_defaults_per_paper_to_false(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat = store.create()
+    saved = store.append_turn(chat["id"], "hi", "hello", [], [])
+
+    assert saved["per_paper"] == [None, False]
+
+
+def test_append_turn_pads_legacy_sessions_without_per_paper(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat = store.create()
+    # Simulate a pre-per_paper session: messages present, per_paper key missing entirely.
+    chat["messages"] = [{"role": "user", "content": "old"}]
+    chat["citations"] = [None]
+    del chat["per_paper"]
+    store._write(chat)
+
+    saved = store.append_turn(chat["id"], "q", "a", [], [])
+    assert len(saved["per_paper"]) == len(saved["messages"])
+
+
 def test_delete_and_list_all_sorted_by_updated(tmp_path):
     store = ChatStore(str(tmp_path))
     a = store.append_turn(store.create()["id"], "q", "a", [], [], name="Alpha")
@@ -180,6 +209,7 @@ def test_truncate_at_drops_tail_across_all_parallel_arrays(tmp_path):
     assert truncated["traces"] == [None, [{"type": "action"}]]
     assert truncated["feedback"] == [None, None]
     assert len(truncated["usage"]) == 2
+    assert len(truncated["per_paper"]) == 2
 
 
 def test_truncate_at_index_zero_drops_everything(tmp_path):
