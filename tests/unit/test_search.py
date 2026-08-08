@@ -140,11 +140,67 @@ def test_multi_query_surfaces_chunk_single_query_misses(make_config, fake_llm):
     assert "paper-b" in [r.paper_id for r in fused]  # surfaced via the paraphrase
 
 
+class _HybridMultiQueryEmbedder:
+    """Deterministic per-text vectors on distinct axes per query variant, so dense recall
+    genuinely discriminates which variant favors which doc — unlike `_FlatEmbedder` below,
+    which can't tell variants apart at all and is deliberately used elsewhere to isolate
+    source-tagging from ranking."""
+
+    _VECS = {
+        "orig123": [10.0, 1.0, 0.0, 0.0],
+        "para456": [0.0, 0.0, 10.0, 1.0],
+        "filler text sharing no terms with either query": [10.0, 0.0, 0.0, 0.0],
+        "para456 appears verbatim in this passage": [0.0, 0.0, 10.0, 0.0],
+        "orig123 appears verbatim in this passage": [0.0, 1.0, 0.0, 0.0],
+    }
+
+    def name(self) -> str:
+        return "hybrid-multi-query"
+
+    def __call__(self, input: list[str]) -> list[list[float]]:
+        return [self._VECS[t] for t in input]
+
+
 def test_multi_query_with_sparse_returns_sane_fused_set(make_config, fake_llm):
+    # Proves hybrid + multi-query together combine real lexical and semantic evidence, not
+    # just "both layers ran without crashing" (the assertion this replaces). paper-both-para
+    # ranks LAST in a plain dense-only "orig123" search (cosine 0.0 to it) but FIRST once
+    # hybrid + multi-query are both on; paper-dense-only ranks FIRST in that baseline and
+    # LAST in the fused result — a full reversal that only happens if both fusion layers are
+    # genuinely contributing, not a coincidence of one dominating.
     cfg = make_config()
-    embedder = _VecEmbedder()
-    _seed_vec_docs(cfg, embedder)
-    llm = fake_llm(answer='["paraphrase_text"]')
+    embedder = _HybridMultiQueryEmbedder()
+    collection = open_collection(cfg.paths.rag_db, cfg.collection, embedder_name=embedder.name())
+    docs = [
+        ("dense-only", "filler text sharing no terms with either query", "Alpha"),
+        ("both-para", "para456 appears verbatim in this passage", "Beta"),
+        ("both-orig", "orig123 appears verbatim in this passage", "Gamma"),
+    ]
+    metas = [
+        {
+            "paper_id": f"paper-{doc_id}",
+            "breadcrumb": f"Paper > {section}",
+            "section_title": section,
+            "section_number": "1",
+            "body": text,
+        }
+        for doc_id, text, section in docs
+    ]
+    collection.upsert(
+        ids=[doc_id for doc_id, _, _ in docs],
+        embeddings=embedder([text for _, text, _ in docs]),
+        documents=[text for _, text, _ in docs],
+        metadatas=metas,
+    )
+
+    baseline = Searcher(db_dir=cfg.paths.rag_db, collection=cfg.collection, embedder=embedder)
+    baseline_results = baseline.search("orig123", k=3, candidates=3, rerank=False)
+    assert [r.paper_id for r in baseline_results] == [
+        "paper-dense-only",
+        "paper-both-orig",
+        "paper-both-para",
+    ]
+
     searcher = Searcher(
         db_dir=cfg.paths.rag_db,
         collection=cfg.collection,
@@ -152,13 +208,16 @@ def test_multi_query_with_sparse_returns_sane_fused_set(make_config, fake_llm):
         sparse_enabled=True,
         multi_query_enabled=True,
         multi_query_n=1,
-        llm=llm,
+        llm=fake_llm(answer='["para456"]'),
     )
+    results = searcher.search("orig123", k=3, candidates=3, rerank=False)
 
-    results = searcher.search("orig", k=3, candidates=3, rerank=False)
-
-    assert results  # both fusion layers (hybrid + multi-query) ran without crashing
-    assert {r.paper_id for r in results} <= {"paper-a", "paper-b", "paper-c"}
+    assert [r.paper_id for r in results] == [
+        "paper-both-para",
+        "paper-both-orig",
+        "paper-dense-only",
+    ]
+    assert [r.source for r in results] == ["both", "both", "dense"]
 
 
 def test_multi_query_llm_failure_falls_back_to_single_query(make_config, fake_llm):

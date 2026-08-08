@@ -172,6 +172,31 @@ def test_openai_run_tools_usage_unknown_when_any_round_omits_it(monkeypatch):
     assert usage.output_tokens is None
 
 
+def test_openai_run_tools_stops_at_max_rounds_without_a_final_answer(monkeypatch):
+    # If the LLM keeps calling tools every round (a stuck ReAct loop, or a misbehaving
+    # client), the loop must not spin forever — it should stop after exactly `max_rounds`
+    # rounds and return whatever text the last round produced, not raise or keep querying.
+    def tool_only_round():
+        return [_chunk(tool_call=_tool_call(0, "call_1", "search_papers", '{"query": "mla"}'))]
+
+    client = _FakeClientSeq([tool_only_round() for _ in range(3)])
+    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
+    monkeypatch.setattr(backend, "_client", lambda: client)
+
+    executed = []
+    out, _usage = backend.run_tools(
+        system="sys",
+        messages=[{"role": "user", "content": "what is MLA?"}],
+        tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
+        execute=lambda name, args: executed.append((name, args)) or "passage r1",
+        max_rounds=3,
+    )
+
+    assert client.completions.calls == 3  # queried exactly max_rounds times, not more
+    assert len(executed) == 3  # every round's tool call still ran
+    assert out == ""  # no round ever produced visible text — nothing to fabricate as an answer
+
+
 # ---- _ThinkTagStripper: direct unit tests (no fake LLM client needed) -------
 
 
