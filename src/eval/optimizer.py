@@ -27,7 +27,7 @@ from __future__ import annotations
 import time
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from tqdm import tqdm
 
@@ -268,67 +268,31 @@ def build_cache(
         if qid in done:
             caches.append(_query_cache_from_record(qid, done[qid]))
             continue
-        embed_query = getattr(searcher.embedder, "embed_query", None)
-        qvec = embed_query([it.query]) if embed_query else searcher.embedder([it.query])
-        # Chroma's stubs narrow query_embeddings/results more tightly than runtime accepts;
-        # the requested include= keys are always present and non-None here (mirrors search.py).
-        res = cast(
-            dict[str, Any],
-            searcher.collection.query(
-                query_embeddings=qvec,  # ty: ignore[invalid-argument-type]  # list invariance vs Chroma's Sequence param
-                n_results=fetch_n,
-                include=["documents", "distances"],
-            ),
-        )
-        ids: list[str] = res["ids"][0]
-        union_ids, union_docs = list(ids), list(res["documents"][0])
+        dense_ids, by_id = searcher.dense_recall(it.query, fetch_n, where=None)
         sparse_ids: list[str] = sparse.search(it.query, n=fetch_n) if sparse is not None else []
-        missing = [cid for cid in sparse_ids if cid not in ids]
-        if missing:
-            got = cast(dict[str, Any], searcher.collection.get(ids=missing, include=["documents"]))
-            union_ids.extend(got["ids"])
-            union_docs.extend(got["documents"])
+        searcher.backfill_missing(by_id, sparse_ids)  # no-op when sparse_ids is []
 
         variant_candidate_ids: list[list[str]] = []
         if multi_query_n > 0:
             assert multi_query_llm is not None  # enforced by the caller (screen_retrieval)
             for variant in generate_paraphrases(it.query, multi_query_llm, n=multi_query_n):
-                v_qvec = embed_query([variant]) if embed_query else searcher.embedder([variant])
-                v_res = cast(
-                    dict[str, Any],
-                    searcher.collection.query(
-                        query_embeddings=v_qvec,  # ty: ignore[invalid-argument-type]
-                        n_results=variant_fetch_n,
-                        include=["documents"],
-                    ),
-                )
-                v_ids: list[str] = v_res["ids"][0]
-                variant_candidate_ids.append(v_ids)
-                v_missing = [cid for cid in v_ids if cid not in union_ids]
-                if v_missing:
-                    got = cast(
-                        dict[str, Any],
-                        searcher.collection.get(ids=v_missing, include=["documents"]),
-                    )
-                    union_ids.extend(got["ids"])
-                    union_docs.extend(got["documents"])
+                v_dense_ids, v_by_id = searcher.dense_recall(variant, variant_fetch_n, where=None)
+                for cid, r in v_by_id.items():
+                    by_id.setdefault(cid, r)
+                variant_candidate_ids.append(v_dense_ids)
                 if sparse is not None:
                     v_sparse_ids = sparse.search(variant, n=variant_fetch_n)
                     variant_candidate_ids.append(v_sparse_ids)
-                    vs_missing = [cid for cid in v_sparse_ids if cid not in union_ids]
-                    if vs_missing:
-                        got = cast(
-                            dict[str, Any],
-                            searcher.collection.get(ids=vs_missing, include=["documents"]),
-                        )
-                        union_ids.extend(got["ids"])
-                        union_docs.extend(got["documents"])
+                    searcher.backfill_missing(by_id, v_sparse_ids)
 
-        scores = reranker.score(it.query, union_docs) if union_ids else []
+        union_ids = list(by_id.keys())
+        scores = (
+            reranker.score(it.query, [by_id[cid].text for cid in union_ids]) if union_ids else []
+        )
         cache = QueryCache(
             qid=qid,
             paper_id=it.paper_id,
-            candidate_ids=ids,
+            candidate_ids=dense_ids,
             rerank_scores=dict(zip(union_ids, scores, strict=True)),
             relevant_ids=relevant_ids(
                 searcher.collection, it.paper_id, it.section_number, it.section_title

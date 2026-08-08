@@ -138,13 +138,17 @@ class Searcher:
             self._sparse = build_sparse_index(self.collection, k1=self._bm25_k1, b=self._bm25_b)
         return self._sparse
 
-    def _dense_ids(
+    def dense_recall(
         self, query: str, fetch_n: int, where: dict[str, Any] | None
     ) -> tuple[list[str], dict[str, Result]]:
         """One query's dense ranking: chunk ids in Chroma's distance order, plus their Results.
 
-        Factored out of ``search`` so multi-query can call it once per paraphrase; the
-        single-query path below is the ``len(variants) == 1`` case of the same call.
+        The shared per-query-variant retrieval primitive. ``search`` calls this once per
+        variant (the single-query path below is the ``len(variants) == 1`` case of the same
+        call); ``eval.harness._retrieve`` and ``eval.optimizer.build_cache`` call it directly
+        to get the same dense pool ``search`` would compute — chunk ids and per-id Results
+        (``.text`` for reranking, ``.score`` for a no-rerank dense-only ranking) that
+        ``search``'s own return value (a fused/reranked ``list[Result]``) doesn't expose.
         """
         # Asymmetric embedders (e.g. Gemini) embed queries differently from docs;
         # symmetric ones fall through to __call__.
@@ -179,16 +183,18 @@ class Searcher:
         }
         return dense_ids, by_id
 
-    def _backfill_missing(self, by_id: dict[str, Result], candidate_ids: list[str]) -> None:
-        """Fetch any candidate id Chroma didn't already return from dense recall — reached
-        via BM25 (hybrid retrieval); in multi-query this is always this variant's own BM25
-        hits, since a hit already found by another variant's dense recall is already in
-        ``by_id`` — and add it with a placeholder score. Mutates ``by_id`` in place (not a
-        return-a-new-dict design): the multi-query loop calls this once per variant, and an
-        in-place mutation lets each call accumulate onto what earlier variants already
-        backfilled without a reassignment at every call site. The placeholder score (0.0)
-        is overwritten immediately after by ``_tag_and_collect``; only
-        paper_id/breadcrumb/section/text/body need to be real here.
+    def backfill_missing(self, by_id: dict[str, Result], candidate_ids: list[str]) -> None:
+        """Fetch any candidate id ``dense_recall`` didn't already return — reached via BM25
+        (hybrid retrieval); in multi-query this is always this variant's own BM25 hits, since
+        a hit already found by another variant's dense recall is already in ``by_id`` — and
+        add it with a placeholder score. Mutates ``by_id`` in place (not a return-a-new-dict
+        design): ``search``'s multi-query loop and ``eval.optimizer.build_cache``'s per-variant
+        loop both call this repeatedly, accumulating onto what earlier calls already backfilled
+        without a reassignment at every call site. The placeholder score (0.0) is overwritten
+        immediately after by ``_tag_and_collect`` in ``search``; eval callers only ever read
+        ``.text`` off a backfilled Result (rerank input), never ``.score``, so the placeholder
+        is never mistaken for a real one there either. Only paper_id/breadcrumb/section/text/body
+        need to be real here.
         """
         missing = [cid for cid in candidate_ids if cid not in by_id]
         if not missing:
@@ -256,7 +262,7 @@ class Searcher:
             # outside its own top-`candidates` — the final truncation to `candidates` happens after
             # fusion, not before, so downstream (rerank, k) sees the same pool shape either way.
             fetch_n = candidates * self._fetch_multiplier if self.sparse_enabled else candidates
-            dense_ids, by_id = self._dense_ids(query, fetch_n, where)
+            dense_ids, by_id = self.dense_recall(query, fetch_n, where)
             if not dense_ids:
                 return []
 
@@ -267,7 +273,7 @@ class Searcher:
                 fused_ids = reciprocal_rank_fusion([dense_ids, sparse_ids], k=self._rrf_k)[
                     :candidates
                 ]
-                self._backfill_missing(by_id, fused_ids)
+                self.backfill_missing(by_id, fused_ids)
                 # RRF score uniformly across the whole fused set — don't mix cosine similarity and
                 # RRF scales (Result.score's docstring covers this: "rerank score if reranked, else
                 # cosine similarity" stops being true for a hybrid+no-rerank query).
@@ -292,7 +298,7 @@ class Searcher:
             sparse_ids_all: list[str] = []
             by_id = {}
             for v in variants:
-                dense_ids_v, by_id_v = self._dense_ids(v, variant_fetch_n, where)
+                dense_ids_v, by_id_v = self.dense_recall(v, variant_fetch_n, where)
                 for cid, r in by_id_v.items():
                     by_id.setdefault(cid, r)
                 rankings.append(dense_ids_v)
@@ -301,7 +307,7 @@ class Searcher:
                     sparse_ids_v = self.sparse.search(v, n=variant_fetch_n, allowed_ids=allowed)
                     rankings.append(sparse_ids_v)
                     sparse_ids_all += sparse_ids_v
-                    self._backfill_missing(by_id, sparse_ids_v)
+                    self.backfill_missing(by_id, sparse_ids_v)
             fused_ids = reciprocal_rank_fusion(rankings, k=self._rrf_k)[:candidates]
             scores = rrf_scores(rankings, k=self._rrf_k)
             dense_set = set(dense_ids_all)

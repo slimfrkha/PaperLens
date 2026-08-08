@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from tqdm import tqdm
 
@@ -105,35 +105,19 @@ def _retrieve(
     RRF-fused with BM25 when ``searcher.sparse_enabled`` (``build_searcher`` sets this from
     ``cfg.sparse.enabled``, so ``run``/``confirm`` genuinely reflect a config that has hybrid
     turned on, not just the dense-only reading the pre-hybrid version of this function gave).
-    ``ranked`` is the reranked top-k as ``(chunk_id, score)`` (for stage-2 nDCG). Mirrors
-    ``Searcher``'s own embed → query → (fuse) → rerank path but keeps the chunk ids ``search``
-    throws away.
+    ``ranked`` is the reranked top-k as ``(chunk_id, score)`` (for stage-2 nDCG). Composes
+    ``Searcher.dense_recall``/``backfill_missing`` directly — the same primitive ``search``
+    uses internally — for the chunk ids ``search``'s own return value throws away.
     """
-    embed_query = getattr(searcher.embedder, "embed_query", None)
-    qvec = embed_query([query]) if embed_query else searcher.embedder([query])
     fetch_n = candidates * searcher._fetch_multiplier if searcher.sparse_enabled else candidates
-    # Chroma's stubs narrow query_embeddings/results more tightly than runtime accepts;
-    # the requested include= keys are always present and non-None here (mirrors search.py).
-    res = cast(
-        dict[str, Any],
-        searcher.collection.query(
-            query_embeddings=qvec,  # ty: ignore[invalid-argument-type]  # list invariance vs Chroma's Sequence param
-            n_results=fetch_n,
-            include=["documents", "distances"],
-        ),
-    )
-    dense_ids: list[str] = res["ids"][0]
+    dense_ids, by_id = searcher.dense_recall(query, fetch_n, where=None)
     if not dense_ids:
         return [], []
-    docs_by_id = dict(zip(dense_ids, res["documents"][0], strict=True))
 
     if searcher.sparse_enabled:
         sparse_ids = searcher.sparse.search(query, n=fetch_n)
         ids = reciprocal_rank_fusion([dense_ids, sparse_ids], k=searcher._rrf_k)[:candidates]
-        missing = [cid for cid in ids if cid not in docs_by_id]
-        if missing:
-            got = cast(dict[str, Any], searcher.collection.get(ids=missing, include=["documents"]))
-            docs_by_id.update(zip(got["ids"], got["documents"], strict=True))
+        searcher.backfill_missing(by_id, ids)
     else:
         ids = dense_ids
 
@@ -142,10 +126,9 @@ def _retrieve(
             scores = rrf_scores([dense_ids, sparse_ids], k=searcher._rrf_k)
             ranked = [(i, scores[i]) for i in ids][:k]
         else:
-            dists = res["distances"][0]
-            ranked = [(i, 1 - d) for i, d in zip(ids, dists, strict=True)][:k]
+            ranked = [(i, by_id[i].score) for i in ids][:k]
         return ids, ranked
-    docs = [docs_by_id[i] for i in ids]
+    docs = [by_id[i].text for i in ids]
     scores = searcher.reranker.score(query, docs)
     ranked = sorted(zip(ids, scores, strict=True), key=lambda t: t[1], reverse=True)[:k]
     return ids, ranked
