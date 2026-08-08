@@ -156,6 +156,45 @@ export default function ChatPage() {
     }
   }
 
+  // Shared by send()/sendEdit(): builds history from `prefix` + `question`, appends the
+  // new user turn + a streaming assistant placeholder, and runs the chat() SSE call.
+  // `prefix` must be captured fresh by the caller right before this call — it's applied
+  // directly (not via a setTurns functional updater), so an await between capturing it
+  // and calling runTurn could hand it a stale snapshot.
+  async function runTurn(prefix: Turn[], question: string, id: string, editIndex?: number) {
+    const history: ChatMessage[] = [
+      ...prefix.map((t) => ({ role: t.role, content: t.content })),
+      { role: "user", content: question },
+    ];
+    setTurns([
+      ...prefix,
+      { role: "user", content: question },
+      { role: "assistant", content: "", streaming: true },
+    ]);
+    setBusy(true);
+    try {
+      await chat(
+        history,
+        tags,
+        papers,
+        id,
+        {
+          onToken: (tok) => patchLast((t) => ({ ...t, content: t.content + tok })),
+          onCitations: (c) => patchLast((t) => ({ ...t, citations: c })),
+          onTrace: (e) => patchLast((t) => ({ ...t, trace: [...(t.trace ?? []), e] })),
+          onUsage: (u) => patchLast((t) => ({ ...t, usage: u })),
+          onMeta: () => refreshSessions(),
+          onError: (e) => patchLast((t) => ({ ...t, content: t.content + `\n\n_Error: ${e}_` })),
+          onDone: () => patchLast((t) => ({ ...t, streaming: false })),
+        },
+        editIndex,
+      );
+    } finally {
+      setBusy(false);
+      refreshSessions();
+    }
+  }
+
   async function send() {
     const q = input.trim();
     if (!q || busy) return;
@@ -172,30 +211,7 @@ export default function ChatPage() {
       navigate(`/c/${id}`, { replace: true });
     }
 
-    const history: ChatMessage[] = [
-      ...turns.map((t) => ({ role: t.role, content: t.content })),
-      { role: "user", content: q },
-    ];
-    setTurns((prev) => [
-      ...prev,
-      { role: "user", content: q },
-      { role: "assistant", content: "", streaming: true },
-    ]);
-    setBusy(true);
-    try {
-      await chat(history, tags, papers, id, {
-        onToken: (tok) => patchLast((t) => ({ ...t, content: t.content + tok })),
-        onCitations: (c) => patchLast((t) => ({ ...t, citations: c })),
-        onTrace: (e) => patchLast((t) => ({ ...t, trace: [...(t.trace ?? []), e] })),
-        onUsage: (u) => patchLast((t) => ({ ...t, usage: u })),
-        onMeta: () => refreshSessions(),
-        onError: (e) => patchLast((t) => ({ ...t, content: t.content + `\n\n_Error: ${e}_` })),
-        onDone: () => patchLast((t) => ({ ...t, streaming: false })),
-      });
-    } finally {
-      setBusy(false);
-      refreshSessions();
-    }
+    await runTurn(turns, q, id);
   }
 
   function startEdit(i: number, content: string) {
@@ -229,38 +245,7 @@ export default function ChatPage() {
     }
 
     setEditingIndex(null);
-    const prefix = turns.slice(0, index);
-    const history: ChatMessage[] = [
-      ...prefix.map((t) => ({ role: t.role, content: t.content })),
-      { role: "user", content: q },
-    ];
-    setTurns([
-      ...prefix,
-      { role: "user", content: q },
-      { role: "assistant", content: "", streaming: true },
-    ]);
-    setBusy(true);
-    try {
-      await chat(
-        history,
-        tags,
-        papers,
-        chatId,
-        {
-          onToken: (tok) => patchLast((t) => ({ ...t, content: t.content + tok })),
-          onCitations: (c) => patchLast((t) => ({ ...t, citations: c })),
-          onTrace: (e) => patchLast((t) => ({ ...t, trace: [...(t.trace ?? []), e] })),
-          onUsage: (u) => patchLast((t) => ({ ...t, usage: u })),
-          onMeta: () => refreshSessions(),
-          onError: (e) => patchLast((t) => ({ ...t, content: t.content + `\n\n_Error: ${e}_` })),
-          onDone: () => patchLast((t) => ({ ...t, streaming: false })),
-        },
-        index,
-      );
-    } finally {
-      setBusy(false);
-      refreshSessions();
-    }
+    await runTurn(turns.slice(0, index), q, chatId, index);
   }
 
   async function onDelete(id: string) {
