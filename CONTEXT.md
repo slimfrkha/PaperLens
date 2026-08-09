@@ -135,13 +135,14 @@ retrieval confidence.
 Opt-in, toggled per chat message (`ChatRequest.per_paper`, not a config knob): recall runs
 once per paper in the resolved `paper_ids` — each paper's own dense/sparse/**multi-query
 expansion** fusion, scoped via `where`, capped to a per-paper candidate budget
-(`clamp(candidates // n_papers, k, candidates)`) — instead of once over the whole scope,
-then pools every paper's candidates flat before the shared rerank/top-`k` step. Purpose:
-stop one paper with many relevant chunks from crowding the candidate budget out of other
-papers before the reranker ever sees them; the final top-`k` selection stays global, with
-no per-paper quota. When no paper/tag filter is active, `ChatAgent` falls back to every
-paper in the **manifest** — `Searcher` itself has no manifest awareness and raises if asked
-for per-paper recall with no resolved paper list.
+(`clamp(candidates // n_papers, max_k, candidates)`) — instead of once over the whole scope,
+then pools every paper's candidates flat before the shared rerank/**elbow cutoff** step.
+Purpose: stop one paper with many relevant chunks from crowding the candidate budget out of
+other papers before the reranker ever sees them; the final elbow cutoff stays global, with
+no per-paper quota — per-paper retrieval only ever shaped recall, never guaranteed every
+paper survives into what's returned. When no paper/tag filter is active, `ChatAgent` falls
+back to every paper in the **manifest** — `Searcher` itself has no manifest awareness and
+raises if asked for per-paper recall with no resolved paper list.
 
 - Code: the `per_paper` branch in `Searcher.search` (`src/rag/search.py`); the manifest
   fallback in `ChatAgent.run` (`src/server/agent.py`); `ChatRequest.per_paper`
@@ -149,11 +150,27 @@ for per-paper recall with no resolved paper list.
 - `_Avoid_:` per-source retrieval (collides with `Result.source`'s dense/sparse/both
   meaning), per-document retrieval, paper-level round-robin.
 
+### 🪜 Elbow cutoff
+
+The third retrieval stage: how many reranked passages a `search_papers` call actually
+returns. Not a fixed count — `find_cutoff` looks for the first real drop-off in score (a
+MAD-based robust outlier test plus a prominence floor, both self-normalizing per query so
+it works whether the reranker's scores are unbounded cross-encoder logits or an `llm`
+reranker's 0–10 ratings) and cuts there, bounded to `[retrieval.min_k, retrieval.max_k]`.
+Only runs when reranking actually happened — a skipped or failed rerank falls back to plain
+`max_k` truncation, same as `retrieval.elbow_enabled: false`.
+
+- Code: `find_cutoff` in `src/rag/search.py`; `SearchOutcome.cutoff_reason` records why
+  that many came back (`"elbow"` / `"no_elbow"` / `"pool_exhausted"` / `"no_rerank"` /
+  `"disabled"`).
+- `_Avoid_:` knee detection, threshold cutoff (say "elbow cutoff") — it's not a fixed score
+  threshold; see [harness](docs/harness.md) for why an absolute threshold was rejected.
+
 ### 🔎 Searcher
 
-The object that runs two-stage retrieval: dense **embedder** recall of `candidates`, then
-optional **reranker** rescoring, returning the top `k` **Result**s. Accepts a `paper` /
-`paper_ids` filter.
+The object that runs three-stage retrieval: dense **embedder** recall of `candidates`, then
+optional **reranker** rescoring, then an **elbow cutoff**, returning between `min_k` and
+`max_k` **Result**s. Accepts a `paper` / `paper_ids` filter.
 
 - Code: `Searcher` in `src/rag/search.py`.
 - `_Avoid_:` retriever, search engine, query engine.
@@ -164,9 +181,10 @@ One retrieved chunk returned by the Searcher: `score`, `paper_id`, `breadcrumb`,
 `section_title`, `text`, `body`, `source`. When a Result is handed to the chat model or shown to
 the reader, call it a **passage**. `source` (`"dense"`/`"sparse"`/`"both"`) records which
 retrieval pool(s) surfaced it — meaningful only when **hybrid retrieval** is on; otherwise
-always `"dense"`.
+always `"dense"`. `Searcher.search` doesn't return a bare list of these — it returns a
+`SearchOutcome` (`results` + `cutoff_reason`, see **Elbow cutoff**).
 
-- Code: `Result` dataclass in `src/rag/search.py`.
+- Code: `Result`/`SearchOutcome` dataclasses in `src/rag/search.py`.
 - `_Avoid_:` hit, match, document.
 
 ### 📎 ref / citation

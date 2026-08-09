@@ -153,8 +153,16 @@ def test_incoherent_knobs_fail_at_construction():
         ChunkingCfg(max_tokens=512, overlap_tokens=512)
     with pytest.raises(ValueError, match="noise_ratio"):
         ChunkingCfg(noise_ratio=1.5)
-    with pytest.raises(ValueError, match="retrieval.k"):
-        RetrievalCfg(k=30, candidates=20)
+    with pytest.raises(ValueError, match="retrieval.min_k"):
+        RetrievalCfg(min_k=30, max_k=10, candidates=20)
+    with pytest.raises(ValueError, match="retrieval.max_k"):
+        RetrievalCfg(min_k=2, max_k=30, candidates=20)
+    with pytest.raises(ValueError, match="elbow_mad_multiplier"):
+        RetrievalCfg(elbow_mad_multiplier=0)
+    with pytest.raises(ValueError, match="elbow_prominence"):
+        RetrievalCfg(elbow_prominence=-0.1)
+    with pytest.raises(ValueError, match="elbow_prominence"):
+        RetrievalCfg(elbow_prominence=1.0)
     with pytest.raises(ValueError, match="min_tags"):
         TaggerCfg(min_tags=8, max_tags=3)
     with pytest.raises(ValueError, match="contradiction_max"):

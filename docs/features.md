@@ -106,8 +106,9 @@ A working inventory of what PaperLens does today, organized into four sections:
 
 ### Retrieval
 
-- **Two-stage retrieval (dense recall → rerank)** — embeds the query, pulls `retrieval.candidates` nearest chunks from Chroma, reranks to `retrieval.k` (`src/rag/search.py`)
-- **Candidate-pool scaling** — recall pool scales to `max(candidates, top_k * 4)` when the model requests a larger `top_k` (`src/server/agent.py`, `src/rag/config.py`)
+- **Three-stage retrieval (dense recall → rerank → elbow cutoff)** — embeds the query, pulls `retrieval.candidates` nearest chunks from Chroma, reranks, then elbow-cuts to `[retrieval.min_k, retrieval.max_k]` (`src/rag/search.py`)
+- **Elbow cutoff (adaptive result count)** — `find_cutoff` picks the first real score drop-off (a MAD-based robust outlier test + a prominence floor, both self-normalizing per query) instead of always returning a fixed count; falls back to plain `max_k` truncation when reranking didn't happen (`rerank=False`, a reranker failure, or `retrieval.elbow_enabled=False`) — see `SearchOutcome.cutoff_reason` (`src/rag/search.py`)
+- **Candidate-pool scaling** — recall pool scales to `max(candidates, max_k * 4)` so the reranker always has candidates to discard (`src/server/agent.py`, `src/rag/config.py`)
 - **Graceful degrade on reranker failure** — falls back to pre-rerank order rather than failing the request (`src/rag/search.py`)
 - **Asymmetric embedding query/document split** — `embed_query()` diverges from `__call__()` for embedders that treat queries and documents differently (`src/rag/embedders.py`)
 - **Hybrid dense+BM25 retrieval (opt-in)** — lexical search alongside dense recall, fused via reciprocal rank fusion before reranking (`src/rag/search.py`, `src/rag/sparse.py`, `src/rag/config.py`)
@@ -115,7 +116,7 @@ A working inventory of what PaperLens does today, organized into four sections:
 - **Result provenance tagging** — each fused result records whether it came from dense/sparse/both (`src/rag/search.py`)
 - **Multi-query expansion (opt-in)** — paraphrases the query into `n_paraphrases` variants, RRF-fuses all rankings in one pass (`src/rag/search.py`, `src/rag/query_expansion.py`, `src/rag/config.py`)
 - **Paper/tag-scoped search filter** — intersects a tag filter and explicit paper picker into Chroma's `where` clause (`src/rag/search.py`, `src/rag/manifest.py`)
-- **Per-paper retrieval (opt-in)** — recall runs once per paper (its own dense/sparse/multi-query fusion each, clamped to a per-paper candidate budget) instead of once over the whole scope, then pools flat before the shared rerank/top-k step (`src/rag/search.py`, `src/server/agent.py`)
+- **Per-paper retrieval (opt-in)** — recall runs once per paper (its own dense/sparse/multi-query fusion each, clamped to a per-paper candidate budget) instead of once over the whole scope, then pools flat before the shared rerank/elbow-cutoff step (`src/rag/search.py`, `src/server/agent.py`)
 - **Section-aware chunking with breadcrumbs** (upstream of retrieval) — breadcrumb + body is what dense recall matches against (`src/rag/chunking.py`)
 
 ### Reranking
@@ -129,7 +130,7 @@ A working inventory of what PaperLens does today, organized into four sections:
 ### Agent loop
 
 - **`ChatAgent` — ReAct loop over native tool calling** — Thought → Action (`search_papers`) → Observation, repeats until it answers; small talk skips search entirely (`src/server/agent.py`)
-- **Single tool: `search_papers`** — `query` (required), optional `paper`, optional `top_k`; decomposes multi-part questions into several focused calls (`src/server/agent.py`)
+- **Single tool: `search_papers`** — `query` (required), optional `paper`; decomposes multi-part questions into several focused calls (`src/server/agent.py`)
 - **Filter-scoped system prompt** — injected paper catalog restricted to the active tag/paper filter so the model can't bypass it via the prompt prefix (`src/server/agent.py`)
 - **Ref/citation registry** — each returned passage gets a `ref` (`r1`, `r2`, ...) the model must cite; numbering continues across turns in the same chat (`src/server/agent.py`)
 - **Provider-agnostic tool-use loop** — one neutral tool schema drives every LLM backend's own wire format (`src/rag/llm.py`)
@@ -150,12 +151,14 @@ A working inventory of what PaperLens does today, organized into four sections:
 - **`gen`** — builds the span-anchored QA eval set from the loaded, ingested pool, idempotent on corpus fingerprint; optional closed-book leakage pre-check (`src/eval/cli.py`, `src/eval/queryset.py`, `src/eval/genfilter.py`, `src/eval/fingerprint.py`)
 - **`run`** — scores the current config on the dev split, no re-index (`src/eval/cli.py`, `src/eval/harness.py`)
 - **`screen --tier retrieval`** — one-factor-at-a-time screen of `reranker.enabled`/`retrieval.candidates` (plus optional hybrid/multi-query arms), paired vs. default with confidence intervals (`src/eval/optimizer.py`)
+- **`screen --tier elbow`** — OFAT screen of `elbow_mad_multiplier`/`elbow_prominence`, paired-vs-default `recall@elbow` with a CI; needs no cache/checkpoint, every arm just re-cuts one already-reranked scoring pass — `min_k`/`max_k` deliberately stay out, same "product decision" reasoning `retrieval.k` always had (`src/eval/harness.py`)
 - **`screen --tier chunking`** — OFAT screen over `chunking.*` knobs, each arm re-indexed into its own isolated collection (`src/eval/optimizer.py`)
 - **`sweep`** — staged grid over `chunking.max_tokens × retrieval.candidates × reranker.enabled` (`src/eval/optimizer.py`)
 - **`confirm`** — scores one human-chosen config once on the held-out test split, emits a paste-ready `config.yaml` block (`src/eval/cli.py`)
 - **Guard: chunking-sweep index isolation** — every chunking arm re-indexes into its own throwaway collection, asserts chunk counts to catch id collisions (`src/eval/index_isolated.py`)
 - **Guard: config-independent gold spans** — gold is a character span over sections, never a chunk id, so no arm can recognize its own handwriting (`src/eval/queryset.py`)
 - **Two-stage metrics** — Stage 1 `success@candidates`, Stage 2 `MRR@k` conditioned on stage-1 success (`src/eval/metrics.py`)
+- **Additive elbow metrics** — `mean_returned_at_elbow`/`precision@elbow`/`recall@elbow`, computed in `run` alongside (never replacing) the two-stage metrics above (`src/eval/metrics.py`, `src/eval/harness.py`)
 - **Resolution reporting (paper-clustered bootstrap)** — ceiling, minimum detectable difference, cluster count; warnings below cluster minimum and near-saturated ceilings (`src/eval/stats.py`)
 - **Resumable checkpointing** — `run`/`screen`/`sweep`/`confirm` checkpoint per-item/per-cell, resuming a killed run; invalidated by header/index mismatch, `--fresh` discards (`src/eval/checkpoint.py`)
 - **Corpus fingerprinting** — SHA-256 over sorted paper ids + markdown content keys every eval-set file, so a changed pool is detected and regenerated (`src/eval/fingerprint.py`)

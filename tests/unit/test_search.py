@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 
 from rag.index import open_collection
-from rag.search import Searcher
+from rag.search import Searcher, find_cutoff
 
 
 class _SpyHFEmbedder:
@@ -53,7 +53,9 @@ def test_result_carries_section_number(make_searcher, seed_chunks):
     # way back into Result — needed downstream for section-identity scoring (paperlens-eval)
     # and for a mined feedback record to be usable for that purpose.
     ctx = make_searcher([seed_chunks("paper-a", "Attention", "latent attention over the kv cache")])
-    results = ctx.searcher.search("attention", k=1, candidates=10, rerank=False)
+    results = ctx.searcher.search(
+        "attention", min_k=1, max_k=1, candidates=10, rerank=False
+    ).results
     assert results[0].section_number == "1"
 
 
@@ -68,7 +70,7 @@ def test_dense_recall_matches_search_dense_only_pool(make_searcher, seed_chunks)
     ctx = make_searcher(docs)
 
     dense_ids, by_id = ctx.searcher.dense_recall("attention", fetch_n=2, where=None)
-    dense_results = ctx.searcher.search("attention", k=2, candidates=2, rerank=False)
+    dense_results = ctx.searcher.search("attention", max_k=2, candidates=2, rerank=False).results
 
     assert [by_id[cid].paper_id for cid in dense_ids] == [r.paper_id for r in dense_results]
     top = by_id[dense_ids[0]]
@@ -115,8 +117,8 @@ def test_rerank_lazy_reranker_load_failure_falls_back(monkeypatch, make_searcher
     monkeypatch.setattr("rag.search.CrossEncoderReranker", _RaisingCrossEncoderReranker)
     ctx = make_searcher([seed_chunks("paper-a", "Attention", "latent attention over the kv cache")])
 
-    dense = ctx.searcher.search("attention", k=1, candidates=10, rerank=False)
-    results = ctx.searcher.search("attention", k=1, candidates=10, rerank=True)
+    dense = ctx.searcher.search("attention", min_k=1, max_k=1, candidates=10, rerank=False).results
+    results = ctx.searcher.search("attention", min_k=1, max_k=1, candidates=10, rerank=True).results
 
     assert [r.paper_id for r in results] == [r.paper_id for r in dense]
     assert [r.score for r in results] == [r.score for r in dense]
@@ -185,10 +187,10 @@ def test_multi_query_surfaces_chunk_single_query_misses(make_config, fake_llm):
         llm=llm,
     )
 
-    single = searcher.search("orig", k=1, candidates=1, rerank=False)
+    single = searcher.search("orig", min_k=1, max_k=1, candidates=1, rerank=False).results
     assert [r.paper_id for r in single] == ["paper-a"]  # doc_b never even fetched
 
-    fused = searcher.search("orig", k=2, candidates=2, rerank=False)
+    fused = searcher.search("orig", max_k=2, candidates=2, rerank=False).results
     assert "paper-b" in [r.paper_id for r in fused]  # surfaced via the paraphrase
 
 
@@ -246,7 +248,7 @@ def test_multi_query_with_sparse_returns_sane_fused_set(make_config, fake_llm):
     )
 
     baseline = Searcher(db_dir=cfg.paths.rag_db, collection=cfg.collection, embedder=embedder)
-    baseline_results = baseline.search("orig123", k=3, candidates=3, rerank=False)
+    baseline_results = baseline.search("orig123", max_k=3, candidates=3, rerank=False).results
     assert [r.paper_id for r in baseline_results] == [
         "paper-dense-only",
         "paper-both-orig",
@@ -262,7 +264,7 @@ def test_multi_query_with_sparse_returns_sane_fused_set(make_config, fake_llm):
         multi_query_n=1,
         llm=fake_llm(answer='["para456"]'),
     )
-    results = searcher.search("orig123", k=3, candidates=3, rerank=False)
+    results = searcher.search("orig123", max_k=3, candidates=3, rerank=False).results
 
     assert [r.paper_id for r in results] == [
         "paper-both-para",
@@ -289,7 +291,7 @@ def test_multi_query_llm_failure_falls_back_to_single_query(make_config, fake_ll
         llm=RaisingLLM(),
     )
 
-    results = searcher.search("orig", k=1, candidates=1, rerank=False)
+    results = searcher.search("orig", min_k=1, max_k=1, candidates=1, rerank=False).results
 
     assert [r.paper_id for r in results] == ["paper-a"]  # no crash, no paraphrase applied
 
@@ -318,7 +320,7 @@ def test_multi_query_widens_fetch_independent_of_sparse(make_config, fake_llm, m
 
     monkeypatch.setattr(searcher.collection, "query", spy_query)
 
-    searcher.search("orig", k=1, candidates=1, rerank=False)
+    searcher.search("orig", min_k=1, max_k=1, candidates=1, rerank=False)
 
     # candidates(1) * multi_query_fetch_multiplier(3), not candidates(1) alone — the
     # fetch-headroom fix: without it, each variant would fetch depth 1 and the
@@ -368,7 +370,7 @@ def test_multi_query_source_unions_dense_and_sparse_across_variants(
         llm=fake_llm(answer='["zzflorble"]'),
     )
 
-    results = searcher.search("orig", k=3, candidates=3, rerank=False)
+    results = searcher.search("orig", max_k=3, candidates=3, rerank=False).results
     by_paper = {r.paper_id: r.source for r in results}
 
     assert by_paper["p-dense"] == "dense"  # dense (flat embedder) only — no lexical overlap
@@ -385,6 +387,124 @@ def test_multi_query_enabled_without_llm_raises(tmp_path):
         )
 
 
+# --- find_cutoff (elbow detection) -------------------------------------------------------
+
+
+def test_find_cutoff_detects_a_clean_cliff():
+    # A single sharp drop after rank 1; everything past it decays smoothly at a much
+    # smaller scale — the MAD/prominence gates should both clear on the big gap alone.
+    scores = [0.95, 0.40, 0.38, 0.36, 0.34, 0.32]
+    cutoff, reason = find_cutoff(scores, min_k=1, max_k=6, mad_multiplier=3.0, prominence=0.15)
+    assert (cutoff, reason) == (1, "elbow")
+
+
+def test_find_cutoff_smooth_decay_falls_through_to_no_elbow():
+    # No real cliff anywhere — every gap is roughly the same size. Forcing a cut here would
+    # be an arbitrary, unstable answer that flips between near-identical queries.
+    scores = [0.90, 0.80, 0.70, 0.60, 0.50, 0.40]
+    cutoff, reason = find_cutoff(scores, min_k=1, max_k=6, mad_multiplier=3.0, prominence=0.15)
+    assert (cutoff, reason) == (6, "no_elbow")
+
+
+def test_find_cutoff_near_tied_low_ranked_gaps_dont_false_trigger():
+    # Regression test for the MAD-floor guard: several equal/near-equal gaps among the
+    # "other" gaps would collapse MAD toward 0 without the floor, making the single
+    # slightly-larger gap misread as a statistically significant cliff.
+    scores = [0.50, 0.49, 0.48, 0.47, 0.46, 0.45]
+    cutoff, reason = find_cutoff(scores, min_k=1, max_k=6, mad_multiplier=3.0, prominence=0.15)
+    assert (cutoff, reason) == (6, "no_elbow")
+
+
+def test_find_cutoff_pool_smaller_than_min_k_is_exhausted():
+    scores = [0.9, 0.8]
+    cutoff, reason = find_cutoff(scores, min_k=5, max_k=10, mad_multiplier=3.0, prominence=0.15)
+    assert (cutoff, reason) == (2, "pool_exhausted")
+
+
+def test_find_cutoff_respects_min_k_floor_over_an_early_cliff():
+    # The real cliff is after rank 1, but min_k=3 must still win.
+    scores = [0.95, 0.10, 0.09, 0.08, 0.07]
+    cutoff, reason = find_cutoff(scores, min_k=3, max_k=5, mad_multiplier=3.0, prominence=0.15)
+    assert (cutoff, reason) == (3, "elbow")
+
+
+def test_find_cutoff_respects_max_k_ceiling_when_no_elbow_found():
+    scores = [0.9, 0.85, 0.8, 0.75, 0.7, 0.65, 0.6]
+    cutoff, reason = find_cutoff(scores, min_k=1, max_k=4, mad_multiplier=3.0, prominence=0.15)
+    assert (cutoff, reason) == (4, "no_elbow")
+
+
+def test_find_cutoff_single_candidate_window_has_nothing_to_cut():
+    # max_k == 1: no gap exists to test at all — must not crash (there are no "other gaps"
+    # to build a MAD baseline from).
+    scores = [0.9, 0.5, 0.4, 0.3, 0.2]
+    cutoff, reason = find_cutoff(scores, min_k=1, max_k=1, mad_multiplier=3.0, prominence=0.15)
+    assert (cutoff, reason) == (1, "no_elbow")
+
+
+def test_find_cutoff_flat_window_has_no_score_range_to_test_against():
+    scores = [0.5, 0.5, 0.5, 0.5]
+    cutoff, reason = find_cutoff(scores, min_k=1, max_k=4, mad_multiplier=3.0, prominence=0.15)
+    assert (cutoff, reason) == (4, "no_elbow")
+
+
+# --- Searcher.search's elbow wiring (SearchOutcome.cutoff_reason) ------------------------
+
+
+def test_search_no_rerank_returns_plain_max_k_truncation(make_searcher, seed_chunks):
+    docs = [
+        seed_chunks("paper-a", "S1", "alpha one"),
+        seed_chunks("paper-b", "S2", "beta two"),
+        seed_chunks("paper-c", "S3", "gamma three"),
+    ]
+    ctx = make_searcher(docs)
+    outcome = ctx.searcher.search("alpha", min_k=1, max_k=2, candidates=3, rerank=False)
+    assert outcome.cutoff_reason == "no_rerank"
+    assert len(outcome.results) == 2
+
+
+def test_search_reranker_failure_returns_no_rerank_reason(monkeypatch, make_searcher, seed_chunks):
+    monkeypatch.setattr("rag.search.CrossEncoderReranker", _RaisingCrossEncoderReranker)
+    docs = [
+        seed_chunks("paper-a", "S1", "alpha one"),
+        seed_chunks("paper-b", "S2", "beta two"),
+    ]
+    ctx = make_searcher(docs)
+    outcome = ctx.searcher.search("alpha", min_k=1, max_k=1, candidates=2, rerank=True)
+    assert outcome.cutoff_reason == "no_rerank"
+
+
+def test_search_elbow_disabled_skips_cutoff_but_still_reranks(make_searcher, seed_chunks):
+    docs = [
+        seed_chunks("paper-a", "S1", "alpha one"),
+        seed_chunks("paper-b", "S2", "beta two"),
+        seed_chunks("paper-c", "S3", "gamma three"),
+    ]
+    ctx = make_searcher(docs)
+    outcome = ctx.searcher.search(
+        "alpha", min_k=1, max_k=2, candidates=3, rerank=True, elbow_enabled=False
+    )
+    assert outcome.cutoff_reason == "disabled"
+    assert len(outcome.results) == 2
+
+
+def test_search_empty_paper_filter_reason_is_pool_exhausted(make_searcher, seed_chunks):
+    ctx = make_searcher([seed_chunks("paper-a", "S1", "alpha one")])
+    # An explicit empty paper_ids filter matches nothing — short-circuits before any query.
+    outcome = ctx.searcher.search("alpha", min_k=1, max_k=5, candidates=5, paper_ids=[])
+    assert outcome.results == []
+    assert outcome.cutoff_reason == "pool_exhausted"
+
+
+def test_search_rejects_min_k_greater_than_max_k(make_searcher, seed_chunks):
+    # Regression: find_cutoff's max(min_k, min(cut, max_k)) bounding silently returns more
+    # than max_k when min_k > max_k — this must fail loudly instead (the CLI's --min-k/
+    # --max-k flags have no RetrievalCfg to catch it upstream).
+    ctx = make_searcher([seed_chunks("paper-a", "S1", "alpha one")])
+    with pytest.raises(ValueError, match="min_k"):
+        ctx.searcher.search("alpha", min_k=5, max_k=2, candidates=10)
+
+
 # --- per_paper retrieval -----------------------------------------------------------------
 
 
@@ -394,8 +514,9 @@ def test_per_paper_raises_without_resolved_paper_filter(make_searcher, seed_chun
         ctx.searcher.search("attention", per_paper=True)
 
 
-def test_per_paper_candidate_budget_floor_binds_at_k(make_searcher, seed_chunks, monkeypatch):
-    # candidates(6) // n_papers(3) = 2, below k(5) -> each paper's own fetch is floored to k.
+def test_per_paper_candidate_budget_floor_binds_at_max_k(make_searcher, seed_chunks, monkeypatch):
+    # candidates(6) // n_papers(3) = 2, below max_k(5) -> each paper's own fetch is floored
+    # to max_k.
     docs = [
         seed_chunks("paper-a", "S", "alpha content"),
         seed_chunks("paper-b", "S", "beta content"),
@@ -413,7 +534,7 @@ def test_per_paper_candidate_budget_floor_binds_at_k(make_searcher, seed_chunks,
 
     ctx.searcher.search(
         "alpha",
-        k=5,
+        max_k=5,
         candidates=6,
         paper_ids=["paper-a", "paper-b", "paper-c"],
         per_paper=True,
@@ -426,7 +547,7 @@ def test_per_paper_candidate_budget_floor_binds_at_k(make_searcher, seed_chunks,
 def test_per_paper_candidate_budget_mid_range_no_clamp_needed(
     make_searcher, seed_chunks, monkeypatch
 ):
-    # candidates(20) // n_papers(2) = 10, between k(5) and candidates(20) -> used as-is.
+    # candidates(20) // n_papers(2) = 10, between max_k(5) and candidates(20) -> used as-is.
     docs = [
         seed_chunks("paper-a", "S", "alpha content"),
         seed_chunks("paper-b", "S", "beta content"),
@@ -443,7 +564,7 @@ def test_per_paper_candidate_budget_mid_range_no_clamp_needed(
 
     ctx.searcher.search(
         "alpha",
-        k=5,
+        max_k=5,
         candidates=20,
         paper_ids=["paper-a", "paper-b"],
         per_paper=True,
@@ -462,11 +583,11 @@ def test_per_paper_single_resolved_paper_is_a_no_op(make_searcher, seed_chunks):
     ctx = make_searcher(docs)
 
     whole_scope = ctx.searcher.search(
-        "alpha", k=2, candidates=5, paper="paper-a", per_paper=False, rerank=False
-    )
+        "alpha", max_k=2, candidates=5, paper="paper-a", per_paper=False, rerank=False
+    ).results
     per_paper = ctx.searcher.search(
-        "alpha", k=2, candidates=5, paper="paper-a", per_paper=True, rerank=False
-    )
+        "alpha", max_k=2, candidates=5, paper="paper-a", per_paper=True, rerank=False
+    ).results
 
     assert [(r.paper_id, r.score) for r in whole_scope] == [
         (r.paper_id, r.score) for r in per_paper
@@ -522,19 +643,19 @@ def test_per_paper_prevents_one_paper_starving_another(make_config):
     searcher = Searcher(db_dir=cfg.paths.rag_db, collection=cfg.collection, embedder=embedder)
 
     whole_scope = searcher.search(
-        "orig", k=3, candidates=2, paper_ids=["paper-a", "paper-b"], rerank=False
-    )
+        "orig", max_k=3, candidates=2, paper_ids=["paper-a", "paper-b"], rerank=False
+    ).results
     assert "paper-b" not in [r.paper_id for r in whole_scope]
-    assert len(whole_scope) == 2  # under-filled: candidates=2 capped it below k=3
+    assert len(whole_scope) == 2  # under-filled: candidates=2 capped it below max_k=3
 
     per_paper = searcher.search(
         "orig",
-        k=3,
+        max_k=3,
         candidates=2,
         paper_ids=["paper-a", "paper-b"],
         per_paper=True,
         rerank=False,
-    )
+    ).results
     assert {r.paper_id for r in per_paper} == {"paper-a", "paper-b"}
     assert len(per_paper) == 3
 
@@ -586,12 +707,12 @@ def test_per_paper_sorts_pooled_results_by_score_when_rerank_false(make_config):
 
     results = searcher.search(
         "orig",
-        k=2,
+        max_k=2,
         candidates=2,
         paper_ids=["paper-a", "paper-b"],
         per_paper=True,
         rerank=False,
-    )
+    ).results
 
     assert [r.paper_id for r in results] == ["paper-b", "paper-a"]
 
@@ -604,11 +725,16 @@ def test_per_paper_sorts_pooled_results_by_score_when_reranker_fails(monkeypatch
     searcher = Searcher(db_dir=cfg.paths.rag_db, collection=cfg.collection, embedder=embedder)
 
     no_rerank = searcher.search(
-        "orig", k=2, candidates=2, paper_ids=["paper-a", "paper-b"], per_paper=True, rerank=False
-    )
+        "orig",
+        max_k=2,
+        candidates=2,
+        paper_ids=["paper-a", "paper-b"],
+        per_paper=True,
+        rerank=False,
+    ).results
     reranked = searcher.search(
-        "orig", k=2, candidates=2, paper_ids=["paper-a", "paper-b"], per_paper=True, rerank=True
-    )
+        "orig", max_k=2, candidates=2, paper_ids=["paper-a", "paper-b"], per_paper=True, rerank=True
+    ).results
 
     assert [r.paper_id for r in reranked] == [r.paper_id for r in no_rerank]
 
@@ -634,7 +760,8 @@ def test_per_paper_generates_paraphrases_once_not_per_paper(
 
     searcher.search(
         "alpha",
-        k=1,
+        min_k=1,
+        max_k=1,
         candidates=3,
         paper_ids=["paper-a", "paper-b", "paper-c"],
         per_paper=True,
@@ -686,12 +813,12 @@ def test_per_paper_composes_with_hybrid_and_multi_query(make_config, fake_llm):
 
     results = searcher.search(
         "orig",
-        k=2,
+        max_k=2,
         candidates=2,
         paper_ids=["paper-p1", "paper-p2"],
         per_paper=True,
         rerank=False,
-    )
+    ).results
 
     by_paper = {r.paper_id: r.source for r in results}
     assert set(by_paper) == {"paper-p1", "paper-p2"}

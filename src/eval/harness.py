@@ -24,16 +24,24 @@ from rag.sparse import reciprocal_rank_fusion, rrf_scores
 from .checkpoint import CheckpointWriter, resume_units
 from .metrics import (
     QueryScore,
+    elbow_cutoffs,
+    mean_returned_at_elbow,
     mrr_at_k,
     n_conditioned,
     n_ungoldable,
+    precision_at_elbow,
+    recall_at_elbow,
     relevant_ids,
 )
 from .queryset import QAItem
 from .stats import (
+    BootResult,
+    DeltaResult,
     ceiling_saturation_note,
     cluster_bootstrap,
+    elbow_recall_samples,
     mdd,
+    paired_delta,
     resolution_warning,
     success_samples,
 )
@@ -74,6 +82,11 @@ class RunReport:
     n_clusters: int
     ceiling_ci: tuple[float, float]
     mdd_upfront: float
+    # Additive elbow-cutoff metrics (see eval.metrics) — None when rerank=False, since
+    # elbow never runs on a non-reranked ordering. Never disturb the metrics above.
+    mean_returned_at_elbow: float | None = None
+    precision_at_elbow: float | None = None
+    recall_at_elbow: float | None = None
 
 
 def build_searcher(cfg: Config) -> Searcher:
@@ -212,7 +225,7 @@ def run(
     """
     searcher = searcher or build_searcher(cfg)
     candidates = cfg.retrieval.candidates if candidates is None else candidates
-    k = cfg.retrieval.k if k is None else k
+    k = cfg.retrieval.max_k if k is None else k
     rerank = cfg.reranker.enabled if rerank is None else rerank
     scores = score_items(
         searcher,
@@ -226,6 +239,18 @@ def run(
     boot = cluster_bootstrap(success_samples(scores))
     # boot.point is the same quantity as success_at_candidates(scores) — read it off the
     # bootstrap rather than recomputing, so the point and its CI can never disagree.
+    elbow_mean = elbow_precision = elbow_recall = None
+    if rerank:
+        cutoffs = elbow_cutoffs(
+            scores,
+            cfg.retrieval.min_k,
+            cfg.retrieval.max_k,
+            cfg.retrieval.elbow_mad_multiplier,
+            cfg.retrieval.elbow_prominence,
+        )
+        elbow_mean = mean_returned_at_elbow(cutoffs)
+        elbow_precision = precision_at_elbow(cutoffs)
+        elbow_recall = recall_at_elbow(cutoffs)
     return RunReport(
         n_queries=len(items),
         candidates=candidates,
@@ -238,6 +263,9 @@ def run(
         n_clusters=boot.n_clusters,
         ceiling_ci=(boot.ci_lo, boot.ci_hi),
         mdd_upfront=mdd(boot.se),
+        mean_returned_at_elbow=elbow_mean,
+        precision_at_elbow=elbow_precision,
+        recall_at_elbow=elbow_recall,
     )
 
 
@@ -270,4 +298,149 @@ def format_report(report: RunReport) -> str:
         f"  MRR@{report.k}             = {report.mrr_at_k:.3f}   "
         f"(stage-2, over {report.n_conditioned}/{n_goldable} gold-in-pool queries)",
     ]
+    if report.mean_returned_at_elbow is not None:
+        lines.append(
+            f"  elbow: mean_returned={report.mean_returned_at_elbow:.1f}  "
+            f"precision@elbow={report.precision_at_elbow:.3f}  "
+            f"recall@elbow={report.recall_at_elbow:.3f}   "
+            f"(additive — never affects the metrics above)"
+        )
+    return "\n".join(lines)
+
+
+# --- Elbow-knob screen: min_k/max_k stay out of this (docs/harness.md — "how much context
+# the agent gets" is a product decision, not chosen by the tool, same as retrieval.k always
+# was); mad_multiplier/prominence are pure retrieval-quality knobs, screened the same way
+# reranker.enabled/candidates already are.
+
+DEFAULT_MAD_GRID = [1.5, 2.0, 3.0, 4.5]
+DEFAULT_PROMINENCE_GRID = [0.05, 0.1, 0.15, 0.25]
+
+
+@dataclass
+class ElbowArmResult:
+    label: str
+    mad_multiplier: float
+    prominence: float
+    mean_returned: float
+    precision: float
+    recall: BootResult
+    recall_delta: DeltaResult | None  # paired vs the default arm; None for the default itself
+
+
+@dataclass
+class ElbowScreenReport:
+    min_k: int
+    max_k: int
+    default_mad_multiplier: float
+    default_prominence: float
+    n_queries: int
+    n_clusters: int
+    results: list[ElbowArmResult]
+
+
+def screen_elbow(
+    cfg: Config,
+    items: list[QAItem],
+    *,
+    mad_grid: list[float] | None = None,
+    prominence_grid: list[float] | None = None,
+    searcher: Searcher | None = None,
+    show_progress: bool = False,
+) -> ElbowScreenReport:
+    """One-factor-at-a-time screen of ``elbow_mad_multiplier``/``elbow_prominence``, paired
+    vs the config's own defaults.
+
+    Unlike ``screen_retrieval``, this needs no cache or checkpoint: every arm here is a pure
+    postprocessing pass (``find_cutoff``, via :func:`~eval.metrics.elbow_cutoffs`) over one
+    already-reranked ``score_items`` call at ``cfg``'s own ``candidates``/``max_k`` — the
+    only real cost (one dense query + one rerank pass per item), shared by every arm.
+    Re-cutting the same cached scores at a different mad_multiplier/prominence is close to
+    free at typical pool/grid sizes, so there's nothing here worth resuming across runs.
+    """
+    searcher = searcher or build_searcher(cfg)
+    min_k, max_k = cfg.retrieval.min_k, cfg.retrieval.max_k
+    mad0, prom0 = cfg.retrieval.elbow_mad_multiplier, cfg.retrieval.elbow_prominence
+    scores = score_items(
+        searcher,
+        items,
+        candidates=cfg.retrieval.candidates,
+        k=max_k,
+        rerank=True,
+        desc="scoring (shared by every elbow arm)" if show_progress else None,
+    )
+
+    grid_arms: list[tuple[str, float, float]] = [
+        (f"mad_multiplier={m}", m, prom0) for m in (mad_grid or DEFAULT_MAD_GRID) if m != mad0
+    ] + [
+        (f"prominence={p}", mad0, p)
+        for p in (prominence_grid or DEFAULT_PROMINENCE_GRID)
+        if p != prom0
+    ]
+
+    default_cutoffs = elbow_cutoffs(scores, min_k, max_k, mad0, prom0)
+    default_samples = elbow_recall_samples(default_cutoffs)
+    default_boot = cluster_bootstrap(default_samples)
+
+    results = [
+        ElbowArmResult(
+            label="default",
+            mad_multiplier=mad0,
+            prominence=prom0,
+            mean_returned=mean_returned_at_elbow(default_cutoffs),
+            precision=precision_at_elbow(default_cutoffs),
+            recall=default_boot,
+            recall_delta=None,
+        )
+    ]
+    for label, mad, prom in grid_arms:
+        cutoffs = elbow_cutoffs(scores, min_k, max_k, mad, prom)
+        samples = elbow_recall_samples(cutoffs)
+        results.append(
+            ElbowArmResult(
+                label=label,
+                mad_multiplier=mad,
+                prominence=prom,
+                mean_returned=mean_returned_at_elbow(cutoffs),
+                precision=precision_at_elbow(cutoffs),
+                recall=cluster_bootstrap(samples),
+                recall_delta=paired_delta(samples, default_samples),
+            )
+        )
+    return ElbowScreenReport(
+        min_k=min_k,
+        max_k=max_k,
+        default_mad_multiplier=mad0,
+        default_prominence=prom0,
+        n_queries=len(items),
+        n_clusters=default_boot.n_clusters,
+        results=results,
+    )
+
+
+def format_elbow_screen_report(report: ElbowScreenReport) -> str:
+    """Human-readable summary — same "resolution before ranking" rule as ``format_report``:
+    a knob whose paired-delta CI straddles zero is worth reporting as *not* worth tuning for
+    this pool, not hidden."""
+    warning = resolution_warning(report.n_clusters)
+    lines = [
+        f"n_queries={report.n_queries}  n_clusters={report.n_clusters} papers  "
+        f"min_k={report.min_k}  max_k={report.max_k}  "
+        f"default: mad_multiplier={report.default_mad_multiplier} "
+        f"prominence={report.default_prominence}",
+    ]
+    if warning:
+        lines.append(f"  ⚠ {warning}")
+    for r in report.results:
+        lo, hi = r.recall.ci_lo, r.recall.ci_hi
+        line = (
+            f"  {r.label:<20} mean_returned={r.mean_returned:.1f}  "
+            f"precision={r.precision:.3f}  recall={r.recall.point:.3f} [{lo:.3f}, {hi:.3f}]"
+        )
+        if r.recall_delta is not None:
+            d = r.recall_delta
+            straddles = d.ci_lo <= 0.0 <= d.ci_hi
+            flag = "  (straddles zero — not worth tuning here)" if straddles else "  ***"
+            line += f"   Δrecall={d.delta:+.3f} [{d.ci_lo:+.3f}, {d.ci_hi:+.3f}]{flag}"
+        lines.append(line)
     return "\n".join(lines)

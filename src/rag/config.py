@@ -269,13 +269,29 @@ class LLMCfg:
 
 @dataclass
 class RetrievalCfg:
-    k: int = 5  # passages returned per search_papers call, unless the model asks for more
     candidates: int = 20  # dense-recall pool size handed to the reranker
     max_rounds: int = 8  # ReAct search/answer cycles before the agent must answer
+    # Elbow cutoff: after reranking, cut at the first real drop-off in score rather than
+    # always returning a fixed count. min_k/max_k bound it; elbow_mad_multiplier/
+    # elbow_prominence tune how big a drop counts as "real" (see find_cutoff in search.py).
+    min_k: int = 2  # never return fewer than this (when the pool has this many)
+    max_k: int = 10  # never return more than this, even if nothing looks like a cliff
+    elbow_mad_multiplier: float = 3.0
+    elbow_prominence: float = 0.15
+    # Rollback switch to plain max_k truncation, no code change — these knobs are
+    # per-pool starting values validated via `paperlens-eval screen --tier retrieval`,
+    # not settled numbers; flip to False if elbow misbehaves before that's run.
+    elbow_enabled: bool = True
 
     def __post_init__(self) -> None:
-        if self.k > self.candidates:
-            raise ValueError("retrieval.k must be <= retrieval.candidates")
+        if self.min_k > self.max_k:
+            raise ValueError("retrieval.min_k must be <= retrieval.max_k")
+        if self.max_k > self.candidates:
+            raise ValueError("retrieval.max_k must be <= retrieval.candidates")
+        if self.elbow_mad_multiplier <= 0:
+            raise ValueError("retrieval.elbow_mad_multiplier must be > 0")
+        if not (0 < self.elbow_prominence < 1):
+            raise ValueError("retrieval.elbow_prominence must be in (0, 1)")
 
 
 @dataclass

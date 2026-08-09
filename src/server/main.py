@@ -107,7 +107,7 @@ def create_app(cfg: Config) -> FastAPI:
         non-fatal — the next /api/chat rebuilds and surfaces any real error."""
         try:
             agent = get_agent()
-            agent.searcher.search("warm up", k=1, candidates=1)
+            agent.searcher.search("warm up", min_k=1, max_k=1, candidates=1)
             if cfg.faithfulness.enabled:
                 agent.faithfulness.check_batch([("warm up", "warm up")])
         except Exception as e:

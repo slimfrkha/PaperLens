@@ -26,6 +26,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from rag.search import find_cutoff
+
 
 @dataclass
 class QueryScore:
@@ -118,3 +120,58 @@ def n_ungoldable(scores: list[QueryScore]) -> int:
     """Questions whose gold section has zero chunks in the index — a generation artifact,
     not a retrieval miss. Reported, never hidden in the success@candidates denominator."""
     return sum(1 for s in scores if not s.goldable)
+
+
+# --- Additive elbow-cutoff metrics ---
+#
+# These never replace success@candidates/MRR@k above — computed alongside them so a
+# sweep over the elbow knobs (min_k/max_k/mad_multiplier/prominence) doesn't disturb the
+# existing, fixed-k-comparable numbers other retrieval knobs are already tuned against.
+# ``QueryScore.ranked`` is already the reranked top-``max_k`` window (``run`` calls
+# ``score_items``/``_retrieve`` with ``k=cfg.retrieval.max_k``) — exactly the window
+# ``find_cutoff`` needs, so this is pure postprocessing: no new retrieval or rerank pass.
+
+ElbowCutoff = tuple[QueryScore, int, bool]  # (query, cutoff count, gold section survived it)
+
+
+def elbow_cutoffs(
+    scores: list[QueryScore],
+    min_k: int,
+    max_k: int,
+    mad_multiplier: float,
+    prominence: float,
+) -> list[ElbowCutoff]:
+    """The elbow cutoff for every gold-in-pool query, computed once and shared by the three
+    aggregate metrics below (avoids running ``find_cutoff`` three times over the same
+    scores). Conditioned on ``gold_in_pool``, same as ``mrr_at_k`` — a stage-1 miss can't
+    be charged to the elbow cutoff any more than it can to the reranker."""
+    out: list[ElbowCutoff] = []
+    for s in scores:
+        if not s.gold_in_pool:
+            continue
+        cutoff, _reason = find_cutoff(
+            [sc for _, sc in s.ranked], min_k, max_k, mad_multiplier, prominence
+        )
+        elbow_ids = {cid for cid, _ in s.ranked[:cutoff]}
+        out.append((s, cutoff, bool(s.relevant_ids & elbow_ids)))
+    return out
+
+
+def mean_returned_at_elbow(cutoffs: list[ElbowCutoff]) -> float:
+    """Average count of chunks the elbow cutoff kept — the "context budget" number: how
+    much smaller than a fixed max_k does elbow typically make the returned set."""
+    return sum(c for _, c, _ in cutoffs) / len(cutoffs) if cutoffs else 0.0
+
+
+def recall_at_elbow(cutoffs: list[ElbowCutoff]) -> float:
+    """Fraction of gold-in-pool queries whose gold section survived the elbow cutoff — did
+    truncating cost real recall, on top of stage 1's success@candidates ceiling."""
+    return sum(hit for _, _, hit in cutoffs) / len(cutoffs) if cutoffs else 0.0
+
+
+def precision_at_elbow(cutoffs: list[ElbowCutoff]) -> float:
+    """Mean per-query precision of the elbow-cut set: one relevant unit (the gold section,
+    same "N chunks don't move the score" rule as the metrics above) over however many
+    chunks the cutoff kept."""
+    vals = [(1.0 if hit else 0.0) / c for _, c, hit in cutoffs if c > 0]
+    return sum(vals) / len(vals) if vals else 0.0

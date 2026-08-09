@@ -22,7 +22,7 @@ from rag.manifest import Manifest
 from rag.search import Searcher
 
 
-def _search_tool(default_k: int) -> dict:
+def _search_tool() -> dict:
     return {
         "name": "search_papers",
         "description": (
@@ -41,11 +41,12 @@ def _search_tool(default_k: int) -> dict:
                 },
                 "paper": {
                     "type": "string",
-                    "description": "Optional paper_id to restrict the search.",
-                },
-                "top_k": {
-                    "type": "integer",
-                    "description": f"How many passages to return (default {default_k}).",
+                    "description": (
+                        "Optional paper_id to restrict the search. Only set this when the "
+                        "user explicitly names a paper or the question is unambiguously "
+                        "about one already-established paper — don't infer it from which "
+                        "paper happened to dominate an earlier answer's citations."
+                    ),
                 },
             },
             "required": ["query"],
@@ -89,7 +90,7 @@ class ChatAgent:
         # Inject a faithfulness checker to run offline (tests); default per cfg.faithfulness,
         # gated at call time by cfg.faithfulness.enabled — same pattern as reranker.enabled.
         self.faithfulness = faithfulness or build_faithfulness_checker(cfg.faithfulness)
-        self.search_tool = _search_tool(cfg.retrieval.k)
+        self.search_tool = _search_tool()
 
     def _system(self, paper_ids: list[str] | None) -> str:
         # Scope the injected catalog to the active filter — otherwise the model can
@@ -174,16 +175,20 @@ class ChatAgent:
                     "per_paper": per_paper,
                 }
             )
-            k = int(args.get("top_k") or self.cfg.retrieval.k)
-            results = self.searcher.search(
+            outcome = self.searcher.search(
                 query,
-                k=k,
-                candidates=max(self.cfg.retrieval.candidates, k * 4),
+                min_k=self.cfg.retrieval.min_k,
+                max_k=self.cfg.retrieval.max_k,
+                candidates=max(self.cfg.retrieval.candidates, self.cfg.retrieval.max_k * 4),
                 paper=args.get("paper") or None,
                 paper_ids=paper_ids,
                 rerank=self.cfg.reranker.enabled,
                 per_paper=per_paper,
+                elbow_enabled=self.cfg.retrieval.elbow_enabled,
+                elbow_mad_multiplier=self.cfg.retrieval.elbow_mad_multiplier,
+                elbow_prominence=self.cfg.retrieval.elbow_prominence,
             )
+            results = outcome.results
             if not results:
                 trace({"type": "observation", "text": "(no results)"})
                 return "No results for that query (within the active filter)."
@@ -209,6 +214,11 @@ class ChatAgent:
                 # Full passage — exactly what the model receives, shown verbatim in the trace.
                 blocks.append(f'[{ref}] paper={r.paper_id}  section="{r.breadcrumb}"\n{r.body}')
             observation = "\n\n".join(blocks)
+            if outcome.cutoff_reason != "no_elbow":
+                observation = (
+                    f"[{len(results)} of up to {self.cfg.retrieval.max_k} returned "
+                    f"— {outcome.cutoff_reason}]\n\n"
+                ) + observation
             trace({"type": "observation", "text": observation})
             return observation
 
@@ -239,7 +249,7 @@ class ChatAgent:
 
         Cost is O(refs x citing_sentences x passage_sentences) NLI pairs, batched
         into one check_batch call — bounded in practice by retrieval.max_rounds /
-        retrieval.k (how many refs a run can accumulate) and chunking.max_tokens
+        retrieval.max_k (how many refs a run can accumulate) and chunking.max_tokens
         (how many sentences one passage has), but there's no explicit cap here."""
         spans = attribute_refs(text, set(registry))
         if not spans:

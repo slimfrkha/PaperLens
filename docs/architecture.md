@@ -24,7 +24,7 @@ flowchart LR
     agent -->|3 · search_papers| searcher[Searcher]
     searcher -->|4a · dense recall| ix
     searcher -.->|4b · lexical recall, opt-in| bm25[(BM25)]
-    searcher -->|5 · fuse RRF → rerank → top-k| rr[Reranker]
+    searcher -->|5 · fuse RRF → rerank → elbow cutoff| rr[Reranker]
     searcher -.->|6 · passages| agent
     agent -->|7 · answer + [rN] citations| fc{{faithfulness check, opt-in}}
     fc -.->|8 · verdicts| agent
@@ -36,7 +36,8 @@ Reading the read path: a **question** enters the **ChatAgent**, which loops with
 backend** (each turn a **Thought**) and, when it needs evidence, calls its one tool
 `search_papers` (an **Action**). The **Searcher** runs dense **recall** of `candidates` from
 the index — plus, when **hybrid retrieval** is on, BM25 lexical recall fused in via **RRF** —
-then **rerank**s to the top `k`, returning the **passages** (the **Observation**). The agent
+then **rerank**s and applies an **elbow cutoff**, returning the **passages** (the
+**Observation**). The agent
 threads them into an answer with `[rN]` **citations**; when the **faithfulness check** is on,
 each cited sentence is verified against its passage and gets a **verdict** before the answer
 streams to the UI over SSE. Solid arrows are calls; dotted arrows are what comes back or are
@@ -106,23 +107,31 @@ PDFs) may need different numbers. See [`chunking`](configuration.md#️-chunking
 A `Chunk` therefore stores both `text` (breadcrumb + body, what gets embedded) and `body`
 (shown to the reader). This is why citations can name the exact section.
 
-## 🎯 Retrieval: two stages
+## 🎯 Retrieval: three stages
 
-`Searcher.search` (`src/rag/search.py`) is deliberately two-stage:
+`Searcher.search` (`src/rag/search.py`) is deliberately three-stage:
 
 1. **Dense recall.** Embed the query and pull `candidates` (config `retrieval.candidates`,
    default 20) nearest chunks from Chroma by cosine similarity. Fast, high-recall, imprecise.
    Asymmetric embedders (e.g. Gemini) embed the query differently from documents; symmetric
    ones don't.
-2. **Rerank.** A **reranker** rescores those candidates against the query and keeps the top
-   `k` (config `retrieval.k`, default 5 — the agent lets the model request a different
-   `top_k` per call). A cross-encoder reads query and passage together, so it is far more
-   precise than the bi-encoder recall — but too expensive to run over the whole corpus,
-   which is exactly why it runs only on the candidate set.
+2. **Rerank.** A **reranker** rescores those candidates against the query. A cross-encoder
+   reads query and passage together, so it is far more precise than the bi-encoder recall —
+   but too expensive to run over the whole corpus, which is exactly why it runs only on the
+   candidate set.
+3. **Elbow cutoff.** How many of the reranked results to keep isn't a fixed count — an
+   **elbow cutoff** (`find_cutoff`) picks the first real drop-off in score, bounded to
+   `[retrieval.min_k, retrieval.max_k]` (defaults `2`/`10`). A narrow query that only has 2
+   truly relevant chunks doesn't get padded with irrelevant ones to hit a fixed count; a
+   broad query isn't cut off arbitrarily either. Only runs when stage 2 actually reranked —
+   `reranker.enabled: false` or a reranker failure both fall back to plain `max_k`
+   truncation, same as `retrieval.elbow_enabled: false` (a rollback switch: these knobs are
+   per-pool starting values, calibrated via `paperlens-eval screen --tier elbow`, not
+   settled numbers — see [harness](harness.md)).
 
 The reranker only adds precision when it has candidates to *discard*, so `retrieval.candidates`
-is a floor: when the model asks for a large `top_k`, the agent scales the recall pool to
-`4 × top_k`. A pool equal to `k` would reduce the second stage to reordering the first.
+is a floor: the agent scales the recall pool to `4 × max_k`. A pool equal to `max_k` would
+reduce the second stage to reordering the first.
 
 Both stages are swappable via config through the **registry** pattern (see below). The
 reranker can even be the chat LLM (`reranker.type: llm`), scoring passages 0–10 in one
@@ -135,11 +144,12 @@ filter (used by the tag filter) scopes recall.
 An opt-in, per-message **per-paper retrieval** mode (`Searcher.search(per_paper=True)`)
 changes *how* that scope is searched: instead of one recall pass over every allowed
 paper's chunks, it runs recall once per paper — each with its own candidate budget,
-clamped so no paper's contribution shrinks below a full `k`'s worth or exceeds `candidates`
-— and pools every paper's candidates flat before reranking. Trades a larger total candidate
-pool for protection against one chunk-heavy paper crowding the rest out of it before the
-reranker ever sees them; the final top-`k` selection is unchanged and global, with no
-per-paper quota.
+clamped so no paper's contribution shrinks below a full `max_k`'s worth or exceeds
+`candidates` — and pools every paper's candidates flat before reranking. Trades a larger
+total candidate pool for protection against one chunk-heavy paper crowding the rest out of
+it before the reranker ever sees them; the final elbow cutoff is unchanged and global, with
+no per-paper quota — `per_paper` only ever shaped stage 1's recall, never guaranteed every
+paper survives into the returned set.
 
 **Hybrid dense+sparse retrieval** (`sparse.enabled`, opt-in, off by default) inserts a fusion
 step before reranking: a BM25 lexical search (`src/rag/sparse.py`) runs alongside dense recall
@@ -236,8 +246,8 @@ Two design choices worth knowing the *why* of:
   truncation.
 
 **Cost**: one batched NLI call per answer, but scoring `refs × citing_sentences ×
-passage_sentences` pairs — bounded in practice by `retrieval.max_rounds`/`retrieval.k` (how
-many refs one run can accumulate) and `chunking.max_tokens` (how many sentences one passage
+passage_sentences` pairs — bounded in practice by `retrieval.max_rounds`/`retrieval.max_k`
+(how many refs one run can accumulate) and `chunking.max_tokens` (how many sentences one passage
 has), but nothing enforces an explicit ceiling, so a chatty multi-round answer citing several
 refs adds real, synchronous latency before the `citations` event.
 

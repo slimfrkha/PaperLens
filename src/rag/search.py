@@ -1,6 +1,6 @@
 """Retrieval over the Chroma RAG DB, with optional cross-encoder reranking and hybrid BM25 fusion.
 
-Two-stage retrieval:
+Three-stage retrieval:
   1. Dense vector search in Chroma returns the top ``candidates`` chunks. When hybrid sparse
      retrieval is enabled, a BM25 lexical search runs alongside it and the two rankings are
      fused via reciprocal rank fusion (RRF) before reranking. When multi-query expansion is
@@ -8,13 +8,17 @@ Two-stage retrieval:
      ranking is fused into that same flat RRF pass — a recall boost against how a question
      happens to be phrased, opt-in like hybrid (see ``MultiQueryCfg`` in ``config.py``).
   2. A cross-encoder reranker (default BAAI/bge-reranker-v2-m3, the sibling of
-     the bge-m3 embedder) rescores each (query, chunk) pair and keeps the top
-     ``k``. Reranking reorders keyword-y matches below the truly relevant ones;
-     disable it with ``--no-rerank`` for pure vector results.
+     the bge-m3 embedder) rescores each (query, chunk) pair. Reranking reorders
+     keyword-y matches below the truly relevant ones; disable it with ``--no-rerank``
+     for pure vector results.
+  3. An elbow cutoff (``find_cutoff``) picks how many of the reranked results to keep:
+     the first real drop-off in score, bounded to ``[min_k, max_k]`` — not a fixed count.
+     Only runs when stage 2 actually reranked; ``--no-rerank`` or a reranker failure both
+     fall back to plain ``max_k`` truncation.
 
 CLI:
     python -m rag.search "how does MLA reduce the KV cache?"
-    python -m rag.search "FP8 quantization" --k 5 --candidates 30 --paper <paper_id>
+    python -m rag.search "FP8 quantization" --min-k 2 --max-k 8 --candidates 30 --paper <paper_id>
     python -m rag.search "long context" --no-rerank
     python -m rag.search "SwiGLU activation" --sparse
 """
@@ -24,7 +28,8 @@ from __future__ import annotations
 import argparse
 import textwrap
 from dataclasses import dataclass
-from typing import Any, cast
+from statistics import median
+from typing import Any, Literal, cast
 
 from .config import AnthropicSpec
 from .embedders import HFEmbedder
@@ -47,6 +52,86 @@ class Result:
     text: str  # breadcrumb + body (what was embedded)
     body: str  # body only
     source: str = "dense"  # "dense" | "sparse" | "both" — which retrieval pool(s) surfaced this
+
+
+CutoffReason = Literal["elbow", "pool_exhausted", "no_elbow", "no_rerank", "disabled"]
+
+
+@dataclass
+class SearchOutcome:
+    """``Searcher.search``'s return value: the results plus *why* that many came back —
+    needed because the count is no longer a fixed ``k`` a caller chose, it's whatever the
+    elbow cutoff (or a fallback) decided. ``cutoff_reason``:
+      - ``"elbow"``          — a real score cliff was found; cut there.
+      - ``"no_elbow"``       — reranked fine, but nothing looked like a cliff; returned
+                                ``max_k`` (or the whole pool, if smaller).
+      - ``"pool_exhausted"`` — fewer than ``min_k`` candidates existed at all; returned
+                                every one of them.
+      - ``"no_rerank"``      — ``rerank=False`` or the reranker failed; plain ``max_k``
+                                truncation of the pre-rerank order, elbow never attempted.
+      - ``"disabled"``       — ``elbow_enabled=False``; plain ``max_k`` truncation of the
+                                reranked order, elbow never attempted.
+    """
+
+    results: list[Result]
+    cutoff_reason: CutoffReason
+
+
+def find_cutoff(
+    scores: list[float],
+    min_k: int,
+    max_k: int,
+    mad_multiplier: float,
+    prominence: float,
+) -> tuple[int, CutoffReason]:
+    """Where to cut a reranked, score-**descending** list: the first real drop-off (an
+    "elbow") within ``[min_k, max_k]``, or ``max_k`` if nothing looks like one.
+
+    A gap counts as a real cliff only if it clears two tests against the *other* gaps in
+    the window — both robust to the candidate cliff itself, so it can't inflate its own
+    baseline:
+      - a MAD-based outlier test (``median + mad_multiplier * MAD`` of the other gaps),
+        with MAD floored at a small fraction of the window's score range — several
+        equal/near-equal low-ranked gaps (a reranker clustering similar-relevance chunks)
+        would otherwise collapse MAD toward 0 and make any nonzero gap read as a
+        statistically significant cliff, exactly the smooth-decay case this test exists
+        to reject;
+      - a prominence floor relative to the window's own score range, so a technically
+        "significant" but tiny wobble on an already-flat curve doesn't count.
+
+    Returns ``(cutoff_index, reason)`` — see ``SearchOutcome.cutoff_reason`` for what each
+    reason means. Never returns fewer than ``min(min_k, len(scores))`` or more than
+    ``min(max_k, len(scores))``.
+    """
+    if len(scores) <= min_k:
+        return len(scores), "pool_exhausted"
+
+    window = scores[:max_k]
+    if len(window) <= 1:
+        # Nothing to find a gap between (max_k == 1, or a single-candidate pool already
+        # past the min_k check above) — no elbow is even a meaningful question here.
+        return len(window), "no_elbow"
+
+    gaps = [window[i] - window[i + 1] for i in range(len(window) - 1)]
+    score_range = window[0] - window[-1]
+
+    max_gap_idx = max(range(len(gaps)), key=lambda i: gaps[i])
+    max_gap = gaps[max_gap_idx]
+    other_gaps = gaps[:max_gap_idx] + gaps[max_gap_idx + 1 :]
+
+    # No other gaps to build a baseline from (max_k == 2), or a flat window (score_range
+    # == 0) — nothing to robustly test against, so no elbow rather than a noisy guess.
+    if other_gaps and score_range > 0:
+        baseline = median(other_gaps)
+        mad = median([abs(g - baseline) for g in other_gaps])
+        mad = max(mad, 1e-3 * score_range)  # floor: guards the near-zero-MAD false trigger
+        is_real_cliff = max_gap > baseline + mad_multiplier * mad
+        clears_prominence = max_gap > prominence * score_range
+        if is_real_cliff and clears_prominence:
+            cut = max_gap_idx + 1
+            return max(min_k, min(cut, max_k)), "elbow"
+
+    return min(max_k, len(scores)), "no_elbow"
 
 
 def _pick_device(device: str | None) -> str:
@@ -162,7 +247,7 @@ class Searcher:
         the same call); ``eval.harness._retrieve`` and ``eval.optimizer.build_cache`` call it
         directly to get the same dense pool ``search`` would compute — chunk ids and per-id
         Results (``.text`` for reranking, ``.score`` for a no-rerank dense-only ranking) that
-        ``search``'s own return value (a fused/reranked ``list[Result]``) doesn't expose.
+        ``search``'s own return value (a fused/reranked/cut ``SearchOutcome``) doesn't expose.
 
         ``qvec`` lets a caller pass an already-computed embedding for ``query`` — ``search``
         precomputes one per variant and reuses it across every scope (e.g. every paper under
@@ -251,20 +336,31 @@ class Searcher:
     def search(
         self,
         query: str,
-        k: int = 5,
+        min_k: int = 2,
+        max_k: int = 10,
         candidates: int = 20,
         paper: str | None = None,
         paper_ids: list[str] | None = None,
         rerank: bool = True,
         per_paper: bool = False,
-    ) -> list[Result]:
+        elbow_enabled: bool = True,
+        elbow_mad_multiplier: float = 3.0,
+        elbow_prominence: float = 0.15,
+    ) -> SearchOutcome:
+        if min_k > max_k:
+            # RetrievalCfg.__post_init__ already enforces this for the agent path, but the
+            # CLI (--min-k/--max-k) and any direct library caller build no Config at all —
+            # without this, find_cutoff's max(min_k, min(cut, max_k)) bounding silently
+            # returns more than max_k instead of failing loudly.
+            raise ValueError(f"min_k ({min_k}) must be <= max_k ({max_k})")
+
         # Resolve the paper filter. `paper_ids` (e.g. from a tag filter) and a
         # single `paper` intersect; an explicit empty set matches nothing.
         ids = paper_ids
         if paper is not None:
             ids = [paper] if ids is None else [p for p in ids if p == paper]
         if ids is not None and len(ids) == 0:
-            return []
+            return SearchOutcome([], "pool_exhausted")
         where = {"paper_id": {"$in": ids}} if ids is not None else None
         allowed = set(ids) if ids is not None else None
 
@@ -290,12 +386,13 @@ class Searcher:
 
         # Normally one scope: the whole resolved `where`/`allowed`, at the full `candidates`
         # budget. Under per_paper, one scope per paper, each capped to its own share of the
-        # budget — floored at `k` so no paper's contribution shrinks below a full answer's
-        # worth, capped at `candidates` so no paper gets a bigger pool than a normal search
-        # would already pull (which also makes a single resolved paper a no-op, identical to
-        # per_paper=False). Assumes the caller's usual k <= candidates — if k > candidates,
-        # the floor wins and each paper's fetch exceeds candidates; every real caller
-        # (ChatAgent.execute) already guarantees candidates >= k, so this isn't guarded here.
+        # budget — floored at `max_k` so no paper's contribution shrinks below a full
+        # answer's worth, capped at `candidates` so no paper gets a bigger pool than a normal
+        # search would already pull (which also makes a single resolved paper a no-op,
+        # identical to per_paper=False). Assumes the caller's usual max_k <= candidates — if
+        # max_k > candidates, the floor wins and each paper's fetch exceeds candidates; every
+        # real caller (ChatAgent.execute) already guarantees candidates >= max_k, so this
+        # isn't guarded here.
         if per_paper:
             assert ids is not None  # enforced by the per_paper/ids guard above
             n_papers = len(ids)
@@ -303,7 +400,7 @@ class Searcher:
                 (
                     {"paper_id": {"$in": [pid]}},
                     {pid},
-                    max(k, min(candidates, candidates // n_papers)),
+                    max(max_k, min(candidates, candidates // n_papers)),
                 )
                 for pid in ids
             ]
@@ -317,7 +414,7 @@ class Searcher:
                 # candidates before RRF-fusing, so fusion has margin to promote a sparse-only
                 # hit that dense ranked outside its own top-`candidates` — the final
                 # truncation to `candidates` happens after fusion, not before, so downstream
-                # (rerank, k) sees the same pool shape either way.
+                # (rerank, elbow cutoff) sees the same pool shape either way.
                 fetch_n = (
                     scope_candidates * self._fetch_multiplier
                     if self.sparse_enabled
@@ -383,7 +480,7 @@ class Searcher:
                 results += self._tag_and_collect(by_id, fused_ids, scores, dense_set, sparse_set)
 
         if not results:
-            return []
+            return SearchOutcome([], "pool_exhausted")
 
         if per_paper:
             # Concatenation across papers isn't in any coherent score order yet — sort before
@@ -392,6 +489,7 @@ class Searcher:
             # below overwrites this with its own sort, same as it always has.
             results.sort(key=lambda r: r.score, reverse=True)
 
+        reranked_ok = False
         if rerank:
             try:
                 scores = self.reranker.score(query, [r.text for r in results])
@@ -404,6 +502,7 @@ class Searcher:
                 for r, s in zip(results, scores, strict=False):
                     r.score = s
                 results.sort(key=lambda r: r.score, reverse=True)
+                reranked_ok = True
             except Exception as e:
                 # Reranker failure (model load, inference error, network/rate-limit/auth from an
                 # LLM reranker, or a malformed score list) — degrade to the pre-rerank (dense/RRF)
@@ -413,7 +512,19 @@ class Searcher:
                     f" falling back to pre-rerank order: {e}"
                 )
 
-        return results[:k]
+        # Elbow cutoff only runs on a genuinely reranked, score-comparable ordering — a
+        # skipped or failed rerank leaves cosine/RRF scores, which don't have the same
+        # "confident cliff" shape a cross-encoder produces, so both fall back to plain
+        # max_k truncation instead (see SearchOutcome.cutoff_reason docstring).
+        if not reranked_ok:
+            return SearchOutcome(results[:max_k], "no_rerank")
+        if not elbow_enabled:
+            return SearchOutcome(results[:max_k], "disabled")
+
+        cutoff, reason = find_cutoff(
+            [r.score for r in results], min_k, max_k, elbow_mad_multiplier, elbow_prominence
+        )
+        return SearchOutcome(results[:cutoff], reason)
 
 
 def main() -> None:
@@ -426,7 +537,8 @@ def main() -> None:
     p.add_argument("--embedder", default=DEFAULT_EMBEDDER)
     p.add_argument("--query-prefix", default="", help="prepended to the query before embedding")
     p.add_argument("--reranker", default=DEFAULT_RERANKER)
-    p.add_argument("-k", type=int, default=5, help="final results to show")
+    p.add_argument("--min-k", type=int, default=2, help="never return fewer than this")
+    p.add_argument("--max-k", type=int, default=10, help="never return more than this")
     p.add_argument("--candidates", type=int, default=20, help="vector hits to rerank")
     p.add_argument("--paper", default=None, help="restrict to one paper_id")
     p.add_argument("--no-rerank", action="store_true", help="skip cross-encoder rerank")
@@ -458,9 +570,10 @@ def main() -> None:
         multi_query_n=args.multi_query_n,
         llm=build_llm(AnthropicSpec()) if args.multi_query else None,
     )
-    results = searcher.search(
+    outcome = searcher.search(
         args.query,
-        k=args.k,
+        min_k=args.min_k,
+        max_k=args.max_k,
         candidates=args.candidates,
         paper=args.paper,
         rerank=not args.no_rerank,
@@ -469,8 +582,11 @@ def main() -> None:
     mode = "hybrid" if searcher.sparse_enabled else "vector"
     mode = f"{mode}+multi-query" if searcher.multi_query_enabled else mode
     tag = mode if args.no_rerank else f"{mode}+rerank"
-    print(f"\nQ: {args.query}   [{tag}, top {args.k} of {args.candidates} candidates]")
-    for r in results:
+    print(
+        f"\nQ: {args.query}   [{tag}, {outcome.cutoff_reason}, "
+        f"{len(outcome.results)} of {args.min_k}-{args.max_k}, {args.candidates} candidates]"
+    )
+    for r in outcome.results:
         crumb = r.breadcrumb.split(" > ", 1)[-1]
         snippet = textwrap.shorten(r.body.replace("\n", " "), width=200)
         print(f"\n  [{r.score:.3f}] {r.paper_id}  ::  {crumb}")

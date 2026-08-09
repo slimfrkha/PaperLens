@@ -8,9 +8,13 @@ from __future__ import annotations
 
 from eval.metrics import (
     QueryScore,
+    elbow_cutoffs,
+    mean_returned_at_elbow,
     mrr_at_k,
     n_conditioned,
     n_ungoldable,
+    precision_at_elbow,
+    recall_at_elbow,
     relevant_ids,
     success_at_candidates,
 )
@@ -83,6 +87,79 @@ def test_mrr_conditioned_on_gold_in_pool():
     assert n_conditioned(scores) == 1
     assert mrr_at_k(scores, k=5) == 1.0  # averaged over the 1 conditioned query only
     assert mrr_at_k([miss], k=5) == 0.0  # nobody conditioned → 0.0
+
+
+# --- Additive elbow-cutoff metrics --------------------------------------------------------
+
+
+def test_elbow_cutoffs_conditions_on_gold_in_pool():
+    # A stage-1 miss (gold not in pool) must be excluded, same conditioning as MRR@k — an
+    # elbow cutoff can't be charged with a recall failure that already happened upstream.
+    hit = QueryScore(
+        qid="0",
+        candidate_ids=["a", "x"],
+        ranked=[("a", 0.95), ("x", 0.40), ("y", 0.38)],
+        relevant_ids={"a"},
+        paper_id="p1",
+    )
+    miss = QueryScore(
+        qid="1", candidate_ids=["x"], ranked=[("x", 0.9)], relevant_ids={"z"}, paper_id="p2"
+    )
+    cutoffs = elbow_cutoffs([hit, miss], min_k=1, max_k=3, mad_multiplier=3.0, prominence=0.15)
+    assert [s.qid for s, _, _ in cutoffs] == ["0"]
+
+
+def test_elbow_cutoffs_records_whether_gold_survives_the_cut():
+    # Same score shape (one clean cliff after rank 1) for both queries; only whether the
+    # gold chunk id sits inside the elbow-cut prefix differs.
+    survives = QueryScore(
+        qid="0",
+        candidate_ids=["a"],
+        ranked=[("a", 0.95), ("x", 0.40), ("y", 0.38)],
+        relevant_ids={"a"},
+        paper_id="p1",
+    )
+    starved = QueryScore(
+        qid="1",
+        candidate_ids=["a"],
+        ranked=[("x", 0.95), ("y", 0.40), ("a", 0.38)],
+        relevant_ids={"a"},
+        paper_id="p2",
+    )
+    cutoffs = elbow_cutoffs(
+        [survives, starved], min_k=1, max_k=3, mad_multiplier=3.0, prominence=0.15
+    )
+    hits = {s.qid: hit for s, _, hit in cutoffs}
+    assert hits == {"0": True, "1": False}
+
+
+def test_mean_returned_precision_recall_at_elbow():
+    survives = QueryScore(
+        qid="0",
+        candidate_ids=["a"],
+        ranked=[("a", 0.95), ("x", 0.40), ("y", 0.38)],
+        relevant_ids={"a"},
+        paper_id="p1",
+    )
+    starved = QueryScore(
+        qid="1",
+        candidate_ids=["a"],
+        ranked=[("x", 0.95), ("y", 0.40), ("a", 0.38)],
+        relevant_ids={"a"},
+        paper_id="p2",
+    )
+    cutoffs = elbow_cutoffs(
+        [survives, starved], min_k=1, max_k=3, mad_multiplier=3.0, prominence=0.15
+    )
+    assert mean_returned_at_elbow(cutoffs) == 1.0  # both cut to a single chunk
+    assert recall_at_elbow(cutoffs) == 0.5  # only "survives" kept its gold chunk
+    assert precision_at_elbow(cutoffs) == 0.5  # (1/1 + 0/1) / 2
+
+
+def test_elbow_metrics_empty_input_returns_zero():
+    assert mean_returned_at_elbow([]) == 0.0
+    assert recall_at_elbow([]) == 0.0
+    assert precision_at_elbow([]) == 0.0
 
 
 def test_relevant_ids_returns_all_chunks_of_the_gold_section(make_searcher, seed_chunks):

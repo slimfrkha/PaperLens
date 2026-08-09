@@ -120,13 +120,19 @@ chunking:
 extraction:
   ocr_enabled: false # turn on for scanned/no-text-layer PDFs (slower, extra model download)
 
-# --- Retrieval: the agentic search loop (the model can request a different top_k) ---
+# --- Retrieval: the agentic search loop ---
 retrieval:
-  k: 5 # passages returned per search_papers call; must be <= candidates
-  candidates:
-    20 # dense-recall pool size handed to the reranker (floor; a larger
-    # top_k scales the pool to 4x it, so the reranker can still discard)
+  candidates: 20 # dense-recall pool size handed to the reranker
   max_rounds: 8 # ReAct search/answer cycles before the agent must answer
+  # Elbow cutoff: after reranking, how many passages a search_papers call returns is
+  # decided by the first real drop-off in score (find_cutoff in search.py), not a fixed
+  # count — min_k/max_k just bound it. Starting values, not settled numbers: calibrate
+  # per pool with `paperlens-eval screen --tier elbow` before trusting them.
+  min_k: 2 # never return fewer than this (when the pool has this many)
+  max_k: 10 # never return more than this, even if nothing looks like a cliff
+  elbow_mad_multiplier: 3.0 # how many robust deviations above baseline counts as a cliff
+  elbow_prominence: 0.15 # how big the cliff must be relative to the score range
+  elbow_enabled: true # rollback switch to plain max_k truncation, no code change
 
 # --- Tagging: how generate_tags shapes its LLM prompt (the model itself is llm.tagging) ---
 tagger:

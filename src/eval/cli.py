@@ -30,7 +30,7 @@ from rag.search import Searcher
 
 from .fingerprint import corpus_fingerprint, load_pool
 from .genfilter import GenFilterConfig, check_leak
-from .harness import format_report, run
+from .harness import format_elbow_screen_report, format_report, run, screen_elbow
 from .index_isolated import build_isolated_searcher, chunks_for
 from .optimizer import (
     DEFAULT_CHUNK_GRIDS,
@@ -208,6 +208,19 @@ def _parse_grid(raw: str | None) -> list[int] | None:
     return sorted(set(vals)) or None
 
 
+def _parse_float_grid(raw: str | None, *, flag: str) -> list[float] | None:
+    """Parse a ``--mad-multiplier``/``--prominence``-style flag into positive floats."""
+    if not raw:
+        return None
+    try:
+        vals = [float(tok) for tok in raw.split(",") if tok.strip()]
+    except ValueError as e:
+        raise SystemExit(f"{flag} must be comma-separated numbers, got: {raw!r}") from e
+    if any(v <= 0 for v in vals):
+        raise SystemExit(f"{flag} values must be positive, got: {raw!r}")
+    return sorted(set(vals)) or None
+
+
 def _print_index_sizes(pool: dict[str, str], cells: list[tuple[str, ChunkingCfg]]) -> None:
     """Model-free preamble: each cell's chunk count and Δ vs the default, so a null in the
     report is read correctly — an inert knob (index barely moved) is distinguished from a
@@ -254,6 +267,22 @@ def cmd_screen(args: argparse.Namespace) -> None:
                     hybrid=args.hybrid,
                     multi_query=args.multi_query,
                     checkpoint_path=checkpoint_path,
+                )
+            )
+        )
+        return
+    if args.tier == "elbow":
+        mad_grid = _parse_float_grid(args.mad_multiplier, flag="--mad-multiplier")
+        prom_grid = _parse_float_grid(args.prominence, flag="--prominence")
+        print("Screening elbow knobs (mad_multiplier/prominence) on the dev split...")
+        print(
+            format_elbow_screen_report(
+                screen_elbow(
+                    cfg,
+                    items,
+                    mad_grid=mad_grid,
+                    prominence_grid=prom_grid,
+                    show_progress=True,
                 )
             )
         )
@@ -414,10 +443,10 @@ def cmd_confirm(
     max_tokens = cfg.chunking.max_tokens if args.max_tokens is None else args.max_tokens
     candidates = cfg.retrieval.candidates if args.candidates is None else args.candidates
     rerank = cfg.reranker.enabled if args.rerank is None else args.rerank
-    if candidates < cfg.retrieval.k:
+    if candidates < cfg.retrieval.max_k:
         raise SystemExit(
-            f"--candidates={candidates} is below retrieval.k={cfg.retrieval.k} — "
-            f"scoring would silently return fewer than k ranked results per query."
+            f"--candidates={candidates} is below retrieval.max_k={cfg.retrieval.max_k} — "
+            f"scoring would silently return fewer than max_k ranked results per query."
         )
 
     evals_dir = Path(cfg.root) / "evals"
@@ -471,7 +500,7 @@ def cmd_confirm(
             items,
             searcher=active_searcher,
             candidates=candidates,
-            k=cfg.retrieval.k,
+            k=cfg.retrieval.max_k,
             rerank=rerank,
             desc="scoring test split",
             checkpoint_path=checkpoint_path,
@@ -499,7 +528,7 @@ def cmd_confirm(
                 items,
                 searcher=active_searcher,
                 candidates=candidates,
-                k=cfg.retrieval.k,
+                k=cfg.retrieval.max_k,
                 rerank=rerank,
                 desc="scoring test split",
                 checkpoint_path=checkpoint_path,
@@ -586,9 +615,11 @@ def main() -> None:
     s.add_argument(
         "--tier",
         default="retrieval",
-        choices=["retrieval", "chunking"],
+        choices=["retrieval", "chunking", "elbow"],
         help="retrieval: reranker/candidates, no re-index; "
-        "chunking: chunking knobs, isolated re-index per cell",
+        "chunking: chunking knobs, isolated re-index per cell; "
+        "elbow: elbow_mad_multiplier/elbow_prominence, no re-retrieve (min_k/max_k stay "
+        "out — a product decision, same as retrieval.k always was)",
     )
     s.add_argument(
         "--limit",
@@ -619,6 +650,16 @@ def main() -> None:
         "--max-tokens",
         default=None,
         help="--tier chunking: comma-separated max_tokens grid overriding the default screen",
+    )
+    s.add_argument(
+        "--mad-multiplier",
+        default=None,
+        help="--tier elbow: comma-separated mad_multiplier grid (default 1.5,2,3,4.5)",
+    )
+    s.add_argument(
+        "--prominence",
+        default=None,
+        help="--tier elbow: comma-separated prominence grid (default 0.05,0.1,0.15,0.25)",
     )
     s.add_argument("--fresh", action="store_true", help=_FRESH_HELP)
     s.set_defaults(func=cmd_screen)

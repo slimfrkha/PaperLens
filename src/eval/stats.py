@@ -42,7 +42,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .metrics import QueryScore, reciprocal_rank
+from .metrics import ElbowCutoff, QueryScore, reciprocal_rank
 
 # Standard normal quantiles (no scipy dependency): z_{0.975} and z_{0.80}.
 Z_ALPHA = 1.959964  # two-sided 95%
@@ -116,6 +116,15 @@ def mrr_samples(scores: list[QueryScore], k: int) -> list[Sample]:
             value=reciprocal_rank(s, k),
         )
         for s in scores
+    ]
+
+
+def elbow_recall_samples(cutoffs: list[ElbowCutoff]) -> list[Sample]:
+    """Per-query terms for ``recall@elbow``: every entry is already gold-in-pool (that's
+    :func:`~eval.metrics.elbow_cutoffs`'s own conditioning), so every sample is eligible."""
+    return [
+        Sample(qid=s.qid, paper_id=s.paper_id, eligible=True, value=float(hit))
+        for s, _, hit in cutoffs
     ]
 
 

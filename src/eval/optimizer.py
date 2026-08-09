@@ -410,7 +410,7 @@ def screen_retrieval(
     """
     searcher = searcher or build_searcher(cfg)
     grid = candidate_grid or DEFAULT_CANDIDATE_GRID
-    k = cfg.retrieval.k
+    k = cfg.retrieval.max_k
     arms = _arms(cfg, grid)
     rrf_k, fetch_multiplier = cfg.sparse.rrf_k, cfg.sparse.fetch_multiplier
     sparse_index: BM25Index | None = None
@@ -726,7 +726,7 @@ def screen_chunking(
     embedder = embedder if embedder is not None else build_embedder(cfg.embedding)
     if reranker is None and cfg.reranker.enabled:
         reranker = build_reranker_for_cfg(cfg)
-    candidates, k, rerank = cfg.retrieval.candidates, cfg.retrieval.k, cfg.reranker.enabled
+    candidates, k, rerank = cfg.retrieval.candidates, cfg.retrieval.max_k, cfg.reranker.enabled
 
     n_arms = len(arms)
     t0 = time.monotonic()
@@ -887,7 +887,7 @@ def sweep(
     """
     mt_grid = max_tokens_grid or DEFAULT_MAX_TOKENS_GRID
     cand_grid = candidate_grid or DEFAULT_CANDIDATE_GRID
-    k = cfg.retrieval.k
+    k = cfg.retrieval.max_k
     embedder = embedder if embedder is not None else build_embedder(cfg.embedding)
     # rerank on-arms always need the reranker, even if the config has it off (mirrors the
     # retrieval screen).

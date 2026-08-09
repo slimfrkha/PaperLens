@@ -188,8 +188,9 @@ it only affects papers indexed after the change (delete `paths.rag_db` and re-in
 apply retroactively).
 
 Incoherent combinations (`overlap_tokens >= max_tokens`, `noise_ratio` outside `[0, 1]`,
-`retrieval.k > retrieval.candidates`, `tagger.min_tags > tagger.max_tags`) **fail loudly at
-load** rather than silently degrading the index.
+`retrieval.min_k > retrieval.max_k`, `retrieval.max_k > retrieval.candidates`,
+`tagger.min_tags > tagger.max_tags`) **fail loudly at load** rather than silently
+degrading the index.
 
 ### 📄 `extraction`
 
@@ -199,13 +200,20 @@ load** rather than silently degrading the index.
 
 ### 🔍 `retrieval`
 
-Shapes the agentic search loop. The chat model can still request a different `top_k` per
-`search_papers` call.
+Shapes the agentic search loop. How many passages a `search_papers` call returns isn't a
+fixed count the model requests — an **elbow cutoff** (`find_cutoff` in `search.py`) picks
+it from the first real drop-off in the reranked scores, bounded by `min_k`/`max_k`. Only
+runs when reranking actually happened; `reranker.enabled: false` or a reranker failure
+both fall back to plain `max_k` truncation.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `k` | int | `5` | Passages returned per `search_papers` call when the model doesn't specify `top_k`. Must be `<= candidates`. |
-| `candidates` | int | `20` | Dense-recall pool size handed to the reranker. This is a **floor**: a larger `top_k` scales the pool to `4 × top_k`, so the reranker always has candidates to discard rather than merely reordering what dense recall returned. |
+| `candidates` | int | `20` | Dense-recall pool size handed to the reranker. This is a **floor**: a larger `max_k` scales the pool to `4 × max_k`, so the reranker always has candidates to discard rather than merely reordering what dense recall returned. |
+| `min_k` | int | `2` | Never return fewer than this (when the pool has this many). Must be `<= max_k`. |
+| `max_k` | int | `10` | Never return more than this, even if nothing looks like a cliff. Must be `<= candidates`. |
+| `elbow_mad_multiplier` | float | `3.0` | How many robust deviations (MAD, of the *other* score gaps) above baseline a gap must clear to count as a real cliff. |
+| `elbow_prominence` | float | `0.15` | How large a gap must be, relative to the score range of the candidates considered, to count as a real cliff — independent of `elbow_mad_multiplier`, both must clear. |
+| `elbow_enabled` | bool | `true` | Rollback switch to plain `max_k` truncation, no code change. `min_k`/`max_k`/the two knobs above are per-pool starting values — validate with `paperlens-eval screen --tier elbow` (see [harness](harness.md)) before trusting them; flip this off if elbow misbehaves before that's run. |
 | `max_rounds` | int | `8` | How many search/answer ReAct cycles the agent gets before it must answer. |
 
 ### 🔀 `multi_query`

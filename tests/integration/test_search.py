@@ -17,7 +17,9 @@ def _docs(seed_chunks):
 
 def test_retrieves_the_relevant_passage_first(make_searcher, seed_chunks):
     ctx = make_searcher(_docs(seed_chunks))
-    results = ctx.searcher.search("latent attention kv cache", k=2, candidates=10, rerank=False)
+    results = ctx.searcher.search(
+        "latent attention kv cache", max_k=2, candidates=10, rerank=False
+    ).results
     assert results
     assert results[0].paper_id == "paper-a"
     assert "latent attention" in results[0].body
@@ -26,27 +28,27 @@ def test_retrieves_the_relevant_passage_first(make_searcher, seed_chunks):
 def test_paper_filter_restricts_to_one_paper(make_searcher, seed_chunks):
     ctx = make_searcher(_docs(seed_chunks))
     results = ctx.searcher.search(
-        "reinforcement learning", k=5, candidates=10, paper="paper-b", rerank=False
-    )
+        "reinforcement learning", max_k=5, candidates=10, paper="paper-b", rerank=False
+    ).results
     assert results
     assert {r.paper_id for r in results} == {"paper-b"}
 
 
 def test_empty_paper_ids_matches_nothing(make_searcher, seed_chunks):
     ctx = make_searcher(_docs(seed_chunks))
-    assert ctx.searcher.search("anything", paper_ids=[], rerank=False) == []
+    assert ctx.searcher.search("anything", paper_ids=[], rerank=False).results == []
 
 
 def test_paper_and_paper_ids_intersect(make_searcher, seed_chunks):
     ctx = make_searcher(_docs(seed_chunks))
     # `paper` not in the tag-derived `paper_ids` -> empty intersection -> no hits.
     out = ctx.searcher.search("attention", paper="paper-a", paper_ids=["paper-b"], rerank=False)
-    assert out == []
+    assert out.results == []
 
 
 def test_result_body_strips_breadcrumb_prefix(make_searcher, seed_chunks):
     ctx = make_searcher(_docs(seed_chunks))
-    r = ctx.searcher.search("latent attention", candidates=10, rerank=False)[0]
+    r = ctx.searcher.search("latent attention", candidates=10, rerank=False).results[0]
     assert not r.body.startswith("Paper >")
     assert r.breadcrumb.startswith("Paper >")
 
@@ -57,7 +59,7 @@ def test_result_body_returns_full_multiparagraph_body(make_searcher, seed_chunks
     # edge the old doc.split("\n\n", 1) contract fumbled.
     body = "para one about latent attention\n\npara two continues"
     ctx = make_searcher([seed_chunks("p", "Attention", body)])
-    r = ctx.searcher.search("latent attention", candidates=10, rerank=False)[0]
+    r = ctx.searcher.search("latent attention", candidates=10, rerank=False).results[0]
     assert r.body == body
     assert "Paper >" not in r.body
 
@@ -106,7 +108,7 @@ def test_rerank_uses_injected_reranker(make_searcher, fake_embedder, seed_chunks
         embedder=fake_embedder,
         reranker=_KeywordReranker("UNIQUENEEDLE"),
     )
-    results = searcher.search("learning", k=2, candidates=10, rerank=True)
+    results = searcher.search("learning", max_k=2, candidates=10, rerank=True).results
     assert results[0].paper_id == "paper-b"
     assert results[0].score == 1.0
     assert results[0].score >= results[-1].score
@@ -124,7 +126,7 @@ def test_rerank_failure_falls_back_to_pre_rerank_order(make_searcher, fake_embed
     dense_searcher = Searcher(
         db_dir=ctx.cfg.paths.rag_db, collection=ctx.cfg.collection, embedder=fake_embedder
     )
-    dense_order = dense_searcher.search("learning", k=2, candidates=10, rerank=False)
+    dense_order = dense_searcher.search("learning", max_k=2, candidates=10, rerank=False).results
 
     searcher = Searcher(
         db_dir=ctx.cfg.paths.rag_db,
@@ -132,7 +134,7 @@ def test_rerank_failure_falls_back_to_pre_rerank_order(make_searcher, fake_embed
         embedder=fake_embedder,
         reranker=_RaisingReranker(),
     )
-    results = searcher.search("learning", k=2, candidates=10, rerank=True)
+    results = searcher.search("learning", max_k=2, candidates=10, rerank=True).results
 
     assert [r.paper_id for r in results] == [r.paper_id for r in dense_order]
     assert [r.score for r in results] == [r.score for r in dense_order]
@@ -154,7 +156,7 @@ def test_rerank_wrong_length_scores_falls_back_to_pre_rerank_order(
     dense_searcher = Searcher(
         db_dir=ctx.cfg.paths.rag_db, collection=ctx.cfg.collection, embedder=fake_embedder
     )
-    dense_order = dense_searcher.search("learning", k=2, candidates=10, rerank=False)
+    dense_order = dense_searcher.search("learning", max_k=2, candidates=10, rerank=False).results
 
     searcher = Searcher(
         db_dir=ctx.cfg.paths.rag_db,
@@ -162,7 +164,7 @@ def test_rerank_wrong_length_scores_falls_back_to_pre_rerank_order(
         embedder=fake_embedder,
         reranker=_ShortReranker(),
     )
-    results = searcher.search("learning", k=2, candidates=10, rerank=True)
+    results = searcher.search("learning", max_k=2, candidates=10, rerank=True).results
 
     assert [r.paper_id for r in results] == [r.paper_id for r in dense_order]
     assert [r.score for r in results] == [r.score for r in dense_order]
@@ -230,9 +232,12 @@ def test_hybrid_surfaces_a_lexical_match_dense_only_misses(make_config, seed_chu
         fetch_multiplier=3,
     )
     dense_hits = {
-        r.paper_id for r in dense_only.search("zzflorble", k=3, candidates=3, rerank=False)
+        r.paper_id
+        for r in dense_only.search("zzflorble", max_k=3, candidates=3, rerank=False).results
     }
-    hybrid_hits = {r.paper_id for r in hybrid.search("zzflorble", k=3, candidates=3, rerank=False)}
+    hybrid_hits = {
+        r.paper_id for r in hybrid.search("zzflorble", max_k=3, candidates=3, rerank=False).results
+    }
     assert "target" not in dense_hits
     assert "target" in hybrid_hits
 
@@ -252,7 +257,10 @@ def test_hybrid_fetch_multiplier_is_load_bearing_not_decorative(make_config, see
             sparse_enabled=True,
             fetch_multiplier=fetch_multiplier,
         )
-        return {r.paper_id for r in searcher.search("zzflorble", k=3, candidates=3, rerank=False)}
+        return {
+            r.paper_id
+            for r in searcher.search("zzflorble", max_k=3, candidates=3, rerank=False).results
+        }
 
     assert "target" not in hits(fetch_multiplier=1)
     assert "target" in hits(fetch_multiplier=3)
@@ -271,7 +279,7 @@ def test_sparse_index_rebuilds_after_rescan(make_searcher, seed_chunks):
     # First search builds the BM25 snapshot over the 1-paper pool. Dense recall has no
     # relevance threshold, so it still returns the one (unrelated) chunk it has — the point is
     # that nothing has ever seen "zzflorble" lexically yet.
-    before = searcher.search("zzflorble", k=1, candidates=1, rerank=False)
+    before = searcher.search("zzflorble", min_k=1, max_k=1, candidates=1, rerank=False).results
     assert before[0].paper_id == "paper-a"
 
     # Simulate a live rescan (POST /api/admin/rescan) upserting a new paper's chunks directly
@@ -297,13 +305,15 @@ def test_sparse_index_rebuilds_after_rescan(make_searcher, seed_chunks):
     # Without a restart, the next search must promote the rescanned chunk above the old
     # dense-only fallback — proving the lazy `sparse` property re-checks staleness rather than
     # caching the pre-rescan snapshot forever.
-    after = searcher.search("zzflorble", k=2, candidates=2, rerank=False)
+    after = searcher.search("zzflorble", max_k=2, candidates=2, rerank=False).results
     assert after[0].paper_id == "new-paper"
 
 
 def test_dense_only_results_are_labeled_dense(make_searcher, seed_chunks):
     ctx = make_searcher(_docs(seed_chunks))
-    results = ctx.searcher.search("latent attention kv cache", k=2, candidates=10, rerank=False)
+    results = ctx.searcher.search(
+        "latent attention kv cache", max_k=2, candidates=10, rerank=False
+    ).results
     assert results
     assert all(r.source == "dense" for r in results)
 
@@ -349,7 +359,8 @@ def test_hybrid_source_is_both_when_a_hit_is_in_dense_and_sparse_pools(make_sear
         fetch_multiplier=1,
     )
     results = {
-        r.paper_id: r for r in searcher.search("alpha beta", k=2, candidates=2, rerank=False)
+        r.paper_id: r
+        for r in searcher.search("alpha beta", max_k=2, candidates=2, rerank=False).results
     }
     assert results["dense-hit"].source == "dense"
     assert results["both-hit"].source == "both"
@@ -404,6 +415,8 @@ def test_hybrid_source_is_sparse_when_a_hit_is_excluded_from_the_dense_fetch_win
         sparse=_FakeSparseIndex(["sparse-only-S"], built_at_count=3),
         fetch_multiplier=1,
     )
-    results = {r.paper_id: r for r in searcher.search("query", k=2, candidates=2, rerank=False)}
+    results = {
+        r.paper_id: r for r in searcher.search("query", max_k=2, candidates=2, rerank=False).results
+    }
     assert results["dense-hit"].source == "dense"
     assert results["sparse-only"].source == "sparse"

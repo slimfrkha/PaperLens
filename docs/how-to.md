@@ -144,8 +144,9 @@ guards, the resolution/MDD statistics, the cost model) — this section is just 
    call). Omit a flag to keep the current config's value for that knob; running with no flags at
    all confirms the as-shipped default as a baseline. Prints the held-out score, then a
    `config.yaml`-ready block — paste the `chunking`/`embedding`/`reranker` sections directly, and
-   just the `candidates:` line under your existing `retrieval:` section (`retrieval.k` is a
-   product choice the harness deliberately leaves alone).
+   just the `candidates:` line under your existing `retrieval:` section (`min_k`/`max_k` are a
+   product choice the harness deliberately leaves alone; if `screen --tier elbow` flagged
+   `elbow_mad_multiplier`/`elbow_prominence` as worth tuning, paste those two too).
 
 **Stopping rule:** if a report says no delta clears the MDD, that's the honest answer — the
 default config is already fine for this pool, and tuning further won't measurably help. Don't

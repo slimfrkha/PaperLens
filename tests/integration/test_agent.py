@@ -36,10 +36,12 @@ def make_agent(make_searcher, seed_chunks):
 def test_search_call_builds_citations_and_trace(make_agent, fake_llm):
     llm = fake_llm(
         answer="Latent attention shrinks the cache [r1].",
-        tool_calls=[("search_papers", {"query": "latent attention kv cache", "top_k": 1})],
+        tool_calls=[("search_papers", {"query": "latent attention kv cache"})],
         reasoning="I should search.",
     )
     agent = make_agent(llm)
+    agent.cfg.retrieval.min_k = 1  # pin a single deterministic result
+    agent.cfg.retrieval.max_k = 1
 
     trace = []
     texts = []
@@ -64,6 +66,30 @@ def test_search_call_builds_citations_and_trace(make_agent, fake_llm):
 
     kinds = [e["type"] for e in trace]
     assert kinds == ["thought", "action", "observation"]
+
+
+def test_observation_trace_carries_a_cutoff_diagnostic_when_not_no_elbow(make_agent, fake_llm):
+    # reranker.enabled=False by default (make_config) -> cutoff_reason is always "no_rerank",
+    # never "no_elbow" -> the diagnostic line must be prepended to the observation text.
+    llm = fake_llm(
+        answer="See [r1].",
+        tool_calls=[("search_papers", {"query": "latent attention kv cache"})],
+    )
+    agent = make_agent(llm)
+    agent.cfg.retrieval.min_k = 1
+    agent.cfg.retrieval.max_k = 1
+
+    trace = []
+    agent.run(
+        [{"role": "user", "content": "How does MLA help?"}],
+        tags=[],
+        papers=[],
+        on_text=lambda _t: None,
+        on_trace=trace.append,
+    )
+
+    observation = next(e for e in trace if e["type"] == "observation")
+    assert observation["text"].startswith("[1 of up to 1 returned — no_rerank]")
 
 
 def test_run_returns_usage_from_the_llm_backend(make_agent, fake_llm):
@@ -94,9 +120,11 @@ def test_ref_start_continues_numbering_across_turns(make_agent, fake_llm):
     # numbering at r1 — main.py passes the count of already-used refs as ref_start.
     llm = fake_llm(
         answer="See [r2].",
-        tool_calls=[("search_papers", {"query": "latent attention kv cache", "top_k": 1})],
+        tool_calls=[("search_papers", {"query": "latent attention kv cache"})],
     )
     agent = make_agent(llm)
+    agent.cfg.retrieval.min_k = 1  # pin a single deterministic result
+    agent.cfg.retrieval.max_k = 1
 
     _text, citations, _usage = agent.run(
         [{"role": "user", "content": "follow-up question"}],
@@ -190,12 +218,13 @@ def test_empty_query_is_rejected(make_agent, fake_llm):
     assert citations == []
 
 
-def test_uses_configured_retrieval_defaults_when_top_k_omitted(make_agent, fake_llm):
-    llm = fake_llm(
-        answer="ok", tool_calls=[("search_papers", {"query": "latent attention"})]
-    )  # no top_k -> falls back to retrieval.k
+def test_search_uses_configured_min_max_k(make_agent, fake_llm):
+    # The model no longer requests a per-call count (top_k was removed) — every
+    # search_papers call gets the config's own min_k/max_k, unconditionally.
+    llm = fake_llm(answer="ok", tool_calls=[("search_papers", {"query": "latent attention"})])
     agent = make_agent(llm)
-    agent.cfg.retrieval.k = 2
+    agent.cfg.retrieval.min_k = 1
+    agent.cfg.retrieval.max_k = 2
     agent.cfg.retrieval.candidates = 9
 
     calls: list[dict] = []
@@ -208,15 +237,18 @@ def test_uses_configured_retrieval_defaults_when_top_k_omitted(make_agent, fake_
     agent.searcher.search = spy
     agent.run([{"role": "user", "content": "x"}], tags=[], papers=[], on_text=lambda _t: None)
 
-    assert calls[0]["k"] == 2
+    assert calls[0]["min_k"] == 1
+    assert calls[0]["max_k"] == 2
     assert calls[0]["candidates"] == 9
 
 
-def test_candidate_pool_scales_with_requested_top_k(make_agent, fake_llm):
-    # A large top_k must still leave the reranker something to discard, otherwise
+def test_candidate_pool_scales_with_configured_max_k(make_agent, fake_llm):
+    # A large max_k must still leave the reranker something to discard, otherwise
     # it just reorders exactly what dense recall returned.
-    llm = fake_llm(answer="ok", tool_calls=[("search_papers", {"query": "mla", "top_k": 50})])
+    llm = fake_llm(answer="ok", tool_calls=[("search_papers", {"query": "mla"})])
     agent = make_agent(llm)
+    agent.cfg.retrieval.max_k = 50
+    agent.cfg.retrieval.candidates = 20  # below max_k * 4 -> the scaling must win
 
     calls: list[dict] = []
     real_search = agent.searcher.search
@@ -228,7 +260,7 @@ def test_candidate_pool_scales_with_requested_top_k(make_agent, fake_llm):
     agent.searcher.search = spy
     agent.run([{"role": "user", "content": "x"}], tags=[], papers=[], on_text=lambda _t: None)
 
-    assert calls[0]["k"] == 50
+    assert calls[0]["max_k"] == 50
     assert calls[0]["candidates"] == 200
 
 
@@ -352,7 +384,7 @@ def test_faithfulness_disabled_by_default_no_verdict_and_checker_not_called(
     checker = fake_faithfulness_checker()
     llm = fake_llm(
         answer="Latent attention shrinks the cache [r1].",
-        tool_calls=[("search_papers", {"query": "latent attention kv cache", "top_k": 1})],
+        tool_calls=[("search_papers", {"query": "latent attention kv cache"})],
     )
     # Not passed to make_agent as the active faithfulness checker -> cfg.faithfulness
     # stays at its default (enabled=False), so ChatAgent builds its own (unused) checker.
@@ -375,9 +407,11 @@ def test_faithfulness_check_attaches_verdict_to_cited_ref(
     checker = fake_faithfulness_checker()
     llm = fake_llm(
         answer="Latent attention shrinks the cache [r1].",
-        tool_calls=[("search_papers", {"query": "latent attention kv cache", "top_k": 1})],
+        tool_calls=[("search_papers", {"query": "latent attention kv cache"})],
     )
     agent = make_agent(llm, faithfulness=checker)
+    agent.cfg.retrieval.min_k = 1  # pin a single deterministic result
+    agent.cfg.retrieval.max_k = 1
 
     _text, citations, _usage = agent.run(
         [{"role": "user", "content": "How does MLA help?"}],
@@ -406,7 +440,7 @@ def test_faithfulness_skips_refs_never_cited_in_text(
     # ever retrieved) would have no hypothesis span to test.
     llm = fake_llm(
         answer="Latent attention shrinks the cache [r1].",
-        tool_calls=[("search_papers", {"query": "latent attention kv cache", "top_k": 1})],
+        tool_calls=[("search_papers", {"query": "latent attention kv cache"})],
     )
     agent = make_agent(llm, faithfulness=checker)
 
@@ -426,7 +460,7 @@ def test_faithfulness_ref_cited_twice_gets_two_item_list(
     checker = fake_faithfulness_checker()
     llm = fake_llm(
         answer="MLA shrinks the cache [r1]. It also speeds up decoding [r1].",
-        tool_calls=[("search_papers", {"query": "latent attention kv cache", "top_k": 1})],
+        tool_calls=[("search_papers", {"query": "latent attention kv cache"})],
     )
     agent = make_agent(llm, faithfulness=checker)
 
@@ -447,7 +481,7 @@ def test_faithfulness_contradiction_triggers_log_line(
     checker = fake_faithfulness_checker(verdict=Verdict(label="contradiction", score=0.0))
     llm = fake_llm(
         answer="Latent attention shrinks the cache [r1].",
-        tool_calls=[("search_papers", {"query": "latent attention kv cache", "top_k": 1})],
+        tool_calls=[("search_papers", {"query": "latent attention kv cache"})],
     )
     agent = make_agent(llm, faithfulness=checker)
     agent.run(
@@ -465,7 +499,7 @@ def test_faithfulness_all_entailment_does_not_log(
     checker = fake_faithfulness_checker()  # default: entailment
     llm = fake_llm(
         answer="Latent attention shrinks the cache [r1].",
-        tool_calls=[("search_papers", {"query": "latent attention kv cache", "top_k": 1})],
+        tool_calls=[("search_papers", {"query": "latent attention kv cache"})],
     )
     agent = make_agent(llm, faithfulness=checker)
     agent.run(

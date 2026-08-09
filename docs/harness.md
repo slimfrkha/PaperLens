@@ -43,10 +43,12 @@ flowchart LR
    all need the dev/test splits this writes, and fail with a clear message if it hasn't run yet.
 2. **`run`** — score the *current* config on the dev split. "See what you get" before
    touching anything.
-3. **`screen --tier retrieval`** and **`screen --tier chunking`** — one-factor-at-a-time
-   around the default, each knob paired-vs-default with a CI. Tells you which knobs are worth
-   grid-searching *for this pool* — a knob whose CI straddles zero is dropped, honestly, not
-   hidden.
+3. **`screen --tier retrieval`**, **`screen --tier elbow`**, and **`screen --tier
+   chunking`** — one-factor-at-a-time around the default, each knob paired-vs-default with a
+   CI. Tells you which knobs are worth grid-searching *for this pool* — a knob whose CI
+   straddles zero is dropped, honestly, not hidden. `--tier elbow` has no grid-search
+   follow-up in `sweep` (below) — it's cheap enough that `screen`'s own grid (`--mad-
+   multiplier`/`--prominence`) is the whole search, not just a first pass.
 4. **`sweep`** — the grid over `chunking.max_tokens × retrieval.candidates ×
    reranker.enabled`. These two axes are **fixed by design**, not read from `screen`'s
    output — there's no file `screen` writes and `sweep` consumes; the two commands don't talk
@@ -141,6 +143,7 @@ entering the denominator), not per-query degradation, once isolated to the paire
 | Category | Knobs | Re-index? | Cost |
 |---|---|---|---|
 | **Retrieval** | `reranker.enabled`, `retrieval.candidates` | No — cached query embeddings + cached rerank scores, sliced in memory | near-instant at any pool size |
+| **Elbow** | `elbow_mad_multiplier`, `elbow_prominence` | No — one shared `score_items` pass, every arm just re-cuts its already-reranked scores | near-instant; cheaper than the retrieval tier, no cache/checkpoint needed at all |
 | **Chunking** | `chunking.*` (`embedding.*` plumbed, not exercised by default) | Yes, isolated collection per cell (Guard 1) | `cells × n_chunks` embed cost — minutes for tens–hundreds of papers; printed up front, never a fabricated ETA |
 
 The retrieval category is free because a cross-encoder's `(query, doc)` score is
@@ -151,8 +154,16 @@ reranker once, and every `candidates`/`rerank` arm becomes an in-memory slice + 
 distinct `max_tokens`, then derive every `candidates × rerank` cell of that index from one
 cached pass. Cost is `|max_tokens_grid|` re-indexes, not the full grid.
 
-**`retrieval.k` stays out of the optimizer** at every pool size — it's a product decision
-(how much context the agent gets, trading latency/tokens), plotted, not chosen by the tool.
+**`retrieval.min_k`/`retrieval.max_k` stay out of the optimizer** at every pool size — same
+reasoning `retrieval.k` always had: how much context the agent gets, trading latency/tokens,
+is a product decision, plotted, not chosen by the tool. `elbow_mad_multiplier`/
+`elbow_prominence` are a different kind of knob — they don't set how much to return, they
+set how confidently a score drop counts as a real cliff, a pure retrieval-quality question —
+so they're screened like `candidates` is, via `screen --tier elbow`. Unlike the retrieval
+tier, this needs no cache or checkpoint: every arm is a postprocessing pass (`find_cutoff`)
+over one already-reranked scoring run, so re-cutting at a different knob value is close to
+free — there's nothing expensive here to derive-from-cache the way `candidates`/`rerank`
+arms do.
 
 ## 📏 Metrics
 

@@ -11,7 +11,7 @@ import json
 import pytest
 
 from eval.checkpoint import resume_units
-from eval.harness import run, score_items
+from eval.harness import format_elbow_screen_report, run, score_items, screen_elbow
 from eval.queryset import QAItem, load_queryset
 from rag.search import Searcher
 
@@ -59,6 +59,38 @@ def test_run_scores_a_seeded_pool(make_searcher, make_config, seed_chunks):
     assert report.mrr_at_k == 1.0
 
 
+def test_run_elbow_metrics_are_none_when_not_reranked(make_searcher, make_config, seed_chunks):
+    docs = [seed_chunks("p1", "Method", "latent attention cache", doc_id="p1-method")]
+    ctx = make_searcher(docs)
+    items = [_item("latent attention cache", "p1", "Method")]
+    report = run(make_config(), items, searcher=ctx.searcher)  # rerank=False (make_config default)
+
+    assert report.mean_returned_at_elbow is None
+    assert report.precision_at_elbow is None
+    assert report.recall_at_elbow is None
+
+
+def test_run_elbow_metrics_populated_when_reranked(make_searcher, make_config, seed_chunks):
+    # additive: never disturbs success_at_candidates/mrr_at_k, computed alongside them.
+    docs = [
+        seed_chunks("p1", "Method", "latent attention compresses the cache", doc_id="p1-method"),
+        seed_chunks("p1", "Training", "fp8 mixed precision schedule warmup", doc_id="p1-train"),
+        seed_chunks("p2", "Results", "benchmark scores accuracy evaluation", doc_id="p2-results"),
+    ]
+    ctx = make_searcher(docs)
+    ctx.searcher._reranker = _FakeReranker()  # avoid loading a real cross-encoder
+    items = [_item("latent attention compresses the cache", "p1", "Method")]
+    report = run(make_config(), items, searcher=ctx.searcher, rerank=True)
+
+    assert report.success_at_candidates == 1.0  # unaffected by the elbow metrics below
+    assert report.mrr_at_k == 1.0
+    # _FakeReranker ties every score at 1.0 -> flat window, no real cliff -> "no_elbow",
+    # cutoff = whole 3-chunk pool.
+    assert report.mean_returned_at_elbow == 3.0
+    assert report.recall_at_elbow == 1.0
+    assert report.precision_at_elbow == pytest.approx(1 / 3)
+
+
 def test_run_excludes_ungoldable_and_charges_a_stage1_miss_to_recall_not_mrr(
     make_searcher, make_config, seed_chunks
 ):
@@ -85,11 +117,11 @@ def test_run_overrides_win_over_cfg_and_omitting_them_reproduces_cfg_behavior(
     ]
     ctx = make_searcher(docs)
     items = [_item("latent attention compresses the cache", "p1", "Method")]
-    cfg = make_config()  # retrieval.candidates=20, retrieval.k=5, reranker disabled by default
+    cfg = make_config()  # retrieval.candidates=20, retrieval.max_k=10, reranker disabled by default
 
     default_report = run(cfg, items, searcher=ctx.searcher)
     assert default_report.candidates == cfg.retrieval.candidates
-    assert default_report.k == cfg.retrieval.k
+    assert default_report.k == cfg.retrieval.max_k
     assert default_report.rerank == cfg.reranker.enabled
 
     ctx.searcher._reranker = _FakeReranker()  # avoid loading a real cross-encoder for rerank=True
@@ -256,6 +288,48 @@ def test_run_resume_reproduces_the_uninterrupted_report_exactly(
 
     assert resumed == baseline
     assert counting.calls - calls_before_resume == 1  # only the un-cached item re-embedded
+
+
+def test_screen_elbow_reports_default_plus_grid_arms_with_paired_deltas(
+    make_searcher, make_config, seed_chunks
+):
+    docs = [
+        seed_chunks("p1", "Method", "latent attention compresses the cache", doc_id="p1-method"),
+        seed_chunks("p1", "Training", "fp8 mixed precision schedule warmup", doc_id="p1-train"),
+        seed_chunks("p2", "Results", "benchmark scores accuracy evaluation", doc_id="p2-results"),
+    ]
+    ctx = make_searcher(docs)
+    ctx.searcher._reranker = _FakeReranker()
+    items = [
+        _item("latent attention compresses the cache", "p1", "Method"),
+        _item("fp8 mixed precision schedule warmup", "p1", "Training"),
+    ]
+    cfg = make_config()
+
+    report = screen_elbow(cfg, items, searcher=ctx.searcher, mad_grid=[1.5, 3.0])
+
+    labels = [r.label for r in report.results]
+    assert labels[0] == "default"
+    assert "mad_multiplier=1.5" in labels  # 3.0 (the cfg default) is skipped, not duplicated
+    default_result = report.results[0]
+    assert default_result.recall_delta is None  # the arm being compared against itself
+    non_default = report.results[1]
+    assert non_default.recall_delta is not None
+    # score_items only ran once (one dense query + one rerank pass per item, shared by
+    # every arm) — this is the whole point of screen_elbow being cache-free-but-cheap.
+    assert report.n_queries == 2
+
+
+def test_format_elbow_screen_report_is_readable(make_searcher, make_config, seed_chunks):
+    docs = [seed_chunks("p1", "Method", "latent attention compresses the cache")]
+    ctx = make_searcher(docs)
+    ctx.searcher._reranker = _FakeReranker()
+    items = [_item("latent attention compresses the cache", "p1", "Method")]
+    report = screen_elbow(make_config(), items, searcher=ctx.searcher, mad_grid=[1.5])
+
+    text = format_elbow_screen_report(report)
+    assert "default" in text
+    assert "mad_multiplier=1.5" in text
 
 
 def test_load_queryset_round_trips(tmp_path):

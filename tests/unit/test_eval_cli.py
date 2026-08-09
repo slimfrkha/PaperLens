@@ -128,15 +128,15 @@ def test_confirm_override_takes_isolated_branch(monkeypatch, make_config, fake_e
     assert marker["rerank"] is False
 
 
-def test_confirm_rejects_candidates_below_k(monkeypatch, make_config, tmp_path):
-    cfg = make_config(root=tmp_path)  # retrieval.k defaults to 5
+def test_confirm_rejects_candidates_below_max_k(monkeypatch, make_config, tmp_path):
+    cfg = make_config(root=tmp_path)  # retrieval.max_k defaults to 10
     pool = {"p1": "## Paper\n\nAuthors\n\n## 1. Method\n\nalpha beta\n"}
     items = [_item("alpha beta", "p1", "Method")]
     _write_split(cfg, pool, items, "test")
     monkeypatch.setattr(cli_mod, "load_config", lambda path: cfg)
     monkeypatch.setattr(cli_mod, "load_pool", lambda md_dir: pool)
 
-    with pytest.raises(SystemExit, match="below retrieval.k"):
+    with pytest.raises(SystemExit, match="below retrieval.max_k"):
         cli_mod.cmd_confirm(_confirm_args(candidates=1))
 
 
@@ -281,7 +281,7 @@ def test_end_to_end_gen_screen_sweep_confirm_produces_a_parseable_block(
     monkeypatch.setattr(cli_mod, "load_config", lambda path: cfg)
     monkeypatch.setattr(cli_mod, "load_pool", lambda md_dir: pool)
 
-    args = _confirm_args(max_tokens=256, candidates=5, rerank=False)
+    args = _confirm_args(max_tokens=256, candidates=10, rerank=False)  # >= retrieval.max_k default
     cli_mod.cmd_confirm(args, embedder=fake_embedder, reranker=reranker)
 
     out = capsys.readouterr().out
@@ -289,7 +289,7 @@ def test_end_to_end_gen_screen_sweep_confirm_produces_a_parseable_block(
     block_text = out.split("config.yaml block ---")[1].strip()
     parsed = yaml.safe_load(block_text)
     assert parsed["chunking"]["max_tokens"] == 256
-    assert parsed["retrieval"]["candidates"] == 5
+    assert parsed["retrieval"]["candidates"] == 10
 
 
 class _ScriptedLLM:
