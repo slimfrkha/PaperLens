@@ -3,11 +3,11 @@ import {
   ActionIcon,
   Alert,
   Box,
+  Chip,
   Group,
   Loader,
   MultiSelect,
   Stack,
-  Switch,
   Text,
   Textarea,
   Title,
@@ -276,22 +276,28 @@ export default function ChatPage() {
 
   const composer = (
     <Box className="composer" p={6}>
-      <Group gap={6} justify="flex-end" mb={4}>
+      <Group align="flex-end" gap={6} wrap="nowrap">
         <Tooltip
           label="Runs retrieval once per paper instead of once over the whole library, so one paper with many relevant chunks can't crowd out the others before reranking."
           multiline
           w={260}
         >
-          <Switch
-            size="xs"
-            checked={perPaper}
-            onChange={(e) => setPerPaper(e.currentTarget.checked)}
-            label="Search each paper separately"
-            aria-label="Search each paper separately"
-          />
+          {/* Chip's own input is 0x0 (the visible surface is a sibling label), so
+              Tooltip's hover handlers need this wrapper to land on a hoverable box.
+              alignSelf overrides the row's flex-end (which bottom-aligns against the
+              taller textarea/send button) so the short pill centers instead. */}
+          <Box style={{ alignSelf: "center" }}>
+            <Chip
+              size="xs"
+              variant="light"
+              checked={perPaper}
+              onChange={setPerPaper}
+              aria-label="Search each paper separately"
+            >
+              Per-paper
+            </Chip>
+          </Box>
         </Tooltip>
-      </Group>
-      <Group align="flex-end" gap={6} wrap="nowrap">
         <Textarea
           flex={1}
           variant="unstyled"
