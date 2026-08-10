@@ -43,6 +43,9 @@ llm:
 
 retrieval:
   candidates: 50 # tuned via paperlens-eval confirm; default 20 measurably under-recalls on this pool
+  # loose cutoff elbow values
+  elbow_mad_multiplier: 7.0
+  elbow_prominence: 0.5
 
 sparse:
   type: bm25

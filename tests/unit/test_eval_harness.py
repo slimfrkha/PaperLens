@@ -11,8 +11,30 @@ import json
 import pytest
 
 from eval.checkpoint import resume_units
-from eval.harness import format_elbow_screen_report, run, score_items, screen_elbow
-from eval.queryset import QAItem, load_queryset
+from eval.comparative_queryset import ComparativeQAItem
+from eval.harness import (
+    COMPARATIVE_MIN_CLUSTERS,
+    ComparativeArmResult,
+    ComparativeConfirmResult,
+    build_per_paper_scopes,
+    comparative_confirm,
+    comparative_sweep,
+    format_comparative_confirm,
+    format_comparative_sweep,
+    format_elbow_screen_report,
+    format_per_paper_confirm,
+    format_per_paper_sweep,
+    per_paper_confirm,
+    per_paper_sweep,
+    run,
+    score_comparative_items_scoped,
+    score_items,
+    score_items_scoped,
+    screen_elbow,
+)
+from eval.queryset import QAItem, Section, load_queryset
+from eval.stats import BootResult, DeltaResult
+from rag.index import open_collection
 from rag.search import Searcher
 
 
@@ -357,3 +379,663 @@ def test_load_queryset_rejects_sets_missing_section_identity(tmp_path):
     path.write_text(json.dumps({"query": "q", "paper_id": "p", "gold_span": [0, 1]}) + "\n")
     with pytest.raises(SystemExit, match="regenerate"):
         load_queryset(str(path))
+
+
+# --- per-paper: build_per_paper_scopes / per_paper_sweep / per_paper_confirm ---------------
+
+
+def test_build_per_paper_scopes_includes_gold_and_is_seed_deterministic():
+    items = [_item("q1", "p1", "S"), _item("q2", "p2", "S")]
+    pool = {"p1": "md", "p2": "md", "p3": "md", "p4": "md", "p5": "md"}
+
+    scopes_a = build_per_paper_scopes(items, pool, n_papers=3, seed=0)
+    scopes_b = build_per_paper_scopes(items, pool, n_papers=3, seed=0)
+
+    assert scopes_a == scopes_b  # deterministic given the same seed
+    assert scopes_a["0"][0] == "p1"  # each item's own gold paper is always present
+    assert scopes_a["1"][0] == "p2"
+    assert all(len(scope) == 3 for scope in scopes_a.values())
+    assert all(len(set(scope)) == 3 for scope in scopes_a.values())  # no duplicates
+
+
+def test_build_per_paper_scopes_different_seeds_draw_different_others():
+    items = [_item("q", "p1", "S")]
+    pool = {f"p{i}": "md" for i in range(1, 8)}  # p1 (gold) + 7 candidate "others"
+
+    scopes_0 = build_per_paper_scopes(items, pool, n_papers=3, seed=0)
+    scopes_1 = build_per_paper_scopes(items, pool, n_papers=3, seed=1)
+
+    assert scopes_0["0"][0] == scopes_1["0"][0] == "p1"
+    assert scopes_0 != scopes_1
+
+
+def test_build_per_paper_scopes_degrades_when_pool_smaller_than_n_papers():
+    items = [_item("q", "p1", "S")]
+    pool = {"p1": "md", "p2": "md"}
+    scopes = build_per_paper_scopes(items, pool, n_papers=10, seed=0)
+    assert set(scopes["0"]) == {"p1", "p2"}
+
+
+class _CrowdingEmbedder:
+    """Mirrors test_search.py's _CrowdingEmbedder: paper-a's two chunks both outrank
+    paper-b's one chunk, so a shared candidates=2 budget crowds paper-b out entirely
+    unless per_paper is on."""
+
+    _VECS = {
+        "orig": [1.0, 0.0],
+        "a1_text": [1.0, 0.0],
+        "a2_text": [4.0, 1.0],
+        "b1_text": [1.0, 1.0],
+    }
+
+    def name(self) -> str:
+        return "pp-crowding"
+
+    def __call__(self, input: list[str]) -> list[list[float]]:
+        return [self._VECS[t] for t in input]
+
+
+def _seed_crowding_pool(cfg):
+    embedder = _CrowdingEmbedder()
+    collection = open_collection(cfg.paths.rag_db, cfg.collection, embedder_name=embedder.name())
+    docs = [
+        ("a1", "a1_text", "paper-a", "S1"),
+        ("a2", "a2_text", "paper-a", "S2"),
+        ("b1", "b1_text", "paper-b", "S1"),
+    ]
+    metas = [
+        {
+            "paper_id": pid,
+            "breadcrumb": f"Paper > {s}",
+            "section_title": s,
+            "section_number": "1",
+            "body": t,
+        }
+        for _, t, pid, s in docs
+    ]
+    collection.upsert(
+        ids=[d for d, _, _, _ in docs],
+        embeddings=embedder([t for _, t, _, _ in docs]),
+        documents=[t for _, t, _, _ in docs],
+        metadatas=metas,
+    )
+    searcher = Searcher(
+        db_dir=cfg.paths.rag_db,
+        collection=cfg.collection,
+        embedder=embedder,
+        reranker=_FakeReranker(),
+    )
+    return searcher
+
+
+def test_per_paper_sweep_recovers_a_crowded_paper(make_config):
+    cfg = make_config()
+    searcher = _seed_crowding_pool(cfg)
+    items = [_item("orig", "paper-b", "S1")]
+    pool = {"paper-a": "md", "paper-b": "md"}
+
+    report = per_paper_sweep(
+        cfg, items, pool, n_papers=2, candidates_grid=[2], seed=0, searcher=searcher
+    )
+
+    by_label = {r.label: r for r in report.results}
+    assert by_label["off"].success.point == 0.0  # paper-b's chunk is crowded out
+    assert by_label["on (production)"].success.point == 1.0
+    # The allocation itself helps, not just extra fetch volume: budget-matched holds the
+    # SAME total pool size as the off-arm and still recovers paper-b's chunk.
+    assert by_label["on (budget-matched)"].success.point == 1.0
+    assert by_label["on (budget-matched)"].mean_pool_size == by_label["off"].mean_pool_size
+
+    text = format_per_paper_sweep(report)
+    assert "candidates=2" in text
+    assert "Candidate points to confirm" in text
+
+
+class _EvenlyRelevantEmbedder:
+    """Mirrors test_search.py's _EvenlyRelevantEmbedder: two papers, comparable
+    relevance, generous budget -- nothing for per_paper to fix."""
+
+    _VECS = {"orig": [1.0, 0.0], "x1_text": [1.0, 0.0], "y1_text": [0.9, 0.1]}
+
+    def name(self) -> str:
+        return "pp-evenly-relevant"
+
+    def __call__(self, input: list[str]) -> list[list[float]]:
+        return [self._VECS[t] for t in input]
+
+
+def test_per_paper_sweep_no_false_positive_when_not_crowded(make_config):
+    cfg = make_config()
+    embedder = _EvenlyRelevantEmbedder()
+    collection = open_collection(cfg.paths.rag_db, cfg.collection, embedder_name=embedder.name())
+    docs = [("x1", "x1_text", "paper-x", "S1"), ("y1", "y1_text", "paper-y", "S1")]
+    metas = [
+        {
+            "paper_id": pid,
+            "breadcrumb": f"Paper > {s}",
+            "section_title": s,
+            "section_number": "1",
+            "body": t,
+        }
+        for _, t, pid, s in docs
+    ]
+    collection.upsert(
+        ids=[d for d, _, _, _ in docs],
+        embeddings=embedder([t for _, t, _, _ in docs]),
+        documents=[t for _, t, _, _ in docs],
+        metadatas=metas,
+    )
+    searcher = Searcher(
+        db_dir=cfg.paths.rag_db,
+        collection=cfg.collection,
+        embedder=embedder,
+        reranker=_FakeReranker(),
+    )
+    items = [_item("orig", "paper-y", "S1")]
+    pool = {"paper-x": "md", "paper-y": "md"}
+
+    # Generous candidates relative to a 2-chunk corpus -- nothing to crowd.
+    report = per_paper_sweep(
+        cfg, items, pool, n_papers=2, candidates_grid=[10], seed=0, searcher=searcher
+    )
+
+    by_label = {r.label: r for r in report.results}
+    assert by_label["off"].success.point == 1.0
+    assert by_label["on (production)"].success.point == 1.0
+    assert by_label["on (production)"].success_delta.delta == 0.0
+
+
+class _GoldNotHighestScoreEmbedder:
+    """Two papers, one chunk each; the NON-gold paper's chunk scores higher for the query
+    than the gold paper's own chunk. build_per_paper_scopes always puts the gold paper
+    first in the scope list -- regression guard for _retrieve_scoped's rerank=False path,
+    where a naive per-scope concatenation would rank paper-a's chunk first purely because
+    it's scope[0], not because it's more relevant."""
+
+    _VECS = {"orig": [1.0, 0.0], "a1_text": [0.6, 0.4], "z1_text": [0.95, 0.05]}
+
+    def name(self) -> str:
+        return "pp-gold-not-highest"
+
+    def __call__(self, input: list[str]) -> list[list[float]]:
+        return [self._VECS[t] for t in input]
+
+
+def test_score_items_scoped_per_paper_no_rerank_sorts_across_scopes_by_score(make_config):
+    cfg = make_config()  # reranker disabled by default -> exercises the rerank=False path
+    embedder = _GoldNotHighestScoreEmbedder()
+    collection = open_collection(cfg.paths.rag_db, cfg.collection, embedder_name=embedder.name())
+    docs = [("a1", "a1_text", "paper-a", "S1"), ("z1", "z1_text", "paper-z", "S1")]
+    metas = [
+        {
+            "paper_id": pid,
+            "breadcrumb": f"Paper > {s}",
+            "section_title": s,
+            "section_number": "1",
+            "body": t,
+        }
+        for _, t, pid, s in docs
+    ]
+    collection.upsert(
+        ids=[d for d, _, _, _ in docs],
+        embeddings=embedder([t for _, t, _, _ in docs]),
+        documents=[t for _, t, _, _ in docs],
+        metadatas=metas,
+    )
+    searcher = Searcher(db_dir=cfg.paths.rag_db, collection=cfg.collection, embedder=embedder)
+    items = [_item("orig", "paper-a", "S1")]  # paper-a is gold -> always scopes["0"][0]
+    scopes = build_per_paper_scopes(items, {"paper-a": "md", "paper-z": "md"}, n_papers=2, seed=0)
+    assert scopes["0"][0] == "paper-a"  # sanity: gold really is scope[0]
+
+    scores = score_items_scoped(
+        searcher, items, scopes, per_paper=True, candidates=1, k=1, rerank=False
+    )
+
+    # paper-z's chunk scores higher for this query -- it must rank first despite being
+    # scope[1], not paper-a's lower-scoring chunk winning by concatenation order.
+    assert scores[0].ranked[0][0] == "z1"
+
+
+def test_per_paper_sweep_and_confirm_respect_cfg_reranker_enabled(monkeypatch, make_config):
+    # Regression guard: rerank must come from cfg.reranker.enabled, matching run/
+    # screen_retrieval and what ChatAgent.execute actually calls in production -- not
+    # hardcoded True regardless of the loaded config.
+    from eval import harness as harness_mod
+    from rag.config import HFRerankerCfg
+
+    items = [_item("orig", "paper-b", "S1")]
+    pool = {"paper-a": "md", "paper-b": "md"}
+    seen_rerank: list[bool] = []
+    real_score_items_scoped = harness_mod.score_items_scoped
+
+    def spy(*args, **kwargs):
+        seen_rerank.append(kwargs["rerank"])
+        return real_score_items_scoped(*args, **kwargs)
+
+    monkeypatch.setattr(harness_mod, "score_items_scoped", spy)
+
+    cfg_off = make_config()  # reranker disabled by default
+    searcher_off = _seed_crowding_pool(cfg_off)
+    per_paper_sweep(
+        cfg_off, items, pool, n_papers=2, candidates_grid=[2], seed=0, searcher=searcher_off
+    )
+    assert seen_rerank and all(r is False for r in seen_rerank)
+
+    seen_rerank.clear()
+    cfg_on = make_config(reranker=HFRerankerCfg(enabled=True))
+    searcher_on = _seed_crowding_pool(cfg_on)
+    per_paper_confirm(
+        cfg_on,
+        items,
+        pool,
+        n_papers=2,
+        candidates=2,
+        variant="production",
+        seed=1,
+        searcher=searcher_on,
+    )
+    assert seen_rerank and all(r is True for r in seen_rerank)
+
+
+def test_per_paper_confirm_threads_its_own_seed_not_a_hardcoded_one(monkeypatch, make_config):
+    # Regression guard: per_paper_confirm must build its scopes from the seed it was
+    # actually called with, never a sweep's leftover seed or an internal default.
+    from eval import harness as harness_mod
+
+    calls: list[int] = []
+    real = harness_mod.build_per_paper_scopes
+
+    def spy(items, pool, n_papers, seed):
+        calls.append(seed)
+        return real(items, pool, n_papers, seed)
+
+    monkeypatch.setattr(harness_mod, "build_per_paper_scopes", spy)
+
+    cfg = make_config()
+    searcher = _seed_crowding_pool(cfg)
+    items = [_item("orig", "paper-b", "S1")]
+    pool = {"paper-a": "md", "paper-b": "md"}
+
+    per_paper_confirm(
+        cfg, items, pool, n_papers=2, candidates=2, variant="production", seed=7, searcher=searcher
+    )
+
+    assert calls == [7]
+
+
+def test_per_paper_confirm_rejects_unknown_variant(make_config):
+    cfg = make_config()
+    searcher = _seed_crowding_pool(cfg)
+    items = [_item("orig", "paper-b", "S1")]
+    pool = {"paper-a": "md", "paper-b": "md"}
+
+    with pytest.raises(ValueError, match="variant"):
+        per_paper_confirm(
+            cfg, items, pool, n_papers=2, candidates=2, variant="bogus", seed=1, searcher=searcher
+        )
+
+
+def test_per_paper_confirm_report_reflects_a_confirmed_result(make_config):
+    cfg = make_config()
+    searcher = _seed_crowding_pool(cfg)
+    items = [_item("orig", "paper-b", "S1")]
+    pool = {"paper-a": "md", "paper-b": "md"}
+
+    result = per_paper_confirm(
+        cfg, items, pool, n_papers=2, candidates=2, variant="production", seed=1, searcher=searcher
+    )
+    text = format_per_paper_confirm(result, n_papers=2, seed=1)
+    assert "confirmed" in text
+    assert "seed=1" in text
+
+
+def test_per_paper_sweep_checkpoint_header_trip_wires_on_seed_and_grid(
+    monkeypatch, make_searcher, seed_chunks, tmp_path
+):
+    docs = [seed_chunks("paper-a", "S1", "alpha content")]
+    ctx = make_searcher(docs)
+    ctx.searcher._reranker = _FakeReranker()  # avoid loading a real cross-encoder
+    items = [_item("alpha", "paper-a", "S1")]
+    pool = {"paper-a": "md"}
+
+    from eval import harness as harness_mod
+
+    captured_headers: list[dict] = []
+    real_init = harness_mod.CheckpointWriter.__init__
+
+    def spy_init(self, path, header):
+        captured_headers.append(header)
+        real_init(self, path, header)
+
+    monkeypatch.setattr(harness_mod.CheckpointWriter, "__init__", spy_init)
+
+    ckpt = tmp_path / "pp.ckpt.jsonl"
+    per_paper_sweep(
+        ctx.cfg,
+        items,
+        pool,
+        n_papers=1,
+        candidates_grid=[5],
+        seed=3,
+        searcher=ctx.searcher,
+        checkpoint_path=ckpt,
+    )
+
+    assert captured_headers
+    header = captured_headers[0]
+    assert header["seed"] == 3
+    assert header["n_papers"] == 1
+    assert header["candidates_grid"] == [5]
+
+
+def test_per_paper_sweep_resumes_without_recomputing_a_finished_arm(
+    monkeypatch, make_config, tmp_path
+):
+    # Regression guard: each per-paper arm's checkpoint record must round-trip through
+    # CheckpointWriter/resume_units correctly (a dict, per the module's contract — not a
+    # bare list), and a finished arm must never be recomputed on resume.
+    from eval import harness as harness_mod
+
+    cfg = make_config()
+    searcher = _seed_crowding_pool(cfg)
+    items = [_item("orig", "paper-b", "S1")]
+    pool = {"paper-a": "md", "paper-b": "md"}
+    ckpt = tmp_path / "pp.ckpt.jsonl"
+
+    real_score_items_scoped = harness_mod.score_items_scoped
+    state = {"n": 0, "fail": True}
+
+    def flaky(*args, **kwargs):
+        state["n"] += 1
+        if state["fail"] and state["n"] == 2:  # fail on the 2nd arm ("on (production)")
+            raise RuntimeError("simulated interruption")
+        return real_score_items_scoped(*args, **kwargs)
+
+    monkeypatch.setattr(harness_mod, "score_items_scoped", flaky)
+
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        per_paper_sweep(
+            cfg,
+            items,
+            pool,
+            n_papers=2,
+            candidates_grid=[2],
+            seed=0,
+            searcher=searcher,
+            checkpoint_path=ckpt,
+        )
+    assert ckpt.exists()
+    calls_before_resume = state["n"]  # off succeeded (1), production failed (2)
+
+    state["fail"] = False  # let the interrupted run "come back up"
+    report = per_paper_sweep(
+        cfg,
+        items,
+        pool,
+        n_papers=2,
+        candidates_grid=[2],
+        seed=0,
+        searcher=searcher,
+        checkpoint_path=ckpt,
+    )
+
+    # Only the 2 un-cached arms (production, budget-matched) are recomputed — the
+    # already-checkpointed "off" arm is loaded from disk, never re-scored.
+    assert state["n"] - calls_before_resume == 2
+    by_label = {r.label: r for r in report.results}
+    assert by_label["off"].success.point == 0.0
+    assert by_label["on (production)"].success.point == 1.0
+    assert by_label["on (budget-matched)"].success.point == 1.0
+    assert not ckpt.exists()  # deleted once every arm is accounted for
+
+
+# --- comparative: cross-paper synthesis questions (gold spans 2+ papers) ------------------
+
+
+class _ComparativeCrowdingEmbedder:
+    """Mirrors _CrowdingEmbedder: paper-b's two chunks both outrank paper-c's one chunk,
+    so a shared candidates=2 budget crowds paper-c out of a comparative item spanning
+    both papers -- unless per_paper is on. Unlike the per-paper crowding fixture, there's
+    no third "extra" paper in the scope at all: for a comparative item, crowding happens
+    directly between the item's own gold papers."""
+
+    _VECS = {
+        "orig": [1.0, 0.0],
+        "b1_text": [1.0, 0.0],
+        "b2_text": [4.0, 1.0],
+        "c1_text": [1.0, 1.0],
+    }
+
+    def name(self) -> str:
+        return "cmp-crowding"
+
+    def __call__(self, input: list[str]) -> list[list[float]]:
+        # Any query text not one of the fixture's exact docs (e.g. a checkpoint trip-wire
+        # test's differently-worded query) resolves to "orig"'s direction -- only the doc
+        # texts' own vectors matter for the crowding ranking these tests assert on.
+        return [self._VECS.get(t, self._VECS["orig"]) for t in input]
+
+
+def _seed_comparative_crowding_pool(cfg):
+    embedder = _ComparativeCrowdingEmbedder()
+    collection = open_collection(cfg.paths.rag_db, cfg.collection, embedder_name=embedder.name())
+    docs = [
+        ("b1", "b1_text", "paper-b", "S1"),
+        ("b2", "b2_text", "paper-b", "S2"),
+        ("c1", "c1_text", "paper-c", "S1"),
+    ]
+    metas = [
+        {
+            "paper_id": pid,
+            "breadcrumb": f"Paper > {s}",
+            "section_title": s,
+            "section_number": "1",
+            "body": t,
+        }
+        for _, t, pid, s in docs
+    ]
+    collection.upsert(
+        ids=[d for d, _, _, _ in docs],
+        embeddings=embedder([t for _, t, _, _ in docs]),
+        documents=[t for _, t, _, _ in docs],
+        metadatas=metas,
+    )
+    return Searcher(
+        db_dir=cfg.paths.rag_db,
+        collection=cfg.collection,
+        embedder=embedder,
+        reranker=_FakeReranker(),
+    )
+
+
+def _comparative_item(query: str, papers: list[str]) -> ComparativeQAItem:
+    # section_number "1" matches seed_chunks'/_seed_comparative_crowding_pool's metadata.
+    return ComparativeQAItem(
+        query=query,
+        sections=[
+            Section(paper_id=pid, number="1", title="S1", body="", start=0, end=1) for pid in papers
+        ],
+    )
+
+
+def test_comparative_sweep_recovers_a_crowded_paper(make_config):
+    cfg = make_config()
+    searcher = _seed_comparative_crowding_pool(cfg)
+    items = [_comparative_item("orig", ["paper-b", "paper-c"])]
+
+    report = comparative_sweep(cfg, items, candidates_grid=[2], searcher=searcher)
+
+    by_label = {r.label: r for r in report.results}
+    assert by_label["off"].success.point == 0.0  # paper-c's chunk is crowded out
+    assert by_label["on (production)"].success.point == 1.0
+    # The allocation itself helps, not just extra fetch volume: budget-matched holds the
+    # SAME total pool size as the off-arm and still recovers paper-c's chunk.
+    assert by_label["on (budget-matched)"].success.point == 1.0
+    assert by_label["on (budget-matched)"].mean_pool_size == by_label["off"].mean_pool_size
+    assert report.n_papers_min == report.n_papers_max == 2
+
+    text = format_comparative_sweep(report)
+    assert "candidates=2" in text
+    assert "n_papers_per_item=2..2" in text
+    assert "Candidate points to confirm" in text
+
+
+def test_comparative_confirm_recovers_a_crowded_paper(make_config):
+    cfg = make_config()
+    searcher = _seed_comparative_crowding_pool(cfg)
+    items = [_comparative_item("orig", ["paper-b", "paper-c"])]
+
+    result = comparative_confirm(cfg, items, candidates=2, variant="production", searcher=searcher)
+
+    assert result.off.success.point == 0.0
+    assert result.on.success.point == 1.0
+    assert result.on.success_delta is not None
+    assert result.on.success_delta.delta == 1.0
+
+
+def test_score_comparative_items_scoped_sets_primary_paper_id_from_sections_zero(make_config):
+    # Regression guard: primary_paper_id (the bootstrap cluster key) must come from the
+    # item's own sections[0] -- the trial's earliest-drawn paper at generation time -- not
+    # get recomputed some other way (alphabetically, by scope order, etc.) at scoring
+    # time. Two items with the SAME gold papers but OPPOSITE sections[0] ordering must
+    # score to opposite primary_paper_id values.
+    cfg = make_config()
+    searcher = _seed_comparative_crowding_pool(cfg)
+    b_first = _comparative_item("orig", ["paper-b", "paper-c"])
+    c_first = _comparative_item("orig", ["paper-c", "paper-b"])
+
+    scores_b_first = score_comparative_items_scoped(
+        searcher, [b_first], per_paper=False, candidates=2, k=10, rerank=True
+    )
+    scores_c_first = score_comparative_items_scoped(
+        searcher, [c_first], per_paper=False, candidates=2, k=10, rerank=True
+    )
+
+    assert scores_b_first[0].primary_paper_id == "paper-b"
+    assert scores_c_first[0].primary_paper_id == "paper-c"
+
+
+def test_comparative_sweep_checkpoint_trip_wires_on_items_fingerprint(
+    monkeypatch, make_config, tmp_path
+):
+    from eval import harness as harness_mod
+
+    cfg = make_config()
+    searcher = _seed_comparative_crowding_pool(cfg)
+    items = [_comparative_item("orig", ["paper-b", "paper-c"])]
+
+    captured_headers: list[dict] = []
+    real_init = harness_mod.CheckpointWriter.__init__
+
+    def spy_init(self, path, header):
+        captured_headers.append(header)
+        real_init(self, path, header)
+
+    monkeypatch.setattr(harness_mod.CheckpointWriter, "__init__", spy_init)
+
+    ckpt = tmp_path / "cmp.ckpt.jsonl"
+    comparative_sweep(cfg, items, candidates_grid=[2], searcher=searcher, checkpoint_path=ckpt)
+
+    assert captured_headers
+    header = captured_headers[0]
+    assert "items_fingerprint" in header
+
+    # A different items list (different query) must trip-wire to a different fingerprint —
+    # otherwise a stale checkpoint from an old comparative gen run could silently merge
+    # with a fresh dev split's scores.
+    other_items = [_comparative_item("a completely different query", ["paper-b", "paper-c"])]
+    captured_headers.clear()
+    ckpt2 = tmp_path / "cmp2.ckpt.jsonl"
+    comparative_sweep(
+        cfg, other_items, candidates_grid=[2], searcher=searcher, checkpoint_path=ckpt2
+    )
+    assert captured_headers[0]["items_fingerprint"] != header["items_fingerprint"]
+
+
+def _comparative_confirm_result(
+    n_clusters: int, *, delta_n_clusters: int | None = None
+) -> ComparativeConfirmResult:
+    """``delta_n_clusters`` defaults to ``n_clusters`` (the common case, and what every
+    existing caller wants) but can be set independently to prove the floor gates on the
+    delta's own resolution, not either arm's standalone one."""
+    delta_n_clusters = n_clusters if delta_n_clusters is None else delta_n_clusters
+    off = ComparativeArmResult(
+        label="off",
+        candidates=10,
+        mean_pool_size=10.0,
+        success=BootResult(
+            point=0.3, ci_lo=0.1, ci_hi=0.5, se=0.1, n_clusters=n_clusters, n_eligible=n_clusters
+        ),
+        mrr=BootResult(
+            point=0.2, ci_lo=0.1, ci_hi=0.3, se=0.05, n_clusters=n_clusters, n_eligible=n_clusters
+        ),
+        success_delta=None,
+        mrr_delta=None,
+    )
+    on = ComparativeArmResult(
+        label="on (production)",
+        candidates=10,
+        mean_pool_size=40.0,
+        success=BootResult(
+            point=0.6, ci_lo=0.4, ci_hi=0.8, se=0.1, n_clusters=n_clusters, n_eligible=n_clusters
+        ),
+        mrr=BootResult(
+            point=0.4, ci_lo=0.3, ci_hi=0.5, se=0.05, n_clusters=n_clusters, n_eligible=n_clusters
+        ),
+        success_delta=DeltaResult(
+            delta=0.3,
+            ci_lo=0.1,
+            ci_hi=0.5,
+            se=0.1,
+            mdd=0.28,
+            n_clusters=delta_n_clusters,
+            n_paired=delta_n_clusters,
+        ),
+        mrr_delta=None,
+    )
+    return ComparativeConfirmResult(
+        off=off, on=on, n_papers_min=2, n_papers_max=2, n_papers_mean=2.0
+    )
+
+
+def test_format_comparative_confirm_hard_floor_blocks_confirmed_below_threshold():
+    # A delta whose CI clears zero (0.1 to 0.5, doesn't straddle) must still refuse to say
+    # "confirmed" when n_clusters is below the floor -- this is the whole point of the
+    # floor existing (confirm's recommendation language must never speak with more
+    # confidence than the resolution can support).
+    assert COMPARATIVE_MIN_CLUSTERS > 4  # sanity: the fixture below is genuinely under it
+    result = _comparative_confirm_result(n_clusters=4)
+
+    text = format_comparative_confirm(result, candidates=10)
+
+    assert "Too few clusters to confirm anything" in text
+    assert f"n_clusters=4 < COMPARATIVE_MIN_CLUSTERS={COMPARATIVE_MIN_CLUSTERS}" in text
+    assert "*** confirmed" not in text
+    assert not text.rstrip().endswith("confirmed.")  # no bare "Confirmed: ..." verdict line
+    assert "Confirmed:" not in text
+
+
+def test_format_comparative_confirm_prints_confirmed_at_or_above_floor():
+    result = _comparative_confirm_result(n_clusters=COMPARATIVE_MIN_CLUSTERS)
+
+    text = format_comparative_confirm(result, candidates=10)
+
+    assert "Confirmed:" in text
+    assert "*** confirmed" in text
+    assert "Too few clusters" not in text
+
+
+def test_format_comparative_confirm_floor_gates_on_the_deltas_own_n_clusters():
+    # Regression guard: the floor must read the DELTA's own n_clusters (paired_delta's
+    # intersection-conditioned resolution), not either arm's standalone one -- even when
+    # the on-arm's own success.n_clusters clears the floor, a delta backed by fewer
+    # clusters than that must still be blocked from saying "confirmed."
+    result = _comparative_confirm_result(
+        n_clusters=COMPARATIVE_MIN_CLUSTERS + 10, delta_n_clusters=COMPARATIVE_MIN_CLUSTERS - 1
+    )
+
+    text = format_comparative_confirm(result, candidates=10)
+
+    assert "Too few clusters to confirm anything" in text
+    assert f"n_clusters={COMPARATIVE_MIN_CLUSTERS - 1}" in text
+    assert "Confirmed:" not in text

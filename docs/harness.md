@@ -72,6 +72,111 @@ auto-select one. The two metrics can pull in different directions (e.g. a deeper
 `candidates` pool raising recall while costing a fraction of a point of `MRR@k`), and
 there's no single formula that trade-off reduces to; it's a human call.
 
+## 🔬 `per-paper` — a standalone command outside the pipeline
+
+`paperlens-eval per-paper sweep`/`confirm` is **not** a step in `gen → run → screen →
+sweep → confirm` and doesn't appear in the flow diagram above — it only needs `gen`'s dev
+split. It measures one specific thing the pipeline above doesn't touch at all:
+`Searcher.search(per_paper=True)` (splitting the `candidates` budget across the papers in
+scope, rather than searching them as one pooled query) against `per_paper=False`, paired
+on the same randomly-sampled multi-paper scope. There's no `config.yaml` field this feeds
+— `per_paper` is a per-call flag the chat agent or a script passes, not a retrieval knob —
+so unlike every other command here, there's no block to paste at the end.
+
+**Same verb names, different scale, on purpose.** `per-paper sweep`/`confirm` reuses the
+main pipeline's `sweep`/`confirm` names because the relationship is the same one at a
+smaller scope: `sweep` is the exploratory grid, `confirm` is the one-shot, fresh-seed
+validation of a single point from that grid — this is not an accidental name collision.
+
+- **`per-paper sweep`** — for each dev question, builds a scope of `--per-paper-n`
+  papers (its own gold paper plus `n-1` others sampled uniformly at random, seeded by
+  `--seed`), then runs three arms at every point of the `--candidates` grid: `off`
+  (`per_paper=False`, the pooled-search baseline), `on (production)` (the real
+  `Searcher.search(per_paper=True)` formula, `max(k, candidates // n_papers)` per paper),
+  and — only where `candidates // n_papers < k`, i.e. only where production's `max(k,
+  ...)` floor is actually inflating its pool — `on (budget-matched)` (`max(1, candidates
+  // n_papers)`, no floor). Every arm is paired against `off` via `paired_delta`.
+- **`per-paper confirm`** — one `--candidates` value, one `--variant`
+  (`production`/`budget-matched`), a **fresh, required** `--seed` (never the sweep's own
+  draw) — the only per-paper mode allowed to say "confirmed." Reuses the dev split with
+  the new seed, deliberately not the main pipeline's held-out test split (a lighter
+  replication check, not a second held-out guarantee).
+
+**Why two variants, not one.** `on (production)`'s `max(k, ...)` floor means at tight
+`candidates` values it can fetch up to `n_papers`× the pool `off` sees — an apparent win
+there could just be more raw fetch volume, not a better allocation strategy. `on
+(budget-matched)` removes the floor so its pool size approximately matches `off`'s — off
+by up to `n_papers - 1` candidates when `candidates` doesn't divide `n_papers` evenly
+(integer division, not a bug). Read them as two different questions: production answers *"does turning `per_paper` on, as shipped, help
+this pool?"*; budget-matched answers *"is the win (if any) coming from the allocation
+strategy itself, or just from fetching more?"* — production is the one that matters for
+a real "should I turn this on" decision; budget-matched is the mechanism check behind it.
+
+## 🔀 `comparative` — genuinely cross-paper synthesis questions
+
+Every `QAItem` `gen` produces — and everything `per-paper` measures — has gold living
+inside **one** paper. `paperlens-eval comparative gen/sweep/confirm` is a second,
+independent eval-set type for questions whose gold spans **two or more** papers at once
+("how does paper A's approach to X differ from paper B's"), so `per_paper`'s effect on
+genuine cross-paper synthesis can be measured at all — something the single-paper eval set
+structurally cannot represent. It doesn't touch `gen`'s dev/test split, `QAItem`, or Guard
+2 below; those stay exactly as they are, correct for what they measure. This command has
+its **own** `gen` (unlike `per-paper`, which reuses the main dev split) because the item
+shape is different and there's nothing to reuse.
+
+- **`comparative gen`** — a **trial loop**, not a deterministic sweep: draw a random
+  handful of papers (`--n-papers-min`/`--n-papers-max`, default `2..6`), show an LLM their
+  outlines (titles + full section list, never body text at this stage) and ask it to spot
+  sections in different papers discussing the same thing, then write one question per
+  match found. Repeat until `--target-p` items are collected or `--max-trials` trials have
+  run. `--target-p` is a **soft floor** — a trial that overshoots it still keeps every
+  match it found, never truncated mid-trial. Writes its own item-level dev/test split
+  (`<fingerprint>.comparative.{dev,test}.jsonl`), split by a per-item coin flip as items
+  stream to disk, not by paper (a comparative item touches multiple papers at once, so
+  there's no single paper to hold out). **Recommended first run is a cheap pilot**
+  (`--target-p 5 --max-trials 20`), not the defaults — unlike every other command here,
+  this one's core step is an *unvalidated* prompt, and the hit rate on a real pool is
+  genuinely unknown until tried. **Check the pilot's *questions*, not just its hit rate**:
+  the write call is trusted, unaudited — nothing checks that a generated question
+  genuinely needs every section shown rather than being answerable from just one of them.
+  Unlike the single-paper eval's own contamination risk (which is symmetric noise that
+  cancels in the paired delta — see [Known
+  limits](#️-known-limits-read-before-trusting-a-recommendation)), a "comparative"
+  question that's secretly single-paper-answerable breaks the strict-AND metric's own
+  premise, not just adds noise to it. `comparative_item_to_dict` keeps each section's full
+  `body` in `dev.jsonl` specifically so this is a five-minute read, not a re-parse of the
+  pool — do that read before trusting a full run's numbers.
+- **`comparative sweep`/`confirm`** — otherwise mirrors `per-paper sweep`/`confirm`
+  exactly: the same `off`/`on (production)`/`on (budget-matched)` three-arm shape, the
+  same `paired_delta` statistics, `sweep` exploratory on the comparative dev split,
+  `confirm` the one-shot check on the comparative test split. The one real difference:
+  each item's own gold papers **are** its retrieval scope (no `--per-paper-n`/`--seed`
+  scope-assignment step at all — a comparative item already names exactly which papers it
+  spans, fixed at generation time), so `confirm` here doesn't need a fresh seed to redraw;
+  the held-out test split's own "never touched by sweep" guarantee is what gives it
+  independence instead.
+- **Metrics depart from every other tier's single-gold shape.** Success is a **strict
+  AND** — the pool must contain a chunk from *every* gold paper, not a fractional score —
+  and the rank metric is the **minimum** reciprocal rank across the gold papers, not the
+  best: a synthesis answer is only as good as its worst-covered source. See
+  `comparative_metrics.py` for the full reasoning (it compounds with the existing
+  section-vs-answer-localization upper bound below, not a new limitation on its own).
+  **The MRR half of that pair can be structurally floor-capped for high-group-size
+  items, independent of `per_paper`.** `per_paper` only ever protects stage 1 (the
+  candidate pool) — the final rerank-and-cut-to-`k` is global and shared across every
+  paper in scope either way. A 2-paper item easily fits both chunks inside `max_k=10`; a
+  5-6-paper item needs *every one* of its gold papers ranked inside that same shared
+  window simultaneously, a bar `per_paper` cannot raise no matter how well it allocates
+  the candidate pool. If the MRR delta reads flat, check whether it's flat because
+  `per_paper` genuinely doesn't help stage 2, or because large-group items are saturated
+  near the floor regardless of arm — `success` is the metric still doing real work there.
+- **A hard floor on `confirm`'s recommendation language**, stricter than the generic
+  resolution warning below: `comparative confirm` never prints `"Confirmed"` when
+  `n_clusters < COMPARATIVE_MIN_CLUSTERS` (`8`, matching what `per-paper`'s much larger
+  single-paper sweep achieves), regardless of what the delta's CI says — see [Known
+  limits](#️-known-limits-read-before-trusting-a-recommendation) for why this pool
+  predictably lands there.
+
 ## 🛡️ Two guards, both build-blocking
 
 ### Guard 1 — chunking sweeps contaminate the index
@@ -145,6 +250,8 @@ entering the denominator), not per-query degradation, once isolated to the paire
 | **Retrieval** | `reranker.enabled`, `retrieval.candidates` | No — cached query embeddings + cached rerank scores, sliced in memory | near-instant at any pool size |
 | **Elbow** | `elbow_mad_multiplier`, `elbow_prominence` | No — one shared `score_items` pass, every arm just re-cuts its already-reranked scores | near-instant; cheaper than the retrieval tier, no cache/checkpoint needed at all |
 | **Chunking** | `chunking.*` (`embedding.*` plumbed, not exercised by default) | Yes, isolated collection per cell (Guard 1) | `cells × n_chunks` embed cost — minutes for tens–hundreds of papers; printed up front, never a fabricated ETA |
+| **Per-paper** | `per_paper` (no config field — see [below](#-per-paper--a-standalone-command-outside-the-pipeline)) | No, but scoped: every on-arm point runs `n_papers` separate retrievals per question instead of one | **The most expensive command in the harness** — `n_questions × (1 off-arm + up to 2 on-arm variants) × |candidates grid|` scored queries, each on-arm query costing `n_papers`× the retrieval calls of `off` |
+| **Comparative** | `per_paper`, cross-paper items only (no config field — see [below](#-comparative--genuinely-cross-paper-synthesis-questions)) | No for `sweep`/`confirm` (same scoped-retrieval cost shape as per-paper); `gen` costs real **LLM calls** — up to `max_trials` spotting calls + up to `target_p` writing calls | `gen`: unvalidated prompt cost, pilot first. `sweep`/`confirm`: same per-item cost shape as per-paper, scaled by however many items `gen` actually produced (usually far fewer than the main dev split, given trial-loop hit rate) |
 
 The retrieval category is free because a cross-encoder's `(query, doc)` score is
 pool-depth-independent: retrieve once per query at `max(grid)` depth, score that pool with the
@@ -200,6 +307,10 @@ see [Configuration: project root](configuration.md#-how-the-config-is-found)):
 | `<fingerprint>.genfilter.jsonl` | `gen --genfilter` | One line per **checked** item (leaked or not): `query`, `paper_id`, `gold_answer`, `closed_book_answer`, `score`, `leaked`, `error`. The audit/calibration trail, not just the discards — see [Known limits](#️-known-limits-read-before-trusting-a-recommendation). `error` is `null` for a real check, `"no_gold_answer"` when there was nothing to compare against, or `"llm_error: ..."` on a failed closed-book call — so a row with `score: 0.0` can be told apart from a skipped/failed one instead of both looking identical. Present but empty when `--genfilter` wasn't passed. |
 | `<fingerprint>.confirm.json` | `confirm` | `timestamp`, the confirmed `max_tokens`/`candidates`/`rerank`, and the resulting scores — checked before every `confirm` run and printed as a loud, non-blocking warning on a repeat, so re-touching the test split leaves a trace instead of happening silently. |
 | `<fingerprint>.{run,screen-retrieval,screen-chunking,sweep.mt<N>,confirm}.ckpt.jsonl` | `run`/`screen`/`sweep`/`confirm` | Transient resume checkpoints — **not** part of the eval set (see [Resuming an interrupted run](#-resuming-an-interrupted-run)). Deleted automatically once the command that wrote them finishes successfully; safe to delete by hand at any time (equivalent to `--fresh`). |
+| `<fingerprint>.comparative.dev.jsonl` | `comparative gen` | One `ComparativeQAItem` per line (`query`, `answer`, `sections` — a list of `{paper_id, number, title, body, start, end}`, one per gold paper). Item-level split, separate from `<fingerprint>.dev.jsonl`. Swept freely. |
+| `<fingerprint>.comparative.test.jsonl` | `comparative gen` | Same shape, held-out items. Touched only by `comparative confirm`. |
+| `<fingerprint>.comparative.meta.json` | `comparative gen` | `fingerprint`, `n_papers`, `n_items`/`n_trials` (the generation report's `P questions from T trials`), `n_dev`/`n_test`, the frozen `ComparativeGenConfig` used, the generation model, `limit`, and `paper_pair_frequency` — every `(paper_a, paper_b)` pair that co-occurred in a yielded item, most-frequent first (no de-dup cap on reused papers; this is the visibility instead). Counts every pairwise combination *inside* a match group, so one N-paper item contributes `C(N,2)` pairs, not 1 — read this as "which pairs recur," not as a precise measure of how skewed the underlying item pool is. |
+| `<fingerprint>.comparative-sweep.ckpt.jsonl` | `comparative sweep` | Transient resume checkpoint, same discipline as the others above — trip-wired on an items fingerprint (a hash of the item queries), since comparative items are LLM-generated and non-deterministic, so the same pool can yield a completely different dev split across two `gen` runs. |
 
 **`fingerprint`** (`fingerprint.corpus_fingerprint`) is a SHA-256 over the sorted paper ids
 and each paper's markdown content — change the pool (add/remove/re-extract a paper) and the
@@ -230,6 +341,11 @@ across both sides and the held-out guarantee would be fiction.
 | `paperlens-eval screen --tier chunking [--max-tokens 256,1024] [--fresh]` | Yes, per cell | OFAT over `chunking.*` (default grids: `max_tokens`, `overlap_tokens`, `min_tokens`, `noise_ratio`). Resumable at cell granularity. |
 | `paperlens-eval sweep [--max-tokens ...] [--candidates ...] [--fresh]` | Yes, per `max_tokens` | Staged grid over the two fixed mechanistic axes: `chunking.max_tokens × retrieval.candidates × reranker.enabled`. Independent of `screen` — reads no file it writes. Resumable at cell granularity. |
 | `paperlens-eval confirm [--max-tokens N] [--candidates N] [--rerank/--no-rerank] [--fresh]` | Only if `--max-tokens` differs from the config's own value | Score one config once on the test split; print the `config.yaml` block. Resumable (the resume checkpoint is unrelated to the "touched once" marker below). |
+| `paperlens-eval per-paper sweep [--per-paper-n 4] [--candidates 10,20,30,50] [--seed 0] [--fresh]` | No | Standalone — see [above](#-per-paper--a-standalone-command-outside-the-pipeline). Exploratory grid over `per_paper=True` vs `False`, paired on randomly-sampled scopes. No `config.yaml` output. Resumable. |
+| `paperlens-eval per-paper confirm --candidates N --variant {production,budget-matched} --seed N [--per-paper-n 4]` | No | One `per-paper sweep` point, one variant, a fresh required `--seed`. Not resumable — a single point is cheap enough not to need it. |
+| `paperlens-eval comparative gen [--target-p 40] [--max-trials 200] [--n-papers-min 2] [--n-papers-max 6] [--seed 0]` | No | Trial loop: spot cross-paper matches from outlines, write a question per match, until `target_p` items or `max_trials` trials. Writes its own item-level dev/test split. Not resumable (own append-only streaming keeps partial output on disk if interrupted, same as `gen`). |
+| `paperlens-eval comparative sweep [--candidates 10,20,30,50] [--fresh]` | No | Standalone — see [above](#-comparative--genuinely-cross-paper-synthesis-questions). Exploratory grid over `per_paper=True` vs `False` on the comparative dev split. No `config.yaml` output. Resumable. |
+| `paperlens-eval comparative confirm --candidates N --variant {production,budget-matched}` | No | One `comparative sweep` point, one variant, scored on the comparative test split. No `config.yaml` output. Not resumable. |
 
 Every per-item / per-cell loop (`gen`'s per-paper and per-section generation; `run`/`confirm`'s
 per-query scoring; `screen`/`sweep`'s per-arm re-index and per-query cache build) prints a
@@ -322,6 +438,23 @@ isn't directly confirmable — edit `config.yaml` by hand for those and re-run `
   a gold answer on words like "attention" or "cosine schedule") — hand-check a sample of
   `<fingerprint>.genfilter.jsonl` (every checked item, not just the discards) before trusting
   the default threshold on a new pool.
+- **`per-paper`'s `n_clusters` is capped at the pool's paper count, not the scope
+  count.** `--per-paper-n` scopes are drawn *from* the pool, so the bootstrap can never
+  see more independent paper-observations than the pool has papers, regardless of how
+  many scopes are sampled. On an ~11-paper pool this sits well below `MIN_CLUSTERS=25`
+  by construction — `resolution_warning` will fire on every `per-paper sweep`/`confirm`
+  run against a pool that size, and its results should be read as exploratory, the same
+  honesty rule the rest of this doc applies everywhere else.
+- **`comparative`'s `n_clusters` lands even lower than `per-paper`'s, predictably, not as
+  a tail risk.** Its bootstrap clusters on each item's *primary* paper only (the earliest-
+  drawn paper among its gold set, not a true multi-way clustering across every paper an
+  item touches — a known, accepted approximation for this exploratory add-on), and
+  comparative items are scarcer to begin with (trial-loop hit rate, not an exhaustive
+  section sweep). `per-paper`'s own 307-item, full-paper-clustered sweep only reached
+  `n_clusters=8` on this pool; expect `comparative sweep`/`confirm` to land lower still.
+  This is exactly why `comparative confirm` has its own hard floor
+  (`COMPARATIVE_MIN_CLUSTERS=8`, stricter than the generic `resolution_warning`) that
+  blocks `"Confirmed"` outright below it, rather than just printing a caveat next to it.
 
 ## 🧪 Scope
 

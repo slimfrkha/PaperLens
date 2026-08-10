@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import tempfile
 import time
 from dataclasses import asdict, dataclass, replace
@@ -28,11 +29,37 @@ from rag.llm import build_llm
 from rag.reranker import Reranker
 from rag.search import Searcher
 
+from .comparative_queryset import (
+    DEFAULT_MAX_TRIALS,
+    DEFAULT_N_PAPERS_MAX,
+    DEFAULT_N_PAPERS_MIN,
+    DEFAULT_TARGET_P,
+    ComparativeGenConfig,
+    ComparativeQAItem,
+    build_comparative_queryset,
+    comparative_item_to_dict,
+    load_comparative_queryset,
+)
 from .fingerprint import corpus_fingerprint, load_pool
 from .genfilter import GenFilterConfig, check_leak
-from .harness import format_elbow_screen_report, format_report, run, screen_elbow
+from .harness import (
+    DEFAULT_PER_PAPER_N,
+    comparative_confirm,
+    comparative_sweep,
+    format_comparative_confirm,
+    format_comparative_sweep,
+    format_elbow_screen_report,
+    format_per_paper_confirm,
+    format_per_paper_sweep,
+    format_report,
+    per_paper_confirm,
+    per_paper_sweep,
+    run,
+    screen_elbow,
+)
 from .index_isolated import build_isolated_searcher, chunks_for
 from .optimizer import (
+    DEFAULT_CANDIDATE_GRID,
     DEFAULT_CHUNK_GRIDS,
     DEFAULT_MAX_TOKENS_GRID,
     build_reranker_for_cfg,
@@ -352,6 +379,272 @@ def cmd_sweep(args: argparse.Namespace) -> None:
         )
         print(format_chunking_report(report))
         print(f"  ({time.time() - t0:.1f}s wall)")
+
+
+def cmd_per_paper_sweep(args: argparse.Namespace) -> None:
+    cfg, pool, fingerprint, items = _load_dev_set(args)
+    n_papers = args.per_paper_n
+    grid = _parse_grid(args.candidates) or DEFAULT_CANDIDATE_GRID
+    if grid[0] < cfg.retrieval.max_k:
+        raise SystemExit(
+            f"--candidates includes {grid[0]}, below retrieval.max_k={cfg.retrieval.max_k} — "
+            f"the per_paper floor (max(max_k, ...)) would make each paper's fetch exceed its "
+            f"nominal candidates share, confounding the pool-size comparison."
+        )
+    print(f"Pool: {len(pool)} papers  fingerprint={fingerprint}  dev={len(items)} questions")
+    print(
+        f"per-paper sweep: n_papers={n_papers}  candidates={grid}  seed={args.seed} — "
+        f"exploratory, standalone (not part of gen→run→screen→sweep→confirm; see "
+        f"per-paper-eval-spec.md). This is the most expensive command in the harness: up "
+        f"to {len(items)} questions × (1 off-arm + up to 2 on-arm variants) × {len(grid)} "
+        f"candidates points, each on-arm point running {n_papers} scoped retrievals."
+    )
+    checkpoint_path = _checkpoint_path(cfg, fingerprint, "per-paper-sweep")
+    if args.fresh:
+        checkpoint_path.unlink(missing_ok=True)
+    report = per_paper_sweep(
+        cfg,
+        items,
+        pool,
+        n_papers=n_papers,
+        candidates_grid=grid,
+        seed=args.seed,
+        show_progress=True,
+        checkpoint_path=checkpoint_path,
+    )
+    print(format_per_paper_sweep(report))
+
+
+def cmd_per_paper_confirm(args: argparse.Namespace) -> None:
+    cfg, pool, fingerprint, items = _load_dev_set(args)
+    if args.candidates < cfg.retrieval.max_k:
+        raise SystemExit(
+            f"--candidates={args.candidates} is below retrieval.max_k={cfg.retrieval.max_k} — "
+            f"the per_paper floor (max(max_k, ...)) would make each paper's fetch exceed its "
+            f"nominal candidates share, confounding the pool-size comparison."
+        )
+    print(f"Pool: {len(pool)} papers  fingerprint={fingerprint}  dev={len(items)} questions")
+    print(
+        f"per-paper confirm: candidates={args.candidates}  variant={args.variant}  "
+        f"n_papers={args.per_paper_n}  seed={args.seed} (must be a fresh seed, independent "
+        f"of the sweep being confirmed — dev split, not held-out test; see "
+        f"per-paper-eval-spec.md)"
+    )
+    result = per_paper_confirm(
+        cfg,
+        items,
+        pool,
+        n_papers=args.per_paper_n,
+        candidates=args.candidates,
+        variant=args.variant,
+        seed=args.seed,
+    )
+    print(format_per_paper_confirm(result, n_papers=args.per_paper_n, seed=args.seed))
+
+
+def cmd_comparative_gen(args: argparse.Namespace) -> None:
+    cfg = load_config(args.config)
+    pool = load_pool(cfg.paths.markdown_dir)
+    if not pool:
+        raise SystemExit(
+            f"No markdown papers in {cfg.paths.markdown_dir} — ingest the pool first "
+            f"(uv run paperlens-ingest)."
+        )
+    if args.limit:
+        pool = dict(list(pool.items())[: args.limit])
+    if args.n_papers_min > args.n_papers_max:
+        raise SystemExit(
+            f"--n-papers-min ({args.n_papers_min}) must be <= --n-papers-max ({args.n_papers_max})."
+        )
+
+    fingerprint = corpus_fingerprint(pool)
+    gen_cfg = ComparativeGenConfig(
+        target_p=args.target_p,
+        max_trials=args.max_trials,
+        n_papers_min=args.n_papers_min,
+        n_papers_max=args.n_papers_max,
+        seed=args.seed,
+    )
+    out_dir = Path(cfg.root) / "evals"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dev_path = out_dir / f"{fingerprint}.comparative.dev.jsonl"
+    test_path = out_dir / f"{fingerprint}.comparative.test.jsonl"
+
+    smoke = "  [smoke: --limit]" if args.limit else ""
+    print(f"Pool: {len(pool)} papers  fingerprint={fingerprint}{smoke}")
+    print(
+        f"comparative gen: target_p={gen_cfg.target_p}  max_trials={gen_cfg.max_trials}  "
+        f"n_papers={gen_cfg.n_papers_min}..{gen_cfg.n_papers_max}  seed={gen_cfg.seed} — "
+        f"up to {gen_cfg.max_trials} spotting calls + up to {gen_cfg.target_p} writing "
+        f"calls, LLM={cfg.llm.tagging.model}. Recommended first run: a cheap pilot "
+        f"(--target-p 5 --max-trials 20) before trusting a full run's worth of LLM calls "
+        f'to an unvalidated prompt — see comparative-eval-spec.md\'s "CLI". Check TWO '
+        f"things in the pilot's output, not just the hit rate: read a sample of the "
+        f"written questions in dev.jsonl (body is kept in each section precisely for "
+        f"this) and confirm by eye that they genuinely need every section shown, not "
+        f"just the best one — an unaudited write call can produce a 'comparative' "
+        f"question actually answerable from a single paper, which the strict-AND metric "
+        f"then over-penalizes for no real reason."
+    )
+
+    llm = build_llm(cfg.llm.tagging)
+    split_rng = random.Random(gen_cfg.seed)
+    n_dev = n_test = 0
+
+    with (
+        open(dev_path, "w", encoding="utf-8") as fdev,
+        open(test_path, "w", encoding="utf-8") as ftest,
+    ):
+
+        def _on_item(it: ComparativeQAItem) -> None:
+            nonlocal n_dev, n_test
+            line = json.dumps(comparative_item_to_dict(it), ensure_ascii=False) + "\n"
+            if split_rng.random() < gen_cfg.test_frac:
+                ftest.write(line)
+                n_test += 1
+            else:
+                fdev.write(line)
+                n_dev += 1
+
+        result = build_comparative_queryset(
+            pool, llm, gen_cfg, show_progress=True, on_item=_on_item
+        )
+
+    (out_dir / f"{fingerprint}.comparative.meta.json").write_text(
+        json.dumps(
+            {
+                "fingerprint": fingerprint,
+                "n_papers": len(pool),
+                "n_items": len(result.items),
+                "n_trials": result.trials,
+                "n_dev": n_dev,
+                "n_test": n_test,
+                "gen_config": asdict(gen_cfg),
+                "gen_model": cfg.llm.tagging.model,
+                "limit": args.limit,
+                "paper_pair_frequency": {
+                    f"{a},{b}": n for (a, b), n in result.paper_pair_frequency.most_common()
+                },
+            },
+            indent=2,
+        )
+    )
+
+    hit_rate = len(result.items) / result.trials if result.trials else 0.0
+    print(
+        f"Wrote {n_dev} dev / {n_test} test comparative items from {len(result.items)} "
+        f"successful match groups across {result.trials} trials (hit rate: {hit_rate:.0%})."
+    )
+    top_pairs = result.paper_pair_frequency.most_common(5)
+    if top_pairs:
+        pairs_str = "  ".join(f"({a}, {b})={n}" for (a, b), n in top_pairs)
+        print(f"  paper-pair frequency (top 5): {pairs_str}")
+        print(
+            "  (counts every pairwise combination inside a match group, so a single "
+            "N-paper item contributes C(N,2) pairs, not 1 -- a few large-group items can "
+            "outweigh many small ones here without the pool actually being that skewed)"
+        )
+
+
+def _load_comparative_dev_set(args: argparse.Namespace):
+    """Mirrors ``_load_dev_set`` exactly except for the split file/loader — comparative
+    items have their own dev/test split, separate from the main pipeline's (different
+    item shape; see comparative-eval-spec.md's "Disk layout")."""
+    cfg = load_config(args.config)
+    pool = load_pool(cfg.paths.markdown_dir)
+    if not pool:
+        raise SystemExit(
+            f"No markdown papers in {cfg.paths.markdown_dir} — ingest the pool first "
+            f"(uv run paperlens-ingest)."
+        )
+    if args.limit:
+        pool = dict(list(pool.items())[: args.limit])
+
+    fingerprint = corpus_fingerprint(pool)
+    dev_path = Path(cfg.root) / "evals" / f"{fingerprint}.comparative.dev.jsonl"
+    if not dev_path.exists():
+        raise SystemExit(
+            f"No comparative eval set for this pool (fingerprint={fingerprint}) at "
+            f"{dev_path} — generate it first with `paperlens-eval comparative gen`."
+        )
+    return cfg, pool, fingerprint, load_comparative_queryset(str(dev_path))
+
+
+def _load_comparative_test_set(args: argparse.Namespace):
+    """Mirrors ``_load_comparative_dev_set`` exactly except for the split file — used
+    only by ``confirm``, the one command allowed to touch it."""
+    cfg = load_config(args.config)
+    pool = load_pool(cfg.paths.markdown_dir)
+    if not pool:
+        raise SystemExit(
+            f"No markdown papers in {cfg.paths.markdown_dir} — ingest the pool first "
+            f"(uv run paperlens-ingest)."
+        )
+    if args.limit:
+        pool = dict(list(pool.items())[: args.limit])
+
+    fingerprint = corpus_fingerprint(pool)
+    test_path = Path(cfg.root) / "evals" / f"{fingerprint}.comparative.test.jsonl"
+    if not test_path.exists():
+        raise SystemExit(
+            f"No comparative eval set for this pool (fingerprint={fingerprint}) at "
+            f"{test_path} — generate it first with `paperlens-eval comparative gen`."
+        )
+    return cfg, pool, fingerprint, load_comparative_queryset(str(test_path))
+
+
+def cmd_comparative_sweep(args: argparse.Namespace) -> None:
+    cfg, pool, fingerprint, items = _load_comparative_dev_set(args)
+    grid = _parse_grid(args.candidates) or DEFAULT_CANDIDATE_GRID
+    if grid[0] < cfg.retrieval.max_k:
+        raise SystemExit(
+            f"--candidates includes {grid[0]}, below retrieval.max_k={cfg.retrieval.max_k} — "
+            f"the per_paper floor (max(max_k, ...)) would make each paper's fetch exceed its "
+            f"nominal candidates share, confounding the pool-size comparison."
+        )
+    print(
+        f"Pool: {len(pool)} papers  fingerprint={fingerprint}  "
+        f"comparative dev={len(items)} questions"
+    )
+    # From the actually-loaded items, not the default --n-papers-min/--n-papers-max
+    # range -- gen may have used a different range, and a cost estimate that guesses
+    # wrong defeats the point of printing one before the sweep runs.
+    group_sizes = [len(it.sections) for it in items]
+    n_papers_desc = f"{min(group_sizes)}-{max(group_sizes)}" if group_sizes else "0-0"
+    print(
+        f"comparative sweep: candidates={grid} — exploratory, standalone (not part of "
+        f"gen→run→screen→sweep→confirm; see comparative-eval-spec.md). Up to "
+        f"{len(items)} questions × (1 off-arm + up to 2 on-arm variants) × {len(grid)} "
+        f"candidates points, each on-arm point running up to n_papers ({n_papers_desc}, "
+        f"per this dev split) scoped retrievals per item."
+    )
+    checkpoint_path = _checkpoint_path(cfg, fingerprint, "comparative-sweep")
+    if args.fresh:
+        checkpoint_path.unlink(missing_ok=True)
+    report = comparative_sweep(
+        cfg, items, candidates_grid=grid, show_progress=True, checkpoint_path=checkpoint_path
+    )
+    print(format_comparative_sweep(report))
+
+
+def cmd_comparative_confirm(args: argparse.Namespace) -> None:
+    cfg, pool, fingerprint, items = _load_comparative_test_set(args)
+    if args.candidates < cfg.retrieval.max_k:
+        raise SystemExit(
+            f"--candidates={args.candidates} is below retrieval.max_k={cfg.retrieval.max_k} — "
+            f"the per_paper floor (max(max_k, ...)) would make each paper's fetch exceed its "
+            f"nominal candidates share, confounding the pool-size comparison."
+        )
+    print(
+        f"Pool: {len(pool)} papers  fingerprint={fingerprint}  "
+        f"comparative test={len(items)} questions"
+    )
+    print(
+        f"comparative confirm: candidates={args.candidates}  variant={args.variant}  "
+        f"(test split, touched once; see comparative-eval-spec.md)"
+    )
+    result = comparative_confirm(cfg, items, candidates=args.candidates, variant=args.variant)
+    print(format_comparative_confirm(result, candidates=args.candidates))
 
 
 def _load_test_set(args: argparse.Namespace):
@@ -721,6 +1014,181 @@ def main() -> None:
     )
     c.add_argument("--fresh", action="store_true", help=_FRESH_HELP)
     c.set_defaults(func=cmd_confirm)
+
+    pp = sub.add_parser(
+        "per-paper",
+        help="standalone: measure Searcher.search(per_paper=True) vs False on a "
+        "randomly-sampled multi-paper scope (see per-paper-eval-spec.md; not part of "
+        "gen→run→screen→sweep→confirm, no config.yaml output)",
+    )
+    pp_sub = pp.add_subparsers(dest="per_paper_cmd", required=True)
+
+    pps = pp_sub.add_parser(
+        "sweep",
+        help="exploratory: per_paper on (production + budget-matched) vs off, paired "
+        "across a candidates grid",
+    )
+    pps.add_argument("--config", default=None, help="path to config.yaml (else discovery)")
+    pps.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="cap the pool to the first N papers (must match the fingerprint gen used)",
+    )
+    pps.add_argument(
+        "--per-paper-n",
+        type=int,
+        default=DEFAULT_PER_PAPER_N,
+        help=f"papers per scope, gold paper plus n-1 random others (default {DEFAULT_PER_PAPER_N})",
+    )
+    pps.add_argument(
+        "--candidates",
+        default=None,
+        help="comma-separated candidates grid (default 10,20,30,50)",
+    )
+    pps.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="scope-assignment seed (which other papers join each scope)",
+    )
+    pps.add_argument("--fresh", action="store_true", help=_FRESH_HELP)
+    pps.set_defaults(func=cmd_per_paper_sweep)
+
+    ppc = pp_sub.add_parser(
+        "confirm",
+        help="one candidates value, one variant, a fresh seed — the only per-paper mode "
+        "allowed to recommend",
+    )
+    ppc.add_argument("--config", default=None, help="path to config.yaml (else discovery)")
+    ppc.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="cap the pool to the first N papers (must match the fingerprint gen used)",
+    )
+    ppc.add_argument(
+        "--per-paper-n",
+        type=int,
+        default=DEFAULT_PER_PAPER_N,
+        help=f"papers per scope — must match the sweep run being confirmed "
+        f"(default {DEFAULT_PER_PAPER_N})",
+    )
+    ppc.add_argument(
+        "--candidates", type=int, required=True, help="the candidates value to confirm"
+    )
+    ppc.add_argument(
+        "--variant",
+        required=True,
+        choices=["production", "budget-matched"],
+        help="which claim to confirm: production's max(k, ...) floor, or the budget-matched "
+        "no-floor allocation",
+    )
+    ppc.add_argument(
+        "--seed",
+        type=int,
+        required=True,
+        help="a FRESH scope-assignment seed, never the sweep's own",
+    )
+    ppc.set_defaults(func=cmd_per_paper_confirm)
+
+    cp = sub.add_parser(
+        "comparative",
+        help="standalone: genuinely cross-paper synthesis questions (gold spans 2-6 "
+        "papers) — measures Searcher.search(per_paper=True) the way per-paper can't "
+        "(see comparative-eval-spec.md; not part of gen→run→screen→sweep→confirm, no "
+        "config.yaml output)",
+    )
+    cp_sub = cp.add_subparsers(dest="comparative_cmd", required=True)
+
+    cpg = cp_sub.add_parser(
+        "gen",
+        help="trial loop: spot cross-paper matches from outlines, write a question "
+        "needing every match, until target_p items or max_trials trials",
+    )
+    cpg.add_argument("--config", default=None, help="path to config.yaml (else discovery)")
+    cpg.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="smoke test: cap the pool to the first N papers (own fingerprint, no clobber)",
+    )
+    cpg.add_argument(
+        "--target-p",
+        type=int,
+        default=DEFAULT_TARGET_P,
+        help=f"target comparative item pool size, dev+test combined "
+        f"(default {DEFAULT_TARGET_P}, placeholder — see comparative-eval-spec.md)",
+    )
+    cpg.add_argument(
+        "--max-trials",
+        type=int,
+        default=DEFAULT_MAX_TRIALS,
+        help=f"hard cap on trials regardless of hit rate (default {DEFAULT_MAX_TRIALS})",
+    )
+    cpg.add_argument(
+        "--n-papers-min",
+        type=int,
+        default=DEFAULT_N_PAPERS_MIN,
+        help=f"fewest papers offered per trial (default {DEFAULT_N_PAPERS_MIN})",
+    )
+    cpg.add_argument(
+        "--n-papers-max",
+        type=int,
+        default=DEFAULT_N_PAPERS_MAX,
+        help=f"most papers offered per trial (default {DEFAULT_N_PAPERS_MAX})",
+    )
+    cpg.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="trial paper/size draws + the dev/test split coin flip",
+    )
+    cpg.set_defaults(func=cmd_comparative_gen)
+
+    cps = cp_sub.add_parser(
+        "sweep",
+        help="exploratory: per_paper on (production + budget-matched) vs off, paired "
+        "across a candidates grid, scored on the comparative dev split",
+    )
+    cps.add_argument("--config", default=None, help="path to config.yaml (else discovery)")
+    cps.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="cap the pool to the first N papers (must match the fingerprint gen used)",
+    )
+    cps.add_argument(
+        "--candidates",
+        default=None,
+        help="comma-separated candidates grid (default 10,20,30,50)",
+    )
+    cps.add_argument("--fresh", action="store_true", help=_FRESH_HELP)
+    cps.set_defaults(func=cmd_comparative_sweep)
+
+    cpc = cp_sub.add_parser(
+        "confirm",
+        help="one candidates value, one variant, scored on the held-out comparative "
+        "test split — the only comparative mode allowed to recommend",
+    )
+    cpc.add_argument("--config", default=None, help="path to config.yaml (else discovery)")
+    cpc.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="cap the pool to the first N papers (must match the fingerprint gen used)",
+    )
+    cpc.add_argument(
+        "--candidates", type=int, required=True, help="the candidates value to confirm"
+    )
+    cpc.add_argument(
+        "--variant",
+        required=True,
+        choices=["production", "budget-matched"],
+        help="which claim to confirm: production's max(k, ...) floor, or the budget-matched "
+        "no-floor allocation",
+    )
+    cpc.set_defaults(func=cmd_comparative_confirm)
 
     args = p.parse_args()
     args.func(args)

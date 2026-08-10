@@ -1,6 +1,6 @@
 ---
 name: calibrate-retrieval-config
-description: Run PaperLens's eval harness (`paperlens-eval`) to calibrate a loaded config's retrieval knobs — chunking, reranker, retrieval.candidates — against whatever pool of papers that config points at. Use when the user asks to calibrate, tune, optimize, or "dial in" a config for a pool, wants a config.yaml recommendation for their papers, says a config "feels off" for their pool, or asks to run/interpret `paperlens-eval gen/run/screen/sweep/confirm`. Works on any config path — never assume a specific config file or paper set. Do NOT use for: explaining how the harness itself is built or why the guards exist (that's docs/harness.md, read it directly), general RAG/agent code changes unrelated to config values, one-off metric questions with no intent to change the config, or a `paperlens-eval` command that crashed/errored — that's a bug to debug, not a calibration run to launch.
+description: Run PaperLens's eval harness (`paperlens-eval`) to calibrate a loaded config's retrieval knobs — chunking, reranker, retrieval.candidates — against whatever pool of papers that config points at, and to test whether the `per_paper` retrieval flag (no config.yaml field of its own) is worth turning on for that pool, on single-paper or genuinely cross-paper questions. Use when the user asks to calibrate, tune, optimize, or "dial in" a config for a pool, wants a config.yaml recommendation for their papers, says a config "feels off" for their pool, asks whether `per_paper`/per-paper-scoped retrieval helps, or asks to run/interpret any `paperlens-eval` command — `gen/run/screen/sweep/confirm`, `per-paper sweep/confirm`, or `comparative gen/sweep/confirm`. Works on any config path — never assume a specific config file or paper set. Do NOT use for: explaining how the harness itself is built or why the guards exist (that's docs/harness.md, read it directly), general RAG/agent code changes unrelated to config values, one-off metric questions with no intent to change the config, or a `paperlens-eval` command that crashed/errored — that's a bug to debug, not a calibration run to launch.
 ---
 
 # Calibrate a PaperLens config with the eval harness
@@ -108,12 +108,56 @@ chunking against the config's own embedder. An alternate-embedder arm needs the 
 supply a second, already-downloaded model (the harness won't fabricate a model download).
 If asked to calibrate embedding, say this plainly rather than silently doing nothing.
 
+## 🔬 `per_paper` and `comparative` — a different question, no config block
+
+`per_paper` (`Searcher.search(per_paper=True)`) has no `config.yaml` field — it's a per-call
+flag, not a retrieval knob — so these two command families answer *"turn it on or not,"* not
+*"what value."* Two separate, standalone tests exist because `per_paper`'s effect can only be
+measured against a question shape `gen`'s dev split doesn't contain — see docs/harness.md's
+`per-paper` and `comparative` sections for why:
+
+| | Tests | Eval set | First command |
+|---|---|---|---|
+| `per-paper sweep`/`confirm` | `per_paper` on single-paper-lookup questions crowded into a random multi-paper scope | Reuses `gen`'s dev split — no separate `gen` step | `per-paper sweep --per-paper-n 4 --candidates 10,20,30,50` |
+| `comparative gen`/`sweep`/`confirm` | `per_paper` on questions whose gold genuinely spans 2+ papers | Its own `comparative gen`, separate dev/test split | `comparative gen --target-p 5 --max-trials 20` (**pilot only** — see below) |
+
+**Same cost discipline as chunking, for a different reason.** `per-paper sweep` is **the most
+expensive command in the harness** (`n_questions × up to 3 arms × |candidates grid|`, each
+on-arm point running `n_papers` separate retrievals) — background it exactly like a chunking
+screen, state the pool size and grid up front. `comparative gen` costs real LLM calls, not just
+extra retrieval, and its prompt is genuinely unvalidated on any new pool — **always run the
+cheap pilot first** (`--target-p 5 --max-trials 20`), read a sample of the generated questions
+yourself (`sections[].body` is kept in `dev.jsonl` exactly so you don't have to re-open the
+papers) to confirm they genuinely need every paper shown rather than being answerable from just
+one, *then* background the full run at the defaults. Don't skip straight to `target_p=40,
+max_trials=200` on a pool this hasn't been tried on.
+
+**`comparative confirm`'s hard floor.** `comparative confirm` refuses to print `"Confirmed"`
+below `n_clusters < COMPARATIVE_MIN_CLUSTERS` (`8`) regardless of what the delta's CI says —
+stricter than the generic `n_clusters < 25` warning from Law 2, because a small pool's
+cross-paper item count clusters even thinner than its single-paper one. State this plainly
+("too few clusters to confirm anything, read as anecdotal") rather than reporting the raw delta
+as a finding.
+
+**Split-seed gotcha in `comparative gen`.** `--seed` drives both the trial loop's paper sampling
+and the dev/test coin-flip split — a bad seed can produce a badly skewed split (seen in
+practice: seed `0` gave 2 test items out of 40 where 10 was expected) purely by chance, not a
+bug. Check `<fingerprint>.comparative.meta.json`'s `n_test` against `n_items × test_frac` after
+any `comparative gen` run; if it's off by more than a couple of items, try a different `--seed`
+before trusting `comparative confirm` on that split.
+
+**Deliverable is a recommendation, not a block.** Neither path ends in a `config.yaml` snippet —
+there's no field to set. End with a plain-language answer ("turn `per_paper` on for this pool" /
+"leave it off, no measurable benefit") plus the same ceiling/MDD/`n_clusters`-style resolution
+caveat Law 2 requires elsewhere.
+
 ## Delivering the result
 
 End with the emitted `config.yaml` block from `confirm` (paste-ready as-is — don't
 hand-edit it) plus a short caveat line carrying forward the harness's own known limits
 (estimand gap: scored on whole questions, production retrieves on decomposed sub-queries)
-— one line, not the full limits section from the docs.
+— one line, not the full limits section from the docs. (For `per_paper`/`comparative`, there's
+no block — see above instead.)
 
 ## Before delivering — a silent self-check, not a printed checklist
 
@@ -135,6 +179,11 @@ gap, don't disclaim it.
 5. **(Delivering the result)** Is the `config.yaml` block copied verbatim from `confirm`'s
    own output — not retyped or paraphrased — with the estimand-gap caveat included as one
    line?
+6. **(`per_paper`/`comparative` paths)** If a `per-paper`/`comparative` run happened, was its
+   cost stated up front (background for `per-paper sweep`, pilot-first for `comparative gen`),
+   was the split checked (`n_test` vs. expected `test_frac` share) before trusting
+   `comparative confirm`, and does the final answer respect `COMPARATIVE_MIN_CLUSTERS` rather
+   than reporting a raw delta as decision-grade?
 
 Any "no" means the flow isn't done — go back and close that gap before presenting a result.
 
@@ -171,3 +220,15 @@ Any "no" means the flow isn't done — go back and close that gap before present
   docs/harness.md's Metrics section, no tuning run launched.
 - **Out-of-scope: unrelated agent/RAG code change** → skill stays out of the way; that's
   a separate task.
+- **`per_paper` question.** "Does turning on per-paper retrieval help this pool?" → routes to
+  `per-paper sweep` (background, cost stated up front — the most expensive command in the
+  harness) → `per-paper confirm` with a fresh required seed on the point the user picks →
+  plain-language recommendation, no config block.
+- **Cross-paper question.** "Does per_paper help with genuinely multi-paper questions?" →
+  `comparative gen` pilot first (`--target-p 5 --max-trials 20`), the generated questions
+  read by eye for genuine cross-paper dependence, before the full run at defaults →
+  `comparative sweep` → `comparative confirm`. A result with `n_clusters <
+  COMPARATIVE_MIN_CLUSTERS` is reported as anecdotal, never as "confirmed."
+- **Split sanity check.** After any `comparative gen` run, `n_test` in `meta.json` is compared
+  against the expected `test_frac` share before trusting `comparative confirm` — a skewed
+  split (e.g., 2 of 40) is treated as a reason to retry with a different `--seed`, not ignored.

@@ -660,6 +660,73 @@ def test_per_paper_prevents_one_paper_starving_another(make_config):
     assert len(per_paper) == 3
 
 
+class _EvenlyRelevantEmbedder:
+    """paper-x and paper-y each contribute one chunk at comparable cosine similarity to
+    the query, and `candidates` is generous relative to the 2-chunk corpus — no volume
+    imbalance, no budget scarcity, nothing for per_paper to fix. The control case for
+    `test_per_paper_prevents_one_paper_starving_another`: proves per_paper doesn't
+    fabricate a difference (or drop/reorder a chunk) when there's no crowding to begin
+    with, not just that it helps when there is."""
+
+    _VECS = {
+        "orig": [1.0, 0.0],
+        "x1_text": [1.0, 0.0],  # cos(orig) = 1.0
+        "y1_text": [0.9, 0.1],  # cos(orig) ~= 0.994 -- close, not starved by paper-x
+    }
+
+    def name(self) -> str:
+        return "evenly-relevant"
+
+    def __call__(self, input: list[str]) -> list[list[float]]:
+        return [self._VECS[t] for t in input]
+
+
+def test_per_paper_no_effect_when_nothing_is_crowded(make_config):
+    cfg = make_config()
+    embedder = _EvenlyRelevantEmbedder()
+    collection = open_collection(cfg.paths.rag_db, cfg.collection, embedder_name=embedder.name())
+    docs = [
+        ("x1", "x1_text", "paper-x", "S1"),
+        ("y1", "y1_text", "paper-y", "S1"),
+    ]
+    metas = [
+        {
+            "paper_id": paper_id,
+            "breadcrumb": f"Paper > {section}",
+            "section_title": section,
+            "section_number": "1",
+            "body": text,
+        }
+        for _, text, paper_id, section in docs
+    ]
+    collection.upsert(
+        ids=[doc_id for doc_id, _, _, _ in docs],
+        embeddings=embedder([text for _, text, _, _ in docs]),
+        documents=[text for _, text, _, _ in docs],
+        metadatas=metas,
+    )
+    searcher = Searcher(db_dir=cfg.paths.rag_db, collection=cfg.collection, embedder=embedder)
+
+    whole_scope = searcher.search(
+        "orig", max_k=2, candidates=10, paper_ids=["paper-x", "paper-y"], rerank=False
+    ).results
+    per_paper = searcher.search(
+        "orig",
+        max_k=2,
+        candidates=10,
+        paper_ids=["paper-x", "paper-y"],
+        per_paper=True,
+        rerank=False,
+    ).results
+
+    # Same papers, same scores (cosine similarity is a property of the chunk, not of
+    # which scope structure fetched it) -- per_paper changes nothing here, as it shouldn't.
+    assert {r.paper_id for r in whole_scope} == {"paper-x", "paper-y"}
+    assert [(r.paper_id, r.score) for r in whole_scope] == [
+        (r.paper_id, r.score) for r in per_paper
+    ]
+
+
 class _UnsortedPoolEmbedder:
     """paper-a's only chunk scores lower than paper-b's, but paper-a is fetched first (it's
     earlier in paper_ids) — pools in ascending-score order unless per_paper explicitly
