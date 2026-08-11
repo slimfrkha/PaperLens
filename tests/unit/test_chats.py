@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from server.chats import ChatStore, generate_name
@@ -255,6 +257,47 @@ def test_try_acquire_is_independent_per_chat(tmp_path):
     store = ChatStore(str(tmp_path))
     assert store.try_acquire("c1") is True
     assert store.try_acquire("c2") is True  # unrelated chat, not blocked
+
+
+def test_stop_event_is_none_when_not_in_flight(tmp_path):
+    store = ChatStore(str(tmp_path))
+    assert store.stop_event("c1") is None
+
+
+def test_stop_event_available_after_try_acquire(tmp_path):
+    store = ChatStore(str(tmp_path))
+    store.try_acquire("c1")
+    assert isinstance(store.stop_event("c1"), threading.Event)
+
+
+def test_try_acquire_gives_a_fresh_event_each_turn(tmp_path):
+    # A stale stop from a previous (finished) turn on this chat must not leak into the
+    # next one — otherwise a fresh turn would look pre-stopped from its first checkpoint.
+    store = ChatStore(str(tmp_path))
+    store.try_acquire("c1")
+    first = store.stop_event("c1")
+    store.release("c1")
+    store.try_acquire("c1")
+    assert store.stop_event("c1") is not first
+
+
+def test_request_stop_sets_the_inflight_event(tmp_path):
+    store = ChatStore(str(tmp_path))
+    store.try_acquire("c1")
+    assert store.request_stop("c1") is True
+    assert store.stop_event("c1").is_set()
+
+
+def test_request_stop_returns_false_when_not_in_flight(tmp_path):
+    store = ChatStore(str(tmp_path))
+    assert store.request_stop("c1") is False
+
+
+def test_release_clears_the_stop_event(tmp_path):
+    store = ChatStore(str(tmp_path))
+    store.try_acquire("c1")
+    store.release("c1")
+    assert store.stop_event("c1") is None
 
 
 def test_generate_name_falls_back_when_llm_errors(monkeypatch):

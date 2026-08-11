@@ -14,7 +14,7 @@ import {
   Tooltip,
 } from "@mantine/core";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { IconCheck, IconEdit, IconSend, IconSidebar, IconX } from "../components/Icons";
+import { IconCheck, IconEdit, IconSend, IconSidebar, IconStop, IconX } from "../components/Icons";
 import {
   chat,
   createChat,
@@ -24,6 +24,7 @@ import {
   getTags,
   listChats,
   setFeedback,
+  stopChat,
   type ChatMessage,
   type ChatSummary,
   type Citation,
@@ -67,6 +68,12 @@ export default function ChatPage() {
   const [editDraft, setEditDraft] = useState("");
   const loadedId = useRef<string | null>(null); // which chat's turns are in state
   const bottomRef = useRef<HTMLDivElement>(null);
+  // The in-flight request's abort handle + the chat_id it's running against — refs, not
+  // state, because Stop needs the exact values runTurn started with (chatId's own state
+  // can lag a beat behind on a brand-new chat, right after navigate() but before the
+  // route param re-renders).
+  const abortRef = useRef<AbortController | null>(null);
+  const activeChatIdRef = useRef<string | null>(null);
 
   const refreshSessions = () => listChats().then(setSessions);
 
@@ -182,6 +189,9 @@ export default function ChatPage() {
       { role: "assistant", content: "", streaming: true },
     ]);
     setBusy(true);
+    const controller = new AbortController();
+    abortRef.current = controller;
+    activeChatIdRef.current = id;
     try {
       await chat(
         history,
@@ -199,11 +209,25 @@ export default function ChatPage() {
           onDone: () => patchLast((t) => ({ ...t, streaming: false })),
         },
         editIndex,
+        controller.signal,
       );
     } finally {
       setBusy(false);
       refreshSessions();
     }
+  }
+
+  // Stops the in-flight turn: aborts our side of the SSE fetch immediately (so the
+  // composer unlocks right away, no waiting on the backend) and tells the backend to stop
+  // generating too, at its next checkpoint — otherwise the abandoned turn keeps running
+  // and holds the chat's single-flight lock until it finishes on its own, so a message
+  // sent right after Stop would 409 for however long that takes.
+  function stop() {
+    abortRef.current?.abort();
+    const chatId = activeChatIdRef.current;
+    if (chatId) stopChat(chatId).catch((e) => console.error("Failed to stop generation", e));
+    patchLast((t) => ({ ...t, streaming: false }));
+    setBusy(false);
   }
 
   async function send() {
@@ -315,16 +339,21 @@ export default function ChatPage() {
             }
           }}
         />
-        <ActionIcon
-          size={38}
-          radius="md"
-          onClick={() => send()}
-          loading={busy}
-          disabled={!input.trim()}
-          aria-label="Send"
-        >
-          <IconSend size={18} />
-        </ActionIcon>
+        {busy ? (
+          <ActionIcon size={38} radius="md" onClick={stop} aria-label="Stop generating">
+            <IconStop size={16} />
+          </ActionIcon>
+        ) : (
+          <ActionIcon
+            size={38}
+            radius="md"
+            onClick={() => send()}
+            disabled={!input.trim()}
+            aria-label="Send"
+          >
+            <IconSend size={18} />
+          </ActionIcon>
+        )}
       </Group>
     </Box>
   );

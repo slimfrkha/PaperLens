@@ -44,7 +44,17 @@ class _RefStartAgent:
     def __init__(self, *a, **k):
         pass
 
-    def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0, per_paper=False):
+    def run(
+        self,
+        messages,
+        tags,
+        papers,
+        on_text,
+        on_trace=None,
+        ref_start=0,
+        per_paper=False,
+        stop_check=None,
+    ):
         ref = f"r{ref_start + 1}"
         text = f"See [{ref}]."
         on_text(text)
@@ -57,7 +67,17 @@ class _EchoAgent:
     def __init__(self, *a, **k):
         pass
 
-    def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0, per_paper=False):
+    def run(
+        self,
+        messages,
+        tags,
+        papers,
+        on_text,
+        on_trace=None,
+        ref_start=0,
+        per_paper=False,
+        stop_check=None,
+    ):
         on_text("answer")
         return "answer", [], Usage(10, 5)
 
@@ -131,7 +151,17 @@ def test_chat_streams_token_citations_done(make_config, patch_agent_seam):
         def __init__(self, *a, **k):
             pass
 
-        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0, per_paper=False):
+        def run(
+            self,
+            messages,
+            tags,
+            papers,
+            on_text,
+            on_trace=None,
+            ref_start=0,
+            per_paper=False,
+            stop_check=None,
+        ):
             on_text("foo")
             on_text("bar")
             if on_trace:
@@ -166,7 +196,17 @@ def test_chat_per_paper_true_reaches_the_agent(make_config, patch_agent_seam):
         def __init__(self, *a, **k):
             pass
 
-        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0, per_paper=False):
+        def run(
+            self,
+            messages,
+            tags,
+            papers,
+            on_text,
+            on_trace=None,
+            ref_start=0,
+            per_paper=False,
+            stop_check=None,
+        ):
             received["per_paper"] = per_paper
             on_text("ok")
             return "ok", [], Usage(10, 5)
@@ -195,7 +235,17 @@ def test_chat_without_per_paper_field_defaults_false(make_config, patch_agent_se
         def __init__(self, *a, **k):
             pass
 
-        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0, per_paper=False):
+        def run(
+            self,
+            messages,
+            tags,
+            papers,
+            on_text,
+            on_trace=None,
+            ref_start=0,
+            per_paper=False,
+            stop_check=None,
+        ):
             received["per_paper"] = per_paper
             on_text("ok")
             return "ok", [], Usage(10, 5)
@@ -217,7 +267,17 @@ def test_chat_streams_usage_event_and_persists_it(make_config, patch_agent_seam)
         def __init__(self, *a, **k):
             pass
 
-        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0, per_paper=False):
+        def run(
+            self,
+            messages,
+            tags,
+            papers,
+            on_text,
+            on_trace=None,
+            ref_start=0,
+            per_paper=False,
+            stop_check=None,
+        ):
             on_text("answer")
             return "answer", [], Usage(42, 7)
 
@@ -439,7 +499,17 @@ def test_chat_route_rejects_concurrent_turn_on_same_chat(make_config, patch_agen
         def __init__(self, *a, **k):
             pass
 
-        def run(self, messages, tags, papers, on_text, on_trace=None, ref_start=0, per_paper=False):
+        def run(
+            self,
+            messages,
+            tags,
+            papers,
+            on_text,
+            on_trace=None,
+            ref_start=0,
+            per_paper=False,
+            stop_check=None,
+        ):
             started.set()
             assert release_agent.wait(timeout=5), "test deadlocked waiting for release"
             on_text("answer")
@@ -472,6 +542,84 @@ def test_chat_route_rejects_concurrent_turn_on_same_chat(make_config, patch_agen
     t.join(timeout=5)
     assert results["first"].status_code == 200
     assert "done" in results["first"].text
+
+
+def test_stop_route_signals_stop_check_and_releases_the_guard(make_config, patch_agent_seam):
+    # The /stop route must reach the in-flight turn's stop_check (not just be a no-op),
+    # and letting the agent return promptly on it must release the single-flight guard —
+    # otherwise a follow-up request on the same chat would be stuck behind a stale 409
+    # for as long as the (now-abandoned) turn takes to finish on its own.
+    import threading
+    import time
+
+    started = threading.Event()
+
+    class PollingFakeAgent:
+        def __init__(self, *a, **k):
+            pass
+
+        def run(
+            self,
+            messages,
+            tags,
+            papers,
+            on_text,
+            on_trace=None,
+            ref_start=0,
+            per_paper=False,
+            stop_check=None,
+        ):
+            started.set()
+            on_text("partial")
+            deadline = time.monotonic() + 5
+            while not (stop_check and stop_check()):
+                assert time.monotonic() < deadline, "test deadlocked waiting for stop_check"
+                time.sleep(0.01)
+            return "partial", [], Usage(10, 5)
+
+    patch_agent_seam(chat_agent=PollingFakeAgent)
+
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    client = TestClient(create_app(cfg))
+
+    chat_id = client.post("/api/chats").json()["id"]
+    results: dict = {}
+
+    def first():
+        results["first"] = client.post(
+            "/api/chat", json={"messages": [{"role": "user", "content": "q"}], "chat_id": chat_id}
+        )
+
+    t = threading.Thread(target=first)
+    t.start()
+    assert started.wait(timeout=5), "first request never reached the agent"
+
+    stop_resp = client.post(f"/api/chats/{chat_id}/stop")
+    assert stop_resp.status_code == 200
+    assert stop_resp.json() == {"stopped": True}
+
+    t.join(timeout=5)
+    assert results["first"].status_code == 200
+    saved = client.get(f"/api/chats/{chat_id}").json()
+    assert saved["messages"][-1] == {"role": "assistant", "content": "partial"}
+
+    # The turn actually finished (not force-unlocked out from under it) -> a new
+    # request on the same chat isn't rejected.
+    second = client.post(
+        "/api/chat", json={"messages": [{"role": "user", "content": "q2"}], "chat_id": chat_id}
+    )
+    assert second.status_code != 409
+
+
+def test_stop_route_no_op_when_chat_not_in_flight(make_config, patch_agent_seam):
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    client = TestClient(create_app(cfg))
+
+    resp = client.post("/api/chats/nonexistent/stop")
+    assert resp.status_code == 200
+    assert resp.json() == {"stopped": False}
 
 
 def test_feedback_route_sets_clears_and_rejects_invalid_index(make_config, patch_agent_seam):

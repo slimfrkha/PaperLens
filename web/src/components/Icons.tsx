@@ -58,6 +58,12 @@ export const IconSend = (p: IconProps) => (
   </Svg>
 );
 
+export const IconStop = (p: IconProps) => (
+  <Svg {...p} fill="currentColor">
+    <rect x="6" y="6" width="12" height="12" rx="2" />
+  </Svg>
+);
+
 export const IconSpark = (p: IconProps) => (
   <Svg {...p}>
     <path d="M12 3l1.6 4.6L18 9l-4.4 1.4L12 15l-1.6-4.6L6 9l4.4-1.4z" />

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -195,6 +196,170 @@ def test_openai_run_tools_stops_at_max_rounds_without_a_final_answer(monkeypatch
     assert client.completions.calls == 3  # queried exactly max_rounds times, not more
     assert len(executed) == 3  # every round's tool call still ran
     assert out == ""  # no round ever produced visible text — nothing to fabricate as an answer
+
+
+# ---- stop_check: interrupt a streaming turn early (chat "stop" button) ------
+
+
+def test_openai_run_tools_stop_check_cuts_the_stream_short(monkeypatch):
+    # A stop mid-round returns whatever text streamed before the check fired, and never
+    # processes the chunks after it.
+    client = _FakeClientSeq(
+        [[_chunk(content="Hello "), _chunk(content="world"), _chunk(content="!")]]
+    )
+    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
+    monkeypatch.setattr(backend, "_client", lambda: client)
+
+    seen = {"n": 0}
+
+    def stop_check():
+        seen["n"] += 1
+        return seen["n"] > 1  # let the round start, stop right after the first chunk
+
+    texts = []
+    out, _usage = backend.run_tools(
+        system="sys",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
+        execute=lambda name, args: "result",
+        on_text=texts.append,
+        stop_check=stop_check,
+    )
+
+    assert out == "Hello "
+    assert texts == ["Hello "]
+
+
+def test_openai_run_tools_stop_check_skips_the_next_round(monkeypatch):
+    # A stop that fires after a tool-call round finishes must not start another round,
+    # even though the model would keep going.
+    client = _FakeClientSeq(
+        [
+            [_chunk(tool_call=_tool_call(0, "call_1", "search_papers", '{"query": "mla"}'))],
+            [_chunk(content="unreachable")],
+        ]
+    )
+    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
+    monkeypatch.setattr(backend, "_client", lambda: client)
+
+    # A real Event, not a call-counting fake — is_set() is idempotent, so it doesn't
+    # matter exactly how many times (or when within a round) run_tools happens to poll
+    # it, only whether it was set before round 2's top-of-loop check.
+    stop_event = threading.Event()
+    executed = []
+
+    def execute(name, args):
+        executed.append((name, args))
+        stop_event.set()  # Stop clicked right as round 1's tool call runs
+        return "passage r1"
+
+    out, _usage = backend.run_tools(
+        system="sys",
+        messages=[{"role": "user", "content": "what is MLA?"}],
+        tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
+        execute=execute,
+        stop_check=stop_event.is_set,
+    )
+
+    assert executed == [("search_papers", {"query": "mla"})]  # round 1's tool call still ran
+    assert client.completions.calls == 1  # round 2 never fired
+    assert out == ""  # round 1 produced no visible text
+
+
+def test_anthropic_run_tools_stop_check_cuts_the_stream_short(monkeypatch):
+    # Stopping mid-stream must not call get_final_message() — it would block until the
+    # rest of the (now-abandoned) response finishes, defeating the point of stopping.
+    class _Delta:
+        def __init__(self, text):
+            self.type = "text_delta"
+            self.text = text
+
+    class _Event:
+        def __init__(self, text):
+            self.type = "content_block_delta"
+            self.delta = _Delta(text)
+
+    class _Stream:
+        def __init__(self, events):
+            self._events = events
+
+        def __iter__(self):
+            return iter(self._events)
+
+        def get_final_message(self):
+            raise AssertionError("get_final_message() must not be called when stopped early")
+
+    class _StreamCM:
+        def __enter__(self):
+            return _Stream([_Event("Hello "), _Event("world"), _Event("!")])
+
+        def __exit__(self, *exc):
+            return False
+
+    class _Messages:
+        def stream(self, **kwargs):
+            return _StreamCM()
+
+    class _Client:
+        messages = _Messages()
+
+    backend = AnthropicBackend(AnthropicSpec())
+    monkeypatch.setattr(backend, "_client", lambda: _Client())
+
+    seen = {"n": 0}
+
+    def stop_check():
+        seen["n"] += 1
+        return seen["n"] > 1  # let the round start, stop right after the first delta
+
+    texts = []
+    out, _usage = backend.run_tools(
+        system="sys",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
+        execute=lambda name, args: "result",
+        on_text=texts.append,
+        stop_check=stop_check,
+    )
+
+    assert out == "Hello "
+    assert texts == ["Hello "]
+
+
+def test_gemini_run_tools_stop_check_cuts_the_stream_short(monkeypatch):
+    pytest.importorskip("google.genai")
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+
+    def _text_chunk(text):
+        part = SimpleNamespace(function_call=None, thought=False, text=text)
+        candidate = SimpleNamespace(content=SimpleNamespace(parts=[part]))
+        return SimpleNamespace(candidates=[candidate], usage_metadata=None)
+
+    class _FakeModels:
+        def generate_content_stream(self, **kwargs):
+            return iter([_text_chunk("Hello "), _text_chunk("world"), _text_chunk("!")])
+
+    backend = GeminiBackend(GeminiSpec())
+    monkeypatch.setattr(backend, "_client", lambda: SimpleNamespace(models=_FakeModels()))
+
+    seen = {"n": 0}
+
+    def stop_check():
+        seen["n"] += 1
+        return seen["n"] > 1  # let the round start, stop right after the first chunk
+
+    texts = []
+    out, _usage = backend.run_tools(
+        system="sys",
+        messages=[{"role": "user", "content": "q"}],
+        tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
+        execute=lambda name, args: "result",
+        on_text=texts.append,
+        stop_check=stop_check,
+    )
+
+    assert out == "Hello "
+    assert texts == ["Hello "]
 
 
 # ---- _ThinkTagStripper: direct unit tests (no fake LLM client needed) -------

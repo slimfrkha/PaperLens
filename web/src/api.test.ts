@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { addPaper, chat, removePaper, setFeedback } from "./api";
+import { addPaper, chat, removePaper, setFeedback, stopChat } from "./api";
 
 function mockStreamResponse(sse: string): Response {
   let sent = false;
@@ -152,6 +152,90 @@ describe("chat", () => {
 
     expect(onError).toHaveBeenCalledWith("a turn is already in progress for this chat");
     expect(onDone).toHaveBeenCalledOnce();
+  });
+
+  it("passes the given signal to fetch", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockStreamResponse("event: done\ndata: \n\n"));
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+
+    await chat(
+      [],
+      [],
+      [],
+      false,
+      "c1",
+      { onToken: vi.fn(), onCitations: vi.fn() },
+      0,
+      controller.signal,
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/chat",
+      expect.objectContaining({ signal: controller.signal }),
+    );
+  });
+
+  it("resolves silently (no onError/onDone) when fetch itself is aborted", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new DOMException("aborted", "AbortError")));
+
+    const onError = vi.fn();
+    const onDone = vi.fn();
+    await chat([], [], [], false, "c1", {
+      onToken: vi.fn(),
+      onCitations: vi.fn(),
+      onError,
+      onDone,
+    });
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(onDone).not.toHaveBeenCalled();
+  });
+
+  it("resolves silently (no onError/onDone) when the reader is aborted mid-stream", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        body: {
+          getReader() {
+            return {
+              read: () => Promise.reject(new DOMException("aborted", "AbortError")),
+            };
+          },
+        },
+      } as unknown as Response),
+    );
+
+    const onError = vi.fn();
+    const onDone = vi.fn();
+    await chat([], [], [], false, "c1", {
+      onToken: vi.fn(),
+      onCitations: vi.fn(),
+      onError,
+      onDone,
+    });
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(onDone).not.toHaveBeenCalled();
+  });
+});
+
+describe("stopChat", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("POSTs to /api/chats/{id}/stop and returns the parsed body", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ stopped: true }),
+    } as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await stopChat("c1");
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/chats/c1/stop", { method: "POST" });
+    expect(result).toEqual({ stopped: true });
   });
 });
 

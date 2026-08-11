@@ -9,6 +9,8 @@ Thought → Action → Observation trace.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from rag.config import Config
 from rag.faithfulness import (
     FaithfulnessChecker,
@@ -120,6 +122,7 @@ class ChatAgent:
         on_trace=None,
         ref_start: int = 0,
         per_paper: bool = False,
+        stop_check: Callable[[], bool] | None = None,
     ) -> tuple[str, list[dict], Usage]:
         """Returns (answer_text, citations[], usage).
 
@@ -139,6 +142,11 @@ class ChatAgent:
         `per_paper` (see `Searcher.search`) applies uniformly to every `search_papers`
         call made during this turn's ReAct loop — the user toggles it per message, not
         the model per call.
+
+        `stop_check`, if given, is polled by the LLM backend between/within streaming
+        rounds; once it returns True the backend returns whatever text has streamed so
+        far instead of continuing — the caller (chat_turn.run_turn) still persists that
+        partial text as a normal answer, same as if the model had finished on its own.
         """
         tag_ids = self.manifest.paper_ids_for_tags(tags) if tags else None
         selected = list(papers) if papers else None
@@ -230,6 +238,7 @@ class ChatAgent:
             on_text=on_text,
             on_reasoning=lambda t: trace({"type": "thought", "text": t}),
             max_rounds=self.cfg.retrieval.max_rounds,
+            stop_check=stop_check,
         )
         if self.cfg.faithfulness.enabled and registry:
             self._check_faithfulness(text, registry, bodies)

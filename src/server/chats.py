@@ -44,7 +44,7 @@ class ChatStore:
         self.dir = Path(directory)
         self.dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._inflight: set[str] = set()
+        self._inflight: dict[str, threading.Event] = {}
 
     def try_acquire(self, chat_id: str) -> bool:
         """Claim a chat for one in-flight turn. Returns False if one is already running,
@@ -53,12 +53,30 @@ class ChatStore:
         with self._lock:
             if chat_id in self._inflight:
                 return False
-            self._inflight.add(chat_id)
+            self._inflight[chat_id] = threading.Event()
             return True
 
     def release(self, chat_id: str) -> None:
         with self._lock:
-            self._inflight.discard(chat_id)
+            self._inflight.pop(chat_id, None)
+
+    def stop_event(self, chat_id: str) -> threading.Event | None:
+        """The in-flight turn's stop signal, or None if no turn is currently running for
+        this chat. The route handler grabs this right after a successful `try_acquire`
+        and threads it down into the LLM backend's streaming loop as `stop_check`;
+        `request_stop` (below) is what sets it."""
+        with self._lock:
+            return self._inflight.get(chat_id)
+
+    def request_stop(self, chat_id: str) -> bool:
+        """Signal the in-flight turn for `chat_id` to stop generating at its next
+        checkpoint. Returns False if no turn is currently running (e.g. it already
+        finished) — the caller can treat that as a harmless no-op, not an error."""
+        event = self.stop_event(chat_id)
+        if event is None:
+            return False
+        event.set()
+        return True
 
     def _path(self, chat_id: str) -> Path:
         return self.dir / f"{chat_id}.json"

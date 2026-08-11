@@ -464,6 +464,75 @@ describe("ChatPage per-paper toggle", () => {
   });
 });
 
+describe("ChatPage stop generating", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("clicking Stop unlocks the composer immediately without waiting for the stream", async () => {
+    // The stream never resolves on its own (reader.read() hangs forever) — Stop must
+    // still flip the UI back, proving it doesn't wait on the backend.
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/chat") {
+        return Promise.resolve({
+          status: 200,
+          body: { getReader: () => ({ read: () => new Promise(() => {}) }) },
+        } as unknown as Response);
+      }
+      if (url === "/api/chats/test-id/stop" && init?.method === "POST") {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ stopped: true }),
+        } as Response);
+      }
+      const body =
+        url === "/api/chats/test-id"
+          ? chatSession
+          : url.startsWith("/api/tags") ||
+              url.startsWith("/api/papers") ||
+              url.startsWith("/api/chats")
+            ? []
+            : {};
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+    await screen.findByText(/regression marker text/i);
+
+    fireEvent.change(screen.getByPlaceholderText("Ask about a paper or a concept…"), {
+      target: { value: "a question" },
+    });
+    fireEvent.click(screen.getByLabelText("Send"));
+
+    const stopButton = await screen.findByLabelText("Stop generating");
+    expect(screen.queryByLabelText("Send")).not.toBeInTheDocument();
+    // Editing the just-sent user turn is locked out while a turn is in flight.
+    expect(screen.getByLabelText("Edit message")).toBeDisabled();
+
+    fireEvent.click(stopButton);
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/chats/test-id/stop",
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    // Composer is unlocked right away — no waiting on the (still-hanging) stream.
+    expect(await screen.findByLabelText("Send")).toBeInTheDocument();
+    expect(screen.getByLabelText("Edit message")).not.toBeDisabled();
+  });
+});
+
 describe("ChatPage edit-and-resume", () => {
   afterEach(() => {
     vi.unstubAllGlobals();

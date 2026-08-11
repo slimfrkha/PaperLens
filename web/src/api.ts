@@ -197,8 +197,13 @@ export interface ChatHandlers {
   onDone?: () => void;
 }
 
+const isAbortError = (e: unknown) => e instanceof DOMException && e.name === "AbortError";
+
 /** POST /api/chat and parse the SSE stream (token / citations / trace / usage / meta / error / done).
- *  `editIndex` truncates the stored chat back to that user turn before resuming from it. */
+ *  `editIndex` truncates the stored chat back to that user turn before resuming from it.
+ *  `signal`, if given, aborts the request (e.g. the chat page's Stop button) — an abort
+ *  ends the stream silently (no onError/onDone) rather than throwing, since the caller
+ *  already knows it stopped things itself. */
 export async function chat(
   messages: ChatMessage[],
   tags: string[],
@@ -207,19 +212,27 @@ export async function chat(
   chatId: string | null,
   h: ChatHandlers,
   editIndex?: number,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const resp = await fetch("/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      messages,
-      tags,
-      papers,
-      per_paper: perPaper,
-      chat_id: chatId,
-      edit_index: editIndex ?? null,
-    }),
-  });
+  let resp: Response;
+  try {
+    resp = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messages,
+        tags,
+        papers,
+        per_paper: perPaper,
+        chat_id: chatId,
+        edit_index: editIndex ?? null,
+      }),
+      signal,
+    });
+  } catch (e) {
+    if (isAbortError(e)) return;
+    throw e;
+  }
   if (resp.status === 409) {
     const body = await resp.json().catch(() => ({}));
     h.onError?.(body.error ?? "a turn is already in progress for this chat");
@@ -243,7 +256,14 @@ export async function chat(
   };
 
   while (true) {
-    const { done, value } = await reader.read();
+    let done: boolean;
+    let value: Uint8Array | undefined;
+    try {
+      ({ done, value } = await reader.read());
+    } catch (e) {
+      if (isAbortError(e)) return;
+      throw e;
+    }
     if (done) break;
     // Normalize CRLF (sse-starlette frames with \r\n) so framing is consistent.
     buf = (buf + decoder.decode(value, { stream: true })).replace(/\r\n/g, "\n");
@@ -260,3 +280,10 @@ export async function chat(
     }
   }
 }
+
+/** POST /api/chats/{chatId}/stop — signal the in-flight turn (if any) to stop generating
+ *  at its next checkpoint. `stopped: false` just means nothing was running; not an error. */
+export const stopChat = (chatId: string) =>
+  fetch(`/api/chats/${encodeURIComponent(chatId)}/stop`, { method: "POST" }).then(
+    j<{ stopped: boolean }>,
+  );

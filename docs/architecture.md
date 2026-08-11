@@ -338,3 +338,37 @@ is documented in `src/rag/__init__.py`. Keeping it acyclic is a maintained invar
   `release`) rejects a second `/api/chat` turn on the same `chat_id` with 409 while one is
   in flight, so the truncate-then-append can't interleave with a concurrent request and
   read a half-mutated history.
+- **Stopping a turn cancels generation, it doesn't just hide it.** `try_acquire` also hands
+  back a `threading.Event` for the turn (`ChatStore.stop_event`); `POST
+  /api/chats/{id}/stop` sets it, and it's threaded all the way down as `stop_check` into
+  the LLM backend's streaming loop (`LLMBackend.run_tools`), which polls it between/within
+  rounds and returns early with whatever text streamed so far. That partial text is
+  persisted exactly like a normal answer — `chat_turn.run_turn` has no special-casing for
+  it. This matters because the guard above is only released once the turn's worker thread
+  actually returns: force-releasing it early while the LLM call kept running in the
+  background would let an abandoned turn's `append_turn` race a later one on the same
+  chat file, the exact interleaving the guard exists to prevent. The frontend also aborts
+  its own SSE fetch on Stop so the composer unlocks immediately rather than waiting on the
+  backend's next checkpoint.
+- **A polled `stop_check` can't always make the blocked call return, so the caller stops
+  waiting on it instead of depending on that.** `LLMBackend.run_tools` polls `stop_check`
+  between/within streaming chunks and returns early with whatever text streamed so
+  far — cheap, and it's all that's needed whenever chunks are actually arriving. But it
+  only catches a stop that lands between chunks that *did* arrive: a thread blocked on a
+  network read producing nothing at all (a local model's prefill on a long RAG prompt can
+  block for tens of seconds before its first token) never gets a chance to poll. An
+  earlier version tried to fix that by having a watcher thread force-close the connection
+  from outside — cut, because whether closing a socket from another thread actually
+  unblocks a concurrent blocked read is SDK/platform-dependent, not a portable guarantee,
+  so it bought real complexity (a watcher thread and connection-error-vs-real-error
+  disambiguation in all three backends) for an unverified win, and it didn't cover being
+  stuck in retrieval/reranking at all. `chat_turn._run_agent` is the actual guarantee
+  instead: it runs `ChatAgent.run()` in a helper thread and polls `stop_check` from the
+  *outside* with a 100ms join timeout; once it fires, `run_turn` stops waiting and
+  persists whatever text streamed via `on_text` so far, regardless of whether the helper
+  thread — however deep inside a blocked LLM read or a slow retrieval/rerank call it is —
+  ever returns. `on_text`/`on_trace` stop forwarding to `emit` the moment the thread is
+  abandoned (the SSE stream this turn owns is about to end), and the abandoned thread's
+  eventual result, if it ever completes, is simply discarded — so it can never persist a
+  stale turn after (or racing) a later one on the same chat. This is what actually bounds
+  how long Stop takes, independent of the LLM/retrieval stack's own responsiveness.

@@ -259,12 +259,21 @@ def create_app(cfg: Config) -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=400)
         return c or JSONResponse({"error": "not found"}, status_code=404)
 
+    @app.post("/api/chats/{chat_id}/stop")
+    def stop_chat(chat_id: str):
+        # No error on a miss (turn already finished, or never started) — the frontend
+        # fires this the instant it aborts its own fetch and doesn't wait on the result.
+        return {"stopped": chats.request_stop(chat_id)}
+
     @app.post("/api/chat")
     async def chat(req: ChatRequest):
         if req.chat_id and not chats.try_acquire(req.chat_id):
             return JSONResponse(
                 {"error": "a turn is already in progress for this chat"}, status_code=409
             )
+        # try_acquire above created this turn's stop Event; grab it now so `work` can
+        # thread it into the LLM backend's streaming loop as `stop_check`.
+        stop_event = chats.stop_event(req.chat_id) if req.chat_id else None
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue()
 
@@ -273,7 +282,14 @@ def create_app(cfg: Config) -> FastAPI:
 
         def work():
             try:
-                run_turn(get_agent, chats, req, emit, cfg.llm.tagging)
+                run_turn(
+                    get_agent,
+                    chats,
+                    req,
+                    emit,
+                    cfg.llm.tagging,
+                    stop_check=stop_event.is_set if stop_event else None,
+                )
             finally:
                 if req.chat_id:
                     chats.release(req.chat_id)

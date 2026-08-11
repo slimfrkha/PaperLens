@@ -28,6 +28,13 @@ from .config import AnthropicSpec, GeminiSpec, LLMSpec, OpenAISpec, SGLangSpec, 
 Tool = dict  # {"name": str, "description": str, "input_schema": dict}
 ToolExecutor = Callable[[str, dict], str]  # (name, args) -> result text
 OnText = Callable[[str], None]  # streamed text / reasoning deltas
+# Polled between/within streaming rounds; True -> stop early. Only catches a stop that
+# lands between chunks that actually arrived — a call stuck producing nothing (e.g. a
+# local model's prefill) isn't interrupted at this layer. `chat_turn._run_agent` is what
+# bounds that case, by giving up *waiting* on the call rather than depending on it to
+# return; this flag is what lets it return the right (possibly partial) text promptly
+# whenever the call *is* still responsive.
+StopCheck = Callable[[], bool]
 
 
 @dataclass
@@ -81,6 +88,7 @@ class LLMBackend(ABC):
         on_text: OnText | None = None,
         on_reasoning: OnText | None = None,
         max_rounds: int = 8,
+        stop_check: StopCheck | None = None,
     ) -> tuple[str, Usage]: ...
 
 
@@ -111,7 +119,15 @@ class AnthropicBackend(LLMBackend):
         return "".join(b.text for b in msg.content if b.type == "text")
 
     def run_tools(
-        self, system, messages, tools, execute, on_text=None, on_reasoning=None, max_rounds=8
+        self,
+        system,
+        messages,
+        tools,
+        execute,
+        on_text=None,
+        on_reasoning=None,
+        max_rounds=8,
+        stop_check=None,
     ):
         client = self._client()
         convo = [dict(m) for m in messages]
@@ -119,7 +135,10 @@ class AnthropicBackend(LLMBackend):
         total_in = 0
         total_out = 0
         for _ in range(max_rounds):
+            if stop_check and stop_check():
+                return final_text, Usage(total_in, total_out)
             text_parts: list[str] = []
+            stopped = False
             with client.messages.stream(
                 model=self.spec.model,
                 max_tokens=self.spec.max_tokens,
@@ -136,6 +155,18 @@ class AnthropicBackend(LLMBackend):
                         text_parts.append(event.delta.text)
                         if on_text:
                             on_text(event.delta.text)
+                    if stop_check and stop_check():
+                        stopped = True
+                        break
+                if stopped:
+                    # Return without get_final_message() — it drains the rest of the
+                    # response, which would defeat the point of stopping early. Leaving
+                    # the `with` block below closes the stream instead. This only catches
+                    # a stop observed between chunks that actually arrived — a call stuck
+                    # producing nothing (e.g. a local model's prefill) isn't interrupted
+                    # here; `chat_turn._run_agent` is what bounds that case, by giving up
+                    # *waiting* on this call rather than depending on it to return.
+                    return "".join(text_parts), Usage(total_in, total_out)
                 msg = stream.get_final_message()
 
             total_in += msg.usage.input_tokens
@@ -262,7 +293,15 @@ class OpenAICompatBackend(LLMBackend):
         return resp.choices[0].message.content or ""
 
     def run_tools(
-        self, system, messages, tools, execute, on_text=None, on_reasoning=None, max_rounds=8
+        self,
+        system,
+        messages,
+        tools,
+        execute,
+        on_text=None,
+        on_reasoning=None,
+        max_rounds=8,
+        stop_check=None,
     ):
         client = self._client()
         oai_tools = [
@@ -286,6 +325,8 @@ class OpenAICompatBackend(LLMBackend):
             return Usage(total_in, total_out) if usage_complete else Usage(None, None)
 
         for _ in range(max_rounds):
+            if stop_check and stop_check():
+                return final_text, usage()
             stream = client.chat.completions.create(
                 model=self.spec.model,
                 max_tokens=self.spec.max_tokens,
@@ -300,6 +341,7 @@ class OpenAICompatBackend(LLMBackend):
             tool_calls: dict[int, dict] = {}
             think_filter = _ThinkTagStripper()
             round_usage = None
+            stopped = False
             for chunk in stream:
                 # The usage-only final chunk (when the server honors stream_options)
                 # carries an empty `choices` list — capture it before skipping below.
@@ -326,6 +368,24 @@ class OpenAICompatBackend(LLMBackend):
                         slot["name"] = tc.function.name
                     if tc.function and tc.function.arguments:
                         slot["args"] += tc.function.arguments
+                if stop_check and stop_check():
+                    stopped = True
+                    break
+
+            if stopped:
+                # This only catches a stop observed between chunks that actually
+                # arrived — a call stuck producing nothing (e.g. a local model's
+                # prefill) isn't interrupted here; `chat_turn._run_agent` is what
+                # bounds that case, by giving up *waiting* on this call rather than
+                # depending on it to return.
+                close = getattr(stream, "close", None)
+                if close:
+                    close()
+                tail = think_filter.finish()
+                if tail and on_text:
+                    on_text(tail)
+                final_text = content + tail
+                return final_text, usage()
 
             tail = think_filter.finish()
             if tail:
@@ -473,7 +533,15 @@ class GeminiBackend(LLMBackend):
         return resp.text or ""
 
     def run_tools(
-        self, system, messages, tools, execute, on_text=None, on_reasoning=None, max_rounds=8
+        self,
+        system,
+        messages,
+        tools,
+        execute,
+        on_text=None,
+        on_reasoning=None,
+        max_rounds=8,
+        stop_check=None,
     ):
         from google.genai import types
 
@@ -496,8 +564,11 @@ class GeminiBackend(LLMBackend):
         total_in = 0
         total_out = 0
         for _ in range(max_rounds):
+            if stop_check and stop_check():
+                return final_text, Usage(total_in, total_out)
             text, reasoning, calls = "", "", []
             round_usage = None
+            stopped = False
             for chunk in client.models.generate_content_stream(
                 model=self.spec.model, contents=contents, config=cfg
             ):
@@ -514,8 +585,17 @@ class GeminiBackend(LLMBackend):
                             text += part.text
                             if on_text:
                                 on_text(part.text)
+                if stop_check and stop_check():
+                    stopped = True
+                    break
             if reasoning and on_reasoning:
                 on_reasoning(reasoning)
+            if stopped:
+                # This only catches a stop observed between chunks that actually
+                # arrived — a call stuck producing nothing isn't interrupted here;
+                # `chat_turn._run_agent` is what bounds that case, by giving up
+                # *waiting* on this call rather than depending on it to return.
+                return text, Usage(total_in, total_out)
             if round_usage:
                 total_in += round_usage.prompt_token_count or 0
                 # Thinking tokens are billed but reported separately from

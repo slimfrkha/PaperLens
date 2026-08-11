@@ -9,6 +9,7 @@ A working inventory of what PaperLens does today, organized into four sections:
 
 - **Ask a question (composer)** — textarea with Enter-to-send, Shift+Enter newline, busy/disabled states (`web/src/pages/ChatPage.tsx`)
 - **Streaming answer tokens** — assistant text renders incrementally as SSE `token` events arrive, "Thinking…" loader before first token (`web/src/pages/ChatPage.tsx`, `web/src/api.ts`)
+- **Stop generating** — the send button becomes a Stop button while a turn streams; clicking it aborts the client's SSE fetch and signals the backend's in-flight turn (via its per-chat `stop_check`, checked between/within the LLM's streaming rounds) to stop generating and persist whatever text streamed so far as the answer, releasing the chat's single-flight lock so the composer unlocks immediately for a new message or an edit (`web/src/pages/ChatPage.tsx`, `web/src/api.ts`, `src/server/main.py`, `src/server/chats.py`, `src/server/chat_turn.py`, `src/server/agent.py`, `src/rag/llm.py`)
 - **Edit a previous user message and resend** — inline editable textarea on any user turn, truncates and replays the conversation from that point (`web/src/pages/ChatPage.tsx`)
 - **Confirm-before-discard on edit** — warns how many later exchanges will be dropped before an edit truncates them (`web/src/pages/ChatPage.tsx`)
 - **New chat** — clears turns/filters, starts a fresh session (`web/src/components/ChatSidebar.tsx`, `web/src/pages/ChatPage.tsx`)
