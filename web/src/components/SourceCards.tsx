@@ -1,5 +1,5 @@
 import { Badge, Group, Stack, Text, Tooltip, UnstyledButton } from "@mantine/core";
-import { Fragment } from "react";
+import { Fragment, type MouseEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import type { Citation, FaithfulnessLabel, RetrievalSource } from "../api";
 import {
@@ -20,19 +20,21 @@ interface SourceNum {
   num: string; // citation number, matching the inline [n] markers
   label: FaithfulnessLabel | undefined; // worst-of-per-ref verdict; undefined = unchecked
   source: RetrievalSource | undefined; // which retrieval pool(s) surfaced it; undefined = dense/unknown
+  section_title: string; // this ref's own section — several refs can share a paper but not a section
+  snippet: string; // this ref's own passage, for the highlight-on-open behavior
 }
 
 interface Source {
   paper_id: string;
   title: string;
-  section_title: string;
-  snippet: string;
   nums: SourceNum[];
 }
 
-/** Groups an answer's citations by paper and renders one compact, clickable card
- *  per source — the papers this answer stood on. Clicking opens the paper at the
- *  first cited passage (same target as the inline [n] markers in Answer). */
+/** Groups an answer's citations by paper and renders one compact card per source —
+ *  the papers this answer stood on. Each number opens the paper at its own cited
+ *  passage (same target as that number's inline [n] marker in Answer); the rest of
+ *  the card opens the paper plain, with no passage highlighted — several numbers on
+ *  one card can point at different passages, so the card itself picks none of them. */
 export default function SourceCards({ citations }: { citations: Citation[] }) {
   const navigate = useNavigate();
   if (citations.length === 0) return null;
@@ -40,17 +42,16 @@ export default function SourceCards({ citations }: { citations: Citation[] }) {
   // Group by paper, preserving first-seen order; several [n] can hit one paper.
   const byPaper = new Map<string, Source>();
   for (const c of citations) {
-    const n = { num: c.ref.replace(/^r/, ""), label: worstLabel(c.faithfulness), source: c.source };
+    const n = {
+      num: c.ref.replace(/^r/, ""),
+      label: worstLabel(c.faithfulness),
+      source: c.source,
+      section_title: c.section_title,
+      snippet: c.snippet,
+    };
     const s = byPaper.get(c.paper_id);
     if (s) s.nums.push(n);
-    else
-      byPaper.set(c.paper_id, {
-        paper_id: c.paper_id,
-        title: c.title,
-        section_title: c.section_title,
-        snippet: c.snippet,
-        nums: [n],
-      });
+    else byPaper.set(c.paper_id, { paper_id: c.paper_id, title: c.title, nums: [n] });
   }
   const sources = [...byPaper.values()];
   const summary = summarizeFaithfulness(citations);
@@ -82,11 +83,7 @@ export default function SourceCards({ citations }: { citations: Citation[] }) {
           <UnstyledButton
             key={s.paper_id}
             className="paper-card"
-            onClick={() =>
-              navigate(`/papers/${s.paper_id}`, {
-                state: { highlight: s.snippet, section: s.section_title },
-              })
-            }
+            onClick={() => navigate(`/papers/${s.paper_id}`)}
             style={{
               flex: "1 1 200px",
               maxWidth: 280,
@@ -103,13 +100,21 @@ export default function SourceCards({ citations }: { citations: Citation[] }) {
                 const num = (
                   <Text
                     span
+                    component="a"
                     className={flag ? `cite cite-${flag}` : "cite"}
-                    style={{ cursor: "inherit" }}
                     aria-label={
                       flag
                         ? `citation ${n.num}: this source ${faithfulnessMessage(flag)}`
                         : undefined
                     }
+                    onClick={(e: MouseEvent) => {
+                      // Own passage, not the card's — several numbers on one card can
+                      // point at different sections of the same paper.
+                      e.stopPropagation();
+                      navigate(`/papers/${s.paper_id}`, {
+                        state: { highlight: n.snippet, section: n.section_title },
+                      });
+                    }}
                   >
                     {n.num}
                     {flag && (
@@ -134,9 +139,6 @@ export default function SourceCards({ citations }: { citations: Citation[] }) {
             </Group>
             <Text size="sm" fw={500} lh={1.25} lineClamp={2} ff="'Newsreader', Georgia, serif">
               {s.title}
-            </Text>
-            <Text size="xs" c="dimmed" mt={4} lineClamp={1}>
-              {s.section_title}
             </Text>
           </UnstyledButton>
         ))}
