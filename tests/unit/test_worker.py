@@ -100,6 +100,25 @@ def test_run_with_no_pending_stays_idle(make_config, monkeypatch):
     assert snap["total"] == 0
 
 
+def test_run_backfills_images_even_when_nothing_was_ever_pending(make_config, monkeypatch):
+    # render_images on, no text-pending papers (the "flag was just turned on for an
+    # already-fully-ingested pool" case) — the backfill sweep must still run once before
+    # going idle, not get skipped just because nothing was ever pending, and the loop
+    # must still terminate rather than re-running it on every idle re-check.
+    worker = _worker(make_config)
+    monkeypatch.setattr("server.worker.pending_papers", lambda *a, **k: [])
+    calls: list[int] = []
+    monkeypatch.setattr(
+        "server.worker.backfill_paper_images",
+        lambda cfg, manifest, on_paper_stage=None: calls.append(1),
+    )
+
+    worker._run()  # must terminate, not loop forever
+
+    assert calls == [1]  # ran exactly once
+    assert worker.snapshot()["state"] == "idle"
+
+
 def test_trigger_is_single_flight(make_config):
     # A live run must block a second trigger, or two threads race the same papers.
     worker = _worker(make_config)

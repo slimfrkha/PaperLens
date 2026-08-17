@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import shutil
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -131,10 +132,19 @@ def create_app(cfg: Config) -> FastAPI:
 
     @app.get("/api/papers/{paper_id}")
     def get_paper(paper_id: str):
-        path = Path(cfg.paths.markdown_dir) / f"{paper_id}.md"
+        # Prefer the display markdown (figures rendered in) when it exists; fall back to
+        # the plain RAG text for papers ingested before this feature, or with
+        # extraction.render_images off.
+        display_path = Path(cfg.paths.markdown_dir) / f"{paper_id}_display.md"
+        text_path = Path(cfg.paths.markdown_dir) / f"{paper_id}.md"
+        path = display_path if display_path.exists() else text_path
         if not path.exists():
             return JSONResponse({"error": "not found"}, status_code=404)
         md = re.sub(r"<!--.*?-->", "", path.read_text(), flags=re.DOTALL)
+        # Docling's display markdown references images as a relative `{paper_id}.assets/`
+        # path; rewrite it to the assets route below so the SPA resolves it against the
+        # backend instead of its own router.
+        md = md.replace(f"{paper_id}.assets/", f"/api/papers/{paper_id}/assets/")
         rec = manifest.get(paper_id) or {}
         return {
             "paper_id": paper_id,
@@ -143,6 +153,14 @@ def create_app(cfg: Config) -> FastAPI:
             "arxiv_id": rec.get("arxiv_id"),
             "markdown": md,
         }
+
+    @app.get("/api/papers/{paper_id}/assets/{filename}")
+    def get_paper_asset(paper_id: str, filename: str):
+        base = (Path(cfg.paths.markdown_dir) / f"{paper_id}.assets").resolve()
+        path = (base / filename).resolve()
+        if not path.is_relative_to(base) or not path.is_file():
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return FileResponse(path)
 
     # ---- annotations ----
     @app.get("/api/papers/{paper_id}/annotations")
@@ -230,6 +248,8 @@ def create_app(cfg: Config) -> FastAPI:
         annotations.remove_paper(paper_id)
         Path(cfg.paths.pdf_dir, f"{paper_id}.pdf").unlink(missing_ok=True)
         Path(cfg.paths.markdown_dir, f"{paper_id}.md").unlink(missing_ok=True)
+        Path(cfg.paths.markdown_dir, f"{paper_id}_display.md").unlink(missing_ok=True)
+        shutil.rmtree(Path(cfg.paths.markdown_dir, f"{paper_id}.assets"), ignore_errors=True)
         return Response(status_code=204)
 
     # ---- chat sessions ----

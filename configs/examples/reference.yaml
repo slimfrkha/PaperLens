@@ -119,6 +119,7 @@ chunking:
 # --- Extraction: PDF -> markdown via Docling ---
 extraction:
   ocr_enabled: false # turn on for scanned/no-text-layer PDFs (slower, extra model download)
+  render_images: true # crop figures for the paper viewer (display-only, never RAGed)
 
 # --- Retrieval: the agentic search loop ---
 retrieval:

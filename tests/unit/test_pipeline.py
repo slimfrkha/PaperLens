@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from rag import pipeline
-from rag.config import Paper
+from rag.config import ExtractionCfg, Paper
 from rag.manifest import Manifest
-from rag.pipeline import _title, normalize_manifest_tags, pending_papers
+from rag.pipeline import _title, backfill_paper_images, normalize_manifest_tags, pending_papers
 
 
 def test_pending_papers_excludes_already_ingested(tmp_path, make_config):
@@ -233,3 +234,87 @@ def test_run_batch_does_not_call_normalize(make_config, monkeypatch):
     monkeypatch.setattr(pipeline, "normalize_manifest_tags", fake_normalize)
     pipeline.run_batch(cfg, manifest, [Paper(name="a", arxiv_id="1")])
     assert called["normalize"] is False
+
+
+def _seed_paper_files(cfg, name: str) -> None:
+    Path(cfg.paths.pdf_dir).mkdir(parents=True, exist_ok=True)
+    Path(cfg.paths.markdown_dir).mkdir(parents=True, exist_ok=True)
+    (Path(cfg.paths.pdf_dir) / f"{name}.pdf").write_bytes(b"x")
+    (Path(cfg.paths.markdown_dir) / f"{name}.md").write_text("text")
+
+
+def test_backfill_paper_images_noop_when_disabled(make_config, monkeypatch):
+    cfg = make_config(extraction=ExtractionCfg(render_images=False)).for_ingest()
+    manifest = Manifest(cfg.paths.rag_db)
+    manifest.upsert({"paper_id": "a", "tags": [], "n_chunks": 1})
+    calls = []
+    monkeypatch.setattr(pipeline, "pdf_to_markdown", lambda *a, **k: calls.append(1) or "md")
+
+    backfill_paper_images(cfg, manifest)
+    assert calls == []
+
+
+def test_backfill_paper_images_renders_missing_display_only(make_config, monkeypatch):
+    cfg = make_config(extraction=ExtractionCfg(render_images=True)).for_ingest()
+    manifest = Manifest(cfg.paths.rag_db)
+    manifest.upsert({"paper_id": "a", "tags": [], "n_chunks": 1})
+    manifest.upsert({"paper_id": "b", "tags": [], "n_chunks": 1})
+    _seed_paper_files(cfg, "a")
+    _seed_paper_files(cfg, "b")
+    # "b" already has its display file — must be skipped, "a" doesn't.
+    (Path(cfg.paths.markdown_dir) / "b_display.md").write_text("already rendered")
+
+    calls = []
+    monkeypatch.setattr(
+        pipeline, "pdf_to_markdown", lambda pdf_path, **kw: calls.append(kw["paper_id"]) or "md"
+    )
+
+    backfill_paper_images(cfg, manifest)
+    assert calls == ["a"]
+
+
+def test_backfill_paper_images_skips_paper_missing_source_files(make_config, monkeypatch):
+    cfg = make_config(extraction=ExtractionCfg(render_images=True)).for_ingest()
+    manifest = Manifest(cfg.paths.rag_db)
+    manifest.upsert({"paper_id": "a", "tags": [], "n_chunks": 1})  # no pdf/md ever written
+
+    calls = []
+    monkeypatch.setattr(pipeline, "pdf_to_markdown", lambda *a, **k: calls.append(1) or "md")
+    backfill_paper_images(cfg, manifest)
+    assert calls == []
+
+
+def test_backfill_paper_images_survives_per_paper_failure(make_config, monkeypatch):
+    # A permanently-failing paper must not stop the sweep from reaching later papers, and
+    # must not raise out of the call — backfill_paper_images is a one-shot, best-effort pass.
+    cfg = make_config(extraction=ExtractionCfg(render_images=True)).for_ingest()
+    manifest = Manifest(cfg.paths.rag_db)
+    manifest.upsert({"paper_id": "a", "tags": [], "n_chunks": 1})
+    manifest.upsert({"paper_id": "b", "tags": [], "n_chunks": 1})
+    _seed_paper_files(cfg, "a")
+    _seed_paper_files(cfg, "b")
+
+    calls = []
+
+    def _fake(pdf_path, **kw):
+        calls.append(kw["paper_id"])
+        if kw["paper_id"] == "a":
+            raise RuntimeError("boom")
+        return "md"
+
+    monkeypatch.setattr(pipeline, "pdf_to_markdown", _fake)
+
+    backfill_paper_images(cfg, manifest)  # must not raise
+    assert calls == ["a", "b"]
+
+
+def test_backfill_paper_images_reports_stage_per_paper(make_config, monkeypatch):
+    cfg = make_config(extraction=ExtractionCfg(render_images=True)).for_ingest()
+    manifest = Manifest(cfg.paths.rag_db)
+    manifest.upsert({"paper_id": "a", "tags": [], "n_chunks": 1})
+    _seed_paper_files(cfg, "a")
+    monkeypatch.setattr(pipeline, "pdf_to_markdown", lambda *a, **k: "md")
+
+    stages = []
+    backfill_paper_images(cfg, manifest, on_paper_stage=stages.append)
+    assert stages == ["a"]

@@ -67,6 +67,7 @@ A working inventory of what PaperLens does today, organized into four sections:
 ### Paper viewer
 
 - **Rendered paper reading view** — full paper markdown with title, arXiv link, tags (`web/src/pages/PaperViewer.tsx`)
+- **Figures rendered in the reading view** — cropped from the PDF at ingest time, deduped by content hash (drops repeated per-page watermarks/logos); display-only — never chunked/embedded/retrieved (`src/rag/extract.py`, `src/server/main.py`, `configs/examples/reference.yaml`'s `extraction.render_images`)
 - **Link out to arXiv abstract page** (`web/src/pages/PaperViewer.tsx`)
 - **Citation deep-link highlighting** — navigating from a citation/source card highlights and scrolls to the cited passage (`web/src/pages/PaperViewer.tsx`, `web/src/highlight.ts`)
 - **Text-selection annotation toolbar** — floating "Highlight / Add note" toolbar on selecting ≥20 chars (`web/src/pages/PaperViewer.tsx`, `web/src/components/AnnotationPopover.tsx`)
@@ -174,6 +175,7 @@ A working inventory of what PaperLens does today, organized into four sections:
 - **`ingest_paper` — six-stage per-paper pipeline** — download → extract (Docling) → chunk → index (Chroma) → tag (LLM) → manifest write; index and tag stages run concurrently (`src/rag/pipeline.py`)
 - **PDF download** — arXiv PDF fetch by id, cached (skips if already downloaded) (`src/rag/pipeline.py`)
 - **PDF → markdown extraction (Docling)** — single converter instance reused across calls, OCR off by default, cached on disk (`src/rag/extract.py`)
+- **Display-only figure rendering** — the same conversion pass also crops figures to a sibling `<paper_id>_display.md` + `<paper_id>.assets/` dir for the paper viewer, deduped by content hash; `backfill_paper_images` catches up already-ingested papers when the flag is turned on later (`src/rag/extract.py`, `src/rag/pipeline.py`)
 - **Section-aware chunking with breadcrumbs** — rebuilds section-numbering hierarchy into a breadcrumb prepended to embedded text; drops noise sections; packs oversized sections into overlapping sub-chunks; keeps tables atomic (`src/rag/chunking.py`)
 - **Chroma indexing** — content-hashing chunk ids so re-ingest under a changed chunking config also deletes stale orphaned chunks (`src/rag/index.py`)
 - **LLM tagging** — generates topic tags per paper, degrades to `[]` on failure rather than failing ingestion (`src/rag/tagger.py`)

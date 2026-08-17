@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from rag import pipeline
-from rag.config import ChunkingCfg, Paper
+from rag.config import ChunkingCfg, ExtractionCfg, Paper
 from rag.index import open_collection
 from rag.manifest import Manifest
 
@@ -211,3 +211,68 @@ def test_ingest_paper_retag_false_preserves_existing_tags(make_config, fake_embe
 
     assert rec2["tags"] == ["moe", "attention"]  # carried forward, not regenerated
     assert rec2["n_chunks"] < rec1["n_chunks"]  # indexing still ran under the new config
+
+
+def test_ingest_paper_rerenders_when_text_cached_but_display_missing(
+    make_config, fake_embedder, monkeypatch
+):
+    """render_images was turned on for a pool that already has cached text markdown for
+    this paper — the display file is still missing, so extraction must run again (to get
+    it) even though the RAG text itself doesn't need re-extracting."""
+    cfg = make_config(extraction=ExtractionCfg(render_images=True))
+    manifest = Manifest(cfg.paths.rag_db)
+    collection = open_collection(
+        cfg.paths.rag_db, cfg.collection, embedder_name=fake_embedder.name()
+    )
+    Path(cfg.paths.markdown_dir).mkdir(parents=True, exist_ok=True)
+    (Path(cfg.paths.markdown_dir) / "paper-a.md").write_text(_MARKDOWN)  # cached text only
+
+    monkeypatch.setattr(pipeline, "_download", _fake_download)
+    calls = []
+    monkeypatch.setattr(
+        pipeline, "pdf_to_markdown", lambda path, **kw: calls.append(kw) or _MARKDOWN
+    )
+    monkeypatch.setattr(pipeline, "generate_tags", lambda md, spec, existing_tags, **kw: [])
+
+    pipeline.ingest_paper(
+        Paper(name="paper-a", arxiv_id="0000.00001"),
+        cfg.for_ingest(),
+        fake_embedder,
+        collection,
+        manifest,
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["render_images"] is True
+    assert calls[0]["paper_id"] == "paper-a"
+    assert calls[0]["display_md_path"].endswith("paper-a_display.md")
+
+
+def test_ingest_paper_skips_extract_when_text_and_display_both_cached(
+    make_config, fake_embedder, monkeypatch
+):
+    cfg = make_config(extraction=ExtractionCfg(render_images=True))
+    manifest = Manifest(cfg.paths.rag_db)
+    collection = open_collection(
+        cfg.paths.rag_db, cfg.collection, embedder_name=fake_embedder.name()
+    )
+    Path(cfg.paths.markdown_dir).mkdir(parents=True, exist_ok=True)
+    (Path(cfg.paths.markdown_dir) / "paper-a.md").write_text(_MARKDOWN)
+    (Path(cfg.paths.markdown_dir) / "paper-a_display.md").write_text(_MARKDOWN)
+
+    monkeypatch.setattr(pipeline, "_download", _fake_download)
+
+    def _fail(*a, **k):
+        raise AssertionError("pdf_to_markdown should not run — both files are cached")
+
+    monkeypatch.setattr(pipeline, "pdf_to_markdown", _fail)
+    monkeypatch.setattr(pipeline, "generate_tags", lambda md, spec, existing_tags, **kw: [])
+
+    record = pipeline.ingest_paper(
+        Paper(name="paper-a", arxiv_id="0000.00001"),
+        cfg.for_ingest(),
+        fake_embedder,
+        collection,
+        manifest,
+    )
+    assert record["title"] == "Paper A"

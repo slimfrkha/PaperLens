@@ -105,10 +105,22 @@ def ingest_paper(
     _download(paper.arxiv_id, pdf_path)
 
     stage("extract", 0.25)
-    if os.path.exists(md_path) and os.path.getsize(md_path) > 0:
+    display_md_path = os.path.join(cfg.paths.markdown_dir, f"{paper.name}_display.md")
+    have_text = os.path.exists(md_path) and os.path.getsize(md_path) > 0
+    have_display = os.path.exists(display_md_path) and os.path.getsize(display_md_path) > 0
+    # A cached text markdown alone isn't enough to skip extraction once render_images is
+    # on — the display file (rendered by the same conversion) still needs to exist too,
+    # e.g. when the flag was just turned on for an already-partially-ingested pool.
+    if have_text and (not cfg.extraction.render_images or have_display):
         md = Path(md_path).read_text()
     else:
-        md = pdf_to_markdown(pdf_path, ocr_enabled=cfg.extraction.ocr_enabled)
+        md = pdf_to_markdown(
+            pdf_path,
+            ocr_enabled=cfg.extraction.ocr_enabled,
+            render_images=cfg.extraction.render_images,
+            display_md_path=display_md_path if cfg.extraction.render_images else None,
+            paper_id=paper.name if cfg.extraction.render_images else None,
+        )
         Path(md_path).parent.mkdir(parents=True, exist_ok=True)
         Path(md_path).write_text(md)
 
@@ -240,6 +252,47 @@ def run_batch(
             on_paper_done(paper, rec, None)
 
     return BatchResult(records=records, embedder=embedder, collection=collection)
+
+
+def backfill_paper_images(
+    cfg: IngestConfig,
+    manifest: Manifest,
+    on_paper_stage: Callable[[str], None] | None = None,
+) -> None:
+    """Render display images for already-manifested papers still missing them — e.g. a
+    paper ingested before ``extraction.render_images`` existed, or the flag was just
+    turned on for an already-partially-ingested pool. A freshly-ingested paper gets its
+    display file inline via ``ingest_paper`` already; this only covers the gap.
+
+    A one-shot sweep, not a retrying loop: each paper is attempted at most once per call,
+    a failure is logged and skipped, and the caller decides when to call this again (once
+    per batch/run, same as ``normalize_manifest_tags``) — there's no internal retry that
+    could spin forever on a paper that keeps failing.
+    """
+    if not cfg.extraction.render_images:
+        return
+    for rec in manifest.papers():
+        paper_id = rec["paper_id"]
+        pdf_path = os.path.join(cfg.paths.pdf_dir, f"{paper_id}.pdf")
+        md_path = os.path.join(cfg.paths.markdown_dir, f"{paper_id}.md")
+        display_md_path = os.path.join(cfg.paths.markdown_dir, f"{paper_id}_display.md")
+        if os.path.exists(display_md_path) and os.path.getsize(display_md_path) > 0:
+            continue
+        if not (os.path.exists(pdf_path) and os.path.exists(md_path)):
+            print(f"  [warn] image render skipped for {paper_id}: pdf/markdown missing")
+            continue
+        if on_paper_stage:
+            on_paper_stage(paper_id)
+        try:
+            pdf_to_markdown(
+                pdf_path,
+                ocr_enabled=cfg.extraction.ocr_enabled,
+                render_images=True,
+                display_md_path=display_md_path,
+                paper_id=paper_id,
+            )
+        except Exception as e:
+            print(f"  [warn] image render failed for {paper_id}: {e}")
 
 
 def normalize_manifest_tags(cfg: IngestConfig, manifest: Manifest) -> dict[str, str]:

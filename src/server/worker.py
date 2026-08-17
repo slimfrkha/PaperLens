@@ -13,7 +13,7 @@ from typing import Any
 
 from rag.config import IngestConfig
 from rag.manifest import Manifest
-from rag.pipeline import normalize_manifest_tags, pending_papers, run_batch
+from rag.pipeline import backfill_paper_images, normalize_manifest_tags, pending_papers, run_batch
 
 
 class IngestionWorker:
@@ -64,6 +64,14 @@ class IngestionWorker:
             # failed ingest never reaches the manifest write.
             attempted: set[str] = set()
             first_batch = True
+            # Runs once per _run() call, right before the run would otherwise go idle —
+            # covers both "nothing was ever pending" (the common case: render_images was
+            # just turned on for an already-fully-ingested pool) and "a batch just
+            # finished ingesting new papers" (which already wrote their own display files
+            # inline, so this then finds nothing left to do). A simple latch, not a
+            # retry: backfill_paper_images never raises and always completes in one pass,
+            # so there's no risk of this spinning on a paper that keeps failing.
+            images_backfilled = False
             # Loop over batches, not just one pass: a paper can be added (admin
             # add-paper route mutates cfg.papers in place) while this run is already
             # in flight, and trigger() is single-flight — without re-checking here,
@@ -74,6 +82,16 @@ class IngestionWorker:
                     p for p in pending_papers(self.cfg, self.manifest) if p.name not in attempted
                 ]
                 if not pending:
+                    if not images_backfilled:
+                        images_backfilled = True
+
+                        def _on_image_stage(paper_id: str):
+                            self._set(current={"name": paper_id, "stage": "images", "pct": 0.0})
+
+                        backfill_paper_images(
+                            self.cfg, self.manifest, on_paper_stage=_on_image_stage
+                        )
+                        continue  # a paper may have been added while images rendered
                     # Only reset total/done on the very first (empty) pass — once a
                     # batch has run, its final counts are what the snapshot should
                     # keep reporting, not get zeroed out by this re-check.

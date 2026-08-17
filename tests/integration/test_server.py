@@ -797,8 +797,13 @@ def test_remove_paper_route_cleans_manifest_chunks_files_and_config(make_config,
     Path(cfg.paths.markdown_dir).mkdir(parents=True, exist_ok=True)
     pdf_path = Path(cfg.paths.pdf_dir) / "paper-a.pdf"
     md_path = Path(cfg.paths.markdown_dir) / "paper-a.md"
+    display_path = Path(cfg.paths.markdown_dir) / "paper-a_display.md"
+    assets_dir = Path(cfg.paths.markdown_dir) / "paper-a.assets"
     pdf_path.write_bytes(b"%PDF")
     md_path.write_text("## Paper A")
+    display_path.write_text("## Paper A\n\n![Image](paper-a.assets/image_000000_x.png)")
+    assets_dir.mkdir()
+    (assets_dir / "image_000000_x.png").write_bytes(b"png")
 
     collection = open_collection(cfg.paths.rag_db, cfg.collection)
     collection.upsert(
@@ -821,6 +826,8 @@ def test_remove_paper_route_cleans_manifest_chunks_files_and_config(make_config,
     assert collection.get(where={"paper_id": "paper-a"}, include=[])["ids"] == []
     assert not pdf_path.exists()
     assert not md_path.exists()
+    assert not display_path.exists()
+    assert not assets_dir.exists()
     assert [p.name for p in cfg.papers] == []
     assert "paper-a" not in cfg.source_path.read_text()
     assert client.get("/api/papers/paper-a/annotations").json() == []
@@ -830,3 +837,96 @@ def test_remove_paper_route_404_for_unknown_paper(make_config, tmp_path):
     cfg, client = _admin_app(make_config, tmp_path)
     resp = client.delete("/api/admin/papers/does-not-exist")
     assert resp.status_code == 404
+
+
+def test_get_paper_prefers_display_markdown_and_rewrites_asset_urls(make_config):
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    Path(cfg.paths.markdown_dir).mkdir(parents=True, exist_ok=True)
+    (Path(cfg.paths.markdown_dir) / "paper-a.md").write_text("## Paper A\n\ntext only")
+    (Path(cfg.paths.markdown_dir) / "paper-a_display.md").write_text(
+        "## Paper A\n\n![Image](paper-a.assets/image_000000_x.png)"
+    )
+    manifest = Manifest(cfg.paths.rag_db)
+    manifest.upsert({"paper_id": "paper-a", "title": "Paper A", "tags": [], "n_chunks": 1})
+
+    client = TestClient(create_app(cfg))
+    resp = client.get("/api/papers/paper-a")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "/api/papers/paper-a/assets/image_000000_x.png" in body["markdown"]
+    assert "paper-a.assets/" not in body["markdown"]  # rewritten, not left relative
+
+
+def test_get_paper_falls_back_to_text_markdown_when_no_display_file(make_config):
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    Path(cfg.paths.markdown_dir).mkdir(parents=True, exist_ok=True)
+    (Path(cfg.paths.markdown_dir) / "paper-a.md").write_text("## Paper A\n\ntext only")
+    manifest = Manifest(cfg.paths.rag_db)
+    manifest.upsert({"paper_id": "paper-a", "title": "Paper A", "tags": [], "n_chunks": 1})
+
+    client = TestClient(create_app(cfg))
+    resp = client.get("/api/papers/paper-a")
+
+    assert resp.status_code == 200
+    assert resp.json()["markdown"] == "## Paper A\n\ntext only"
+
+
+def test_get_paper_404_when_neither_file_exists(make_config):
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    client = TestClient(create_app(cfg))
+    resp = client.get("/api/papers/does-not-exist")
+    assert resp.status_code == 404
+
+
+def test_get_paper_asset_serves_file(make_config):
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    assets_dir = Path(cfg.paths.markdown_dir) / "paper-a.assets"
+    assets_dir.mkdir(parents=True)
+    (assets_dir / "image_000000_x.png").write_bytes(b"png-bytes")
+
+    client = TestClient(create_app(cfg))
+    resp = client.get("/api/papers/paper-a/assets/image_000000_x.png")
+
+    assert resp.status_code == 200
+    assert resp.content == b"png-bytes"
+
+
+def test_get_paper_asset_404_when_missing(make_config):
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    client = TestClient(create_app(cfg))
+    resp = client.get("/api/papers/paper-a/assets/nope.png")
+    assert resp.status_code == 404
+
+
+# Single-level escape (secret.txt sits one dir above paper-a.assets/), percent-encoded so
+# httpx can't collapse the `..` client-side before it reaches the server — same style as
+# the SPA traversal guard above. A decoded ".." segment doesn't even match this route (it
+# no longer has exactly {paper_id}/assets/{filename} shape), so it falls through to the
+# catch-all SPA route — which has its own guard, exercised here transitively; either way
+# the secret must never leak.
+@pytest.mark.parametrize(
+    "attack",
+    [
+        "/api/papers/paper-a/assets/..%2fsecret.txt",
+        "/api/papers/paper-a/assets/%2e%2e/secret.txt",
+        "/api/papers/paper-a/assets/%2e%2e%2fsecret.txt",
+    ],
+)
+def test_get_paper_asset_blocks_path_traversal(make_config, attack):
+    cfg = make_config()
+    web_dist = Path(cfg.paths.web_dist)
+    web_dist.mkdir(parents=True, exist_ok=True)
+    (web_dist / "index.html").write_text("<html>INDEX</html>")
+    (Path(cfg.paths.markdown_dir) / "paper-a.assets").mkdir(parents=True)
+    (Path(cfg.paths.markdown_dir) / "secret.txt").write_text("TOPSECRET")
+
+    client = TestClient(create_app(cfg))
+    resp = client.get(attack)
+
+    assert "TOPSECRET" not in resp.text

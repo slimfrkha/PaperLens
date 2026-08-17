@@ -81,6 +81,10 @@ class ChunkingCfg:
 @dataclass
 class ExtractionCfg:
     ocr_enabled: bool = False  # turn on for scanned/no-text-layer PDFs
+    # Crop each figure to its own image for the paper viewer (display-only — never
+    # chunked/embedded/retrieved). Cheap: picture cropping reads already-rasterized page
+    # regions, adding no measurable time to the conversion that already runs.
+    render_images: bool = True
 
 
 # --- Embedder: a `type` string selects the variant; each carries only its fields ---

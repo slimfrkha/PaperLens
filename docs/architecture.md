@@ -66,6 +66,18 @@ chunk metadata, so neither needs the other's output; they meet at the manifest w
 compute-bound embedder and the I/O-bound LLM call overlap for free. (This is also why
 `--retag` can regenerate tags without re-indexing.)
 
+Step 2 also renders figures for the paper viewer when `extraction.render_images` is on
+(default): the same Docling conversion crops each detected picture — a measured, not
+assumed, decision (`generate_picture_images=True` added no meaningful time to a real
+conversion) — and exports a second, **display-only** markdown (`<paper_id>_display.md` +
+`<paper_id>.assets/`), deduped by content hash so a per-page watermark/logo collapses to
+one appearance. The RAG-facing markdown chunking reads is untouched (`<paper_id>.md`,
+placeholder image comments as before) — figures are never chunked, embedded, or
+retrievable. `backfill_paper_images` (`src/rag/pipeline.py`) runs once per ingest batch/
+worker trigger to catch up any already-manifested paper still missing its display file
+(e.g. the flag was turned on after that paper was ingested) — a one-shot sweep, not a
+retrying loop.
+
 The `papers:` list in config.yaml is what `pending_papers` diffs against the manifest to
 decide what's left to ingest — hand-edit it and hit "Re-scan config", or use the Admin
 UI's add/remove-paper actions (`POST`/`DELETE /api/admin/papers`), which write that same

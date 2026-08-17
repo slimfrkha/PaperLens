@@ -197,6 +197,7 @@ degrading the index.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `ocr_enabled` | bool | `false` | Turn on for scanned/no-text-layer PDFs. arXiv PDFs have a real text layer, so this is off by default — enabling it also triggers a Docling OCR model download. |
+| `render_images` | bool | `true` | Crop each figure to its own image for the paper viewer — display-only, never chunked/embedded/retrieved. Rides the same Docling conversion pass as the RAG text (measured: no meaningful added time), written to a sibling `<paper_id>_display.md` + `<paper_id>.assets/` next to the plain `<paper_id>.md` chunking reads. Duplicate crops (a per-page watermark/logo, most often) are deduped by content hash. |
 
 ### 🔍 `retrieval`
 

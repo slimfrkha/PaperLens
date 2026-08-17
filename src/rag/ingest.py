@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .config import IngestConfig, parse_config
 from .manifest import Manifest
-from .pipeline import normalize_manifest_tags, pending_papers, run_batch
+from .pipeline import backfill_paper_images, normalize_manifest_tags, pending_papers, run_batch
 from .tagger import generate_tags
 
 
@@ -97,25 +97,36 @@ def main() -> None:
     pending = pending_papers(cfg, manifest)
     if not pending:
         print("Nothing to ingest — all configured papers are already in the DB.")
-        return
+    else:
+        print(f"== Ingesting {len(pending)} paper(s): {', '.join(p.name for p in pending)} ==")
 
-    print(f"== Ingesting {len(pending)} paper(s): {', '.join(p.name for p in pending)} ==")
+        def _on_start(paper):
+            print(f"\n-- {paper.name} ({paper.arxiv_id}) --")
 
-    def _on_start(paper):
-        print(f"\n-- {paper.name} ({paper.arxiv_id}) --")
+        def _on_stage(paper, s, pct):
+            print(f"   {s:9s} {int(pct * 100):3d}%")
 
-    def _on_stage(paper, s, pct):
-        print(f"   {s:9s} {int(pct * 100):3d}%")
+        def _on_done(paper, rec, exc):
+            if rec is not None:
+                print(f"   -> {rec['n_chunks']} chunks, tags: {', '.join(rec['tags']) or '(none)'}")
 
-    def _on_done(paper, rec, exc):
-        if rec is not None:
-            print(f"   -> {rec['n_chunks']} chunks, tags: {', '.join(rec['tags']) or '(none)'}")
+        run_batch(
+            cfg,
+            manifest,
+            pending,
+            on_paper_start=_on_start,
+            on_stage=_on_stage,
+            on_paper_done=_on_done,
+        )
 
-    run_batch(
-        cfg, manifest, pending, on_paper_start=_on_start, on_stage=_on_stage, on_paper_done=_on_done
-    )
+        _normalize_step(cfg, manifest)
 
-    _normalize_step(cfg, manifest)
+    # Runs unconditionally (not just when there were pending text papers) — this is also
+    # how an already-fully-ingested pool picks up images after render_images is turned on.
+    def _on_image_stage(paper_id: str):
+        print(f"   images    {paper_id}")
+
+    backfill_paper_images(cfg, manifest, on_paper_stage=_on_image_stage)
     print("\nDone.")
 
 
