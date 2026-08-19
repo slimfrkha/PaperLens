@@ -28,7 +28,7 @@ def _search_tool() -> dict:
     return {
         "name": "search_papers",
         "description": (
-            "Search the library of arXiv model technical reports and return the most "
+            "Search the library of arXiv papers and return the most "
             "relevant passages. Call it once per focused sub-question (call it several "
             "times to decompose a multi-part question). Each result carries a `ref` "
             "(r1, r2, ...) you must use to cite it. Do NOT call this for greetings or "
@@ -56,8 +56,7 @@ def _search_tool() -> dict:
     }
 
 
-SYSTEM_PROMPT = """You are a research assistant for a library of arXiv model \
-technical reports (LLM papers).
+SYSTEM_PROMPT = """You are a research assistant for a library of arXiv papers.
 
 First decide whether answering actually needs the papers:
 - Greetings, thanks, or simple conversational messages: answer directly, do NOT \

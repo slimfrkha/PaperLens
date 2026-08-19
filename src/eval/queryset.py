@@ -104,8 +104,8 @@ def iter_sections(md: str, paper_id: str, *, min_tokens: int):
 
 
 _GEN_SYSTEM = (
-    "You write evaluation questions for a retrieval system over machine-learning "
-    "research papers. Given ONE section of a paper, write a single specific, factual "
+    "You write evaluation questions for a retrieval system over research papers. "
+    "Given ONE section of a paper, write a single specific, factual "
     "question that can be answered ONLY from that section's text — not from outside "
     "knowledge of the paper. Respond ONLY with a JSON object: "
     '{"question": "...", "answer": "..."}.'

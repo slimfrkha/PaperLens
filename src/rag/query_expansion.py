@@ -16,9 +16,9 @@ import re
 from .llm import LLMBackend
 
 _SYSTEM = (
-    "You rewrite search queries for a retrieval system over machine-learning research "
-    "papers. Produce alternative phrasings that preserve the original meaning but vary "
-    "wording, terminology, or specificity, to help retrieve relevant passages the exact "
+    "You rewrite search queries for a retrieval system over research papers. Produce "
+    "alternative phrasings that preserve the original meaning but vary wording, "
+    "terminology, or specificity, to help retrieve relevant passages the exact "
     "original wording might miss."
 )
 

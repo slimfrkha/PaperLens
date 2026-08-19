@@ -96,7 +96,7 @@ def _paper_outline(paper_id: str, title: str, sections: list[Section]) -> str:
 
 
 _SPOT_SYSTEM = (
-    "You review outlines of multiple machine-learning research papers to find sections "
+    "You review outlines of multiple research papers to find sections "
     "in DIFFERENT papers that discuss the same underlying concept, method, or result -- "
     "genuinely comparable content, not just a shared generic heading. Only report a match "
     "if you are confident the sections could be meaningfully compared or contrasted. "
@@ -178,8 +178,8 @@ def _order_by_draw(resolved: list[Section], paper_ids: list[str]) -> list[Sectio
 
 
 _WRITE_SYSTEM = (
-    "You write evaluation questions for a retrieval system over machine-learning "
-    "research papers. Given matching sections from DIFFERENT papers, write ONE specific "
+    "You write evaluation questions for a retrieval system over research papers. "
+    "Given matching sections from DIFFERENT papers, write ONE specific "
     "question whose complete, correct answer genuinely requires information from EVERY "
     "section shown -- a question answerable from only one of them does not count. "
     'Respond ONLY with a JSON object: {"question": "...", "answer": "..."}.'

@@ -1,6 +1,6 @@
 # 📚 PaperLens documentation
 
-PaperLens is a local, config-driven RAG app over arXiv model technical reports:
+PaperLens is a local, config-driven RAG app over arXiv papers:
 ingest papers, then chat with an agent that retrieves passages and answers with
 clickable, grounded citations. Everything is driven by one `config.yaml`. ⚙️
 

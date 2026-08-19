@@ -44,8 +44,8 @@ class GenFilterConfig:
 
 
 _CLOSED_BOOK_SYSTEM = (
-    "Answer the following question about a machine-learning research paper using only "
-    "your own knowledge. If you don't know, say so briefly. Respond with just the short "
+    "Answer the following question about a research paper using only your own "
+    "knowledge. If you don't know, say so briefly. Respond with just the short "
     "answer, no explanation."
 )
 

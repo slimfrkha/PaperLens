@@ -8,8 +8,8 @@ it lives in the code, and an `_Avoid_:` list of synonyms we deliberately do **no
 
 ### 📄 Paper
 
-One arXiv model technical report tracked by the app. Declared in `config.yaml` under
-`papers` as `{ name, arxiv_id }`. Everything downstream keys off it.
+One arXiv paper tracked by the app. Declared in `config.yaml` under `papers` as
+`{ name, arxiv_id }`. Everything downstream keys off it.
 
 - Code: `Paper` model in `src/rag/config.py`.
 - `_Avoid_:` document, article, PDF (a PDF is one *artifact* of a paper, not the paper).

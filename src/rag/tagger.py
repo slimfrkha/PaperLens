@@ -9,9 +9,9 @@ from .config import LLMSpec
 from .llm import build_llm
 
 _SYSTEM = (
-    "You tag machine-learning research papers for a search index. Emit concise, "
-    "reusable topical tags (techniques, architectures, training/inference methods, "
-    "model family). Prefer widely-used terms."
+    "You tag research papers for a search index. Emit concise, reusable topical tags "
+    "naming the paper's field, methods, and key techniques or concepts. Prefer "
+    "widely-used terms."
 )
 
 
@@ -80,10 +80,10 @@ def generate_tags(
 
 
 _NORMALIZE_SYSTEM = (
-    "You curate a controlled vocabulary of topical tags for a machine-learning "
-    "paper search index. You merge only tags that name the SAME concept — spelling "
-    "variants, acronym vs expansion, near-synonyms. You never merge tags that name "
-    "distinct techniques."
+    "You curate a controlled vocabulary of topical tags for a research paper search "
+    "index. You merge only tags that name the SAME concept — spelling variants, "
+    "acronym vs expansion, near-synonyms. You never merge tags that name distinct "
+    "concepts."
 )
 
 
@@ -120,7 +120,7 @@ def normalize_tags(tags: list[str], spec: LLMSpec) -> dict[str, str]:
         f"Full tag vocabulary of the library:\n{listing}\n\n"
         "Some of these name the same concept in different words. Pick one canonical "
         "form per concept — prefer the clearest, most widely-used term already in the "
-        "list — and map the near-duplicates onto it. Keep distinct techniques separate; "
+        "list — and map the near-duplicates onto it. Keep distinct concepts separate; "
         "never merge tags that mean different things.\n\n"
         "Return ONLY a JSON object mapping each tag that should change to its canonical "
         "form (omit tags that stay as they are)."
