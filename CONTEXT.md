@@ -13,6 +13,8 @@ One arXiv paper tracked by the app. Declared in `config.yaml` under `papers` as
 
 - Code: `Paper` model in `src/rag/config.py`.
 - `_Avoid_:` document, article, PDF (a PDF is one *artifact* of a paper, not the paper).
+- See [Why arXiv-specific](docs/architecture.md#-why-arxiv-specific--what-wont-generalize)
+  for why this app doesn't generalize to arbitrary documents.
 
 ### 🆔 paper_id
 

@@ -112,9 +112,9 @@ heading text (`2`, `2.1`, `2.1.1`) still encodes it. So PaperLens:
   ones are merged or dropped.
 
 The size thresholds and noise heuristics (`max_tokens`, `overlap_tokens`, `min_tokens`,
-`noise_ratio`, `extra_skip_titles`) are config, not constants — they're tuned for dense ML
-technical reports, and a differently-shaped paper list (surveys, shorter papers, non-ML
-PDFs) may need different numbers. See [`chunking`](configuration.md#️-chunking).
+`noise_ratio`, `extra_skip_titles`) are config, not constants — they're tuned for dense
+technical reports, and a differently-shaped paper list (surveys, shorter papers) may need
+different numbers. See [`chunking`](configuration.md#️-chunking).
 
 A `Chunk` therefore stores both `text` (breadcrumb + body, what gets embedded) and `body`
 (shown to the reader). This is why citations can name the exact section.
@@ -324,6 +324,47 @@ by `search`/`pipeline`.
 FastAPI app and the in-process ingestion worker, and **never** the reverse. The full graph
 is documented in `src/rag/__init__.py`. Keeping it acyclic is a maintained invariant — see
 [CONTRIBUTING](../CONTRIBUTING.md).
+
+## 🧬 Why arXiv-specific — what won't generalize
+
+PaperLens is not a generic "chat with any PDF/document" tool — it's coupled end-to-end to
+arXiv's *structural* conventions (LaTeX PDF layout, decimal section numbering,
+ID-addressable download, an Abstract heading). Pointing it at a different corpus means
+dealing with two very different kinds of coupling.
+
+**Structural — breaks silently, needs real engineering to change:**
+
+- **Identity & ingestion path.** `arxiv_id` is the sole identifier end-to-end: the config
+  schema (`Paper{name, arxiv_id}`), the fixed download URL (`arxiv.org/pdf/{id}`,
+  `src/rag/pipeline.py`), and the *only* admin ingestion path — `POST /api/admin/papers`
+  requires an arXiv ID or `arxiv.org` URL (`_normalize_arxiv_id`, `src/server/main.py`).
+  There's no "upload an arbitrary file" flow.
+- **Extraction.** OCR is off by default (`src/rag/extract.py`) because arXiv PDFs are
+  LaTeX-generated with a real text layer; a scanned document extracts empty or garbled
+  under that default. Figure-crop dedup assumes a repeated crop is a per-page
+  watermark/logo, not a deliberately repeated diagram.
+- **Chunking.** see [Section-aware chunking](#️-section-aware-chunking)
+  above; on top of that, the very first `##` heading is assumed to be the paper title, which
+  doesn't hold for unnumbered headings or a cover page. The noise skip-list (references,
+  bibliography, acknowledgements, contributors) and figure/table caption regexes are
+  academic-paper section vocabulary. The eval harness (`src/eval/queryset.py`) reuses these
+  exact rules to sample sections, so eval quality inherits the same assumptions.
+- **Tagging.** The tagging excerpt (`src/rag/tagger.py`) looks for a `## Abstract` heading
+  to summarize the paper, with no generic fallback when one isn't there.
+
+**Copy-level — swap the string, nothing structurally breaks:**
+
+- The agent's persona and tool description (`src/server/agent.py`) name "arXiv papers"
+  explicitly.
+- `arxiv_id`-shaped fields run through the manifest, the citation registry, and the
+  frontend (the arXiv link in the paper viewer, the `eprint`/`archivePrefix`/year-from-ID
+  fields in BibTeX export, `web/src/exportAnswer.ts`) — they degrade gracefully (nullable)
+  but aren't source-agnostic.
+
+**What *is* source-agnostic:** the `ChoiceRegistry`-backed pieces — embedder, reranker, LLM
+backend — are designed to be swapped via config (see above). The document-domain model
+itself (`Paper` = an arXiv report, `arxiv_id` a first-class field everywhere) isn't
+pluggable the same way.
 
 ## 💡 Notable design facts
 
