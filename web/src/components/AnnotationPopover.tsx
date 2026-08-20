@@ -32,8 +32,19 @@ export default function AnnotationPopover({
 
   if (!position) return null;
 
+  // Outside click (Mantine's own close-on-click-outside) dismisses the popover — while
+  // editing, that must autosave the in-progress draft like the Save button, not discard it
+  // like Cancel; the user didn't choose to cancel, they clicked somewhere else on the page.
+  function handleDismiss() {
+    if (editing) {
+      onSaveNote(draft);
+    } else {
+      onClose();
+    }
+  }
+
   return (
-    <Popover opened position="top" withArrow shadow="md" trapFocus onClose={onClose}>
+    <Popover defaultOpened position="top" withArrow shadow="md" trapFocus onClose={handleDismiss}>
       <Popover.Target>
         <div
           style={{

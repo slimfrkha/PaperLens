@@ -57,6 +57,24 @@ describe("AnnotationPopover", () => {
     expect(screen.getByText("No note")).toBeInTheDocument();
   });
 
+  it("clicking outside the popover calls onClose", () => {
+    const props = renderPopover({ mode: "create" });
+    fireEvent.mouseDown(document.body);
+    expect(props.onClose).toHaveBeenCalled();
+  });
+
+  it("clicking outside while editing autosaves the draft instead of discarding it", () => {
+    const props = renderPopover({ mode: "create" });
+    fireEvent.click(screen.getByText("Add note"));
+
+    const textarea = screen.getByPlaceholderText("Add a note...");
+    fireEvent.change(textarea, { target: { value: "an unsaved draft" } });
+    fireEvent.mouseDown(document.body);
+
+    expect(props.onSaveNote).toHaveBeenCalledWith("an unsaved draft");
+    expect(props.onClose).not.toHaveBeenCalled();
+  });
+
   it("view mode: Edit reuses the Save flow to update the note", () => {
     const props = renderPopover({ mode: "view", note: "old note" });
     fireEvent.click(screen.getByText("Edit"));
