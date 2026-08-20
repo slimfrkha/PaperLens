@@ -272,29 +272,9 @@ export default function PaperViewer() {
     <Center>
       <Stack gap="lg" w="100%" maw={760} py="md">
         <Stack gap="sm">
-          <Group justify="space-between" align="flex-start" wrap="nowrap">
-            <Title order={1} lh={1.15}>
-              {data.title}
-            </Title>
-            <Tooltip label="Your notes for this paper">
-              <Indicator
-                label={annotations.length}
-                size={16}
-                color="accent"
-                disabled={annotations.length === 0}
-              >
-                <ActionIcon
-                  variant="light"
-                  color="gray"
-                  size="lg"
-                  aria-label="Notes"
-                  onClick={() => setRailOpen(true)}
-                >
-                  <IconSidebar size={16} />
-                </ActionIcon>
-              </Indicator>
-            </Tooltip>
-          </Group>
+          <Title order={1} lh={1.15}>
+            {data.title}
+          </Title>
           <Group gap={8}>
             {data.arxiv_id && (
               <Anchor
@@ -321,18 +301,43 @@ export default function PaperViewer() {
         </Box>
       </Stack>
 
-      {annotations.length === 0 && (
+      {!railOpen && (
         // Fixed to the viewport, not the document flow: a citation jump auto-scrolls the
-        // page to the cited passage, which would carry an inline hint (and the Notes icon
-        // itself) off-screen before the user ever saw it — this stays visible regardless.
-        // top: 76 = AppShell's 60px header (App.tsx:63) + 16px clearance, so it sits below
-        // the header bar instead of overlapping the nav/theme-toggle.
+        // page to the cited passage, which would otherwise carry the Notes toggle and hint
+        // off-screen before the user ever saw them — and once scrolled past the title, a
+        // non-floating toggle would stay out of reach for the rest of the page. top: 76 =
+        // AppShell's 60px header (App.tsx:63) + 16px clearance, so it sits below the header
+        // bar instead of overlapping the nav/theme-toggle. Hidden while the rail is open —
+        // the Drawer sits on top of it at the same corner, so left showing it just layers a
+        // dead-looking icon over the open panel.
         <Affix position={{ top: 76, right: 16 }}>
-          <Paper shadow="sm" radius="md" p="xs" withBorder maw={220}>
-            <Text size="xs" c="dimmed">
-              Select any passage in the paper to highlight it or add a note.
-            </Text>
-          </Paper>
+          <Stack gap="xs" align="flex-end">
+            <Tooltip label="Your notes for this paper">
+              <Indicator
+                label={annotations.length}
+                size={16}
+                color="accent"
+                disabled={annotations.length === 0}
+              >
+                <ActionIcon
+                  variant="light"
+                  color="gray"
+                  size="lg"
+                  aria-label="Notes"
+                  onClick={() => setRailOpen(true)}
+                >
+                  <IconSidebar size={16} />
+                </ActionIcon>
+              </Indicator>
+            </Tooltip>
+            {annotations.length === 0 && (
+              <Paper shadow="sm" radius="md" p="xs" withBorder maw={220}>
+                <Text size="xs" c="dimmed">
+                  Select any passage in the paper to highlight it or add a note.
+                </Text>
+              </Paper>
+            )}
+          </Stack>
         </Affix>
       )}
 
