@@ -74,6 +74,12 @@ export default function ChatPage() {
   // route param re-renders).
   const abortRef = useRef<AbortController | null>(null);
   const activeChatIdRef = useRef<string | null>(null);
+  // onToken concatenates streamed text with no separator of its own — fine within one
+  // uninterrupted stretch of tokens, but a trace event (a tool call) means the next batch
+  // of tokens is a fresh chunk of prose from a new model round, not a continuation of the
+  // same sentence. Without this, "...KV cache handling." and "DeepSeek-V3 reports..." land
+  // glued together with no boundary. Set on every trace event, consumed by the next token.
+  const pendingSeparatorRef = useRef(false);
 
   const refreshSessions = () => listChats().then(setSessions);
 
@@ -192,6 +198,7 @@ export default function ChatPage() {
     const controller = new AbortController();
     abortRef.current = controller;
     activeChatIdRef.current = id;
+    pendingSeparatorRef.current = false;
     try {
       await chat(
         history,
@@ -200,9 +207,17 @@ export default function ChatPage() {
         perPaper,
         id,
         {
-          onToken: (tok) => patchLast((t) => ({ ...t, content: t.content + tok })),
+          onToken: (tok) =>
+            patchLast((t) => {
+              const sep = pendingSeparatorRef.current && t.content && !/\n\n$/.test(t.content);
+              pendingSeparatorRef.current = false;
+              return { ...t, content: t.content + (sep ? "\n\n" : "") + tok };
+            }),
           onCitations: (c) => patchLast((t) => ({ ...t, citations: c })),
-          onTrace: (e) => patchLast((t) => ({ ...t, trace: [...(t.trace ?? []), e] })),
+          onTrace: (e) => {
+            pendingSeparatorRef.current = true;
+            patchLast((t) => ({ ...t, trace: [...(t.trace ?? []), e] }));
+          },
           onUsage: (u) => patchLast((t) => ({ ...t, usage: u })),
           onMeta: () => refreshSessions(),
           onError: (e) => patchLast((t) => ({ ...t, content: t.content + `\n\n_Error: ${e}_` })),

@@ -89,7 +89,10 @@ def test_observation_trace_carries_a_cutoff_diagnostic_when_not_no_elbow(make_ag
     )
 
     observation = next(e for e in trace if e["type"] == "observation")
-    assert observation["text"].startswith("[1 of up to 1 returned — no_rerank]")
+    # Remaining-searches countdown prefixes the observation ahead of the cutoff
+    # diagnostic, which itself still comes ahead of the passage blocks.
+    assert observation["text"].startswith("[")
+    assert "[1 of up to 1 returned — no_rerank]" in observation["text"]
 
 
 def test_run_returns_usage_from_the_llm_backend(make_agent, fake_llm):

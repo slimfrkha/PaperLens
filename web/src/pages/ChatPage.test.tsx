@@ -133,6 +133,59 @@ describe("ChatPage usage metadata", () => {
   });
 });
 
+describe("ChatPage streamed-content separator", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("inserts a break between token text on either side of a tool-call trace event", async () => {
+    // onToken concatenates raw text with no boundary of its own — a trace event (the
+    // tool call) sits between two batches of prose from two different model rounds,
+    // so without a separator "...handling." and "DeepSeek-V3 reports..." land glued
+    // into one sentence.
+    const sse =
+      "event: token\ndata: KV cache handling.\n\n" +
+      'event: trace\ndata: {"type":"action","query":"MLA"}\n\n' +
+      "event: token\ndata: DeepSeek-V3 reports a 93% reduction.\n\n" +
+      "event: citations\ndata: []\n\nevent: done\ndata: \n\n";
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/chat") return Promise.resolve(mockStreamResponse(sse));
+      const body =
+        url === "/api/chats/test-id"
+          ? chatSession
+          : url.startsWith("/api/tags") ||
+              url.startsWith("/api/papers") ||
+              url.startsWith("/api/chats")
+            ? []
+            : {};
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+    await screen.findByText(/regression marker text/i);
+
+    fireEvent.change(screen.getByPlaceholderText("Ask about a paper or a concept…"), {
+      target: { value: "How does MLA reduce KV cache?" },
+    });
+    fireEvent.click(screen.getByLabelText("Send"));
+
+    await screen.findByText(/DeepSeek-V3 reports/i);
+    // The two fragments render as distinct text, not fused into "handling.DeepSeek-V3".
+    expect(screen.queryByText(/handling\.DeepSeek-V3/)).not.toBeInTheDocument();
+    expect(screen.getByText(/KV cache handling\./)).toBeInTheDocument();
+  });
+});
+
 describe("ChatPage feedback control", () => {
   afterEach(() => {
     vi.unstubAllGlobals();

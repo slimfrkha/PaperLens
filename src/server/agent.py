@@ -30,9 +30,11 @@ def _search_tool() -> dict:
         "description": (
             "Search the library of arXiv papers and return the most "
             "relevant passages. Call it once per focused sub-question (call it several "
-            "times to decompose a multi-part question). Each result carries a `ref` "
-            "(r1, r2, ...) you must use to cite it. Do NOT call this for greetings or "
-            "small talk."
+            "times to decompose a multi-part question). Each result carries a unique "
+            "`ref` (e.g. r7) — numbered once across the whole conversation, not "
+            "restarted per call — you must cite exactly as shown, and `paper=<paper_id>` "
+            "for attribution. The result also tells you how many searches you have left "
+            "this turn. Do NOT call this for greetings or small talk."
         ),
         "input_schema": {
             "type": "object",
@@ -56,22 +58,73 @@ def _search_tool() -> dict:
     }
 
 
-SYSTEM_PROMPT = """You are a research assistant for a library of arXiv papers.
+SYSTEM_PROMPT = """You are a research assistant for a library of arXiv papers. \
+Treat these papers as unknown to you, even ones you recognize by name — you have \
+no reliable memory of what any of them actually say. Ground every claim about \
+the papers in a passage a search actually returned; don't answer from \
+pretraining.
 
-First decide whether answering actually needs the papers:
+Decide how to answer before doing anything else — if a message mixes more than \
+one of these, take the branch that needs the most evidence:
 - Greetings, thanks, or simple conversational messages: answer directly, do NOT \
 call any tool.
-- Questions about the papers or the concepts in them: use the `search_papers` \
-tool. Decompose a multi-part question and call the tool once per focused \
-sub-question (you may call it several times). Read the returned passages, and if \
-you still need more, search again — keep going until you have enough, then answer.
+- "What papers do you have?": answer from the papers in scope below, no \
+search needed — but the topic hints are routing aids, not evidence: they \
+carry no ref, so never state one as a finding, and a tag's absence doesn't \
+mean the paper doesn't cover it, only that it wasn't a top tag. Anything more \
+specific than titles and hints belongs to the next branch.
+- A follow-up on your own prior answer in this conversation ("say more about \
+that", "what did you mean by X?"): only your prior text persists across turns, \
+not the passages behind it. Restating a claim your last answer already made \
+may reuse that ref; anything beyond what you already wrote needs a fresh \
+search — don't extend a ref past what you actually retrieved.
+- Anything else about the papers or concepts in them — or plausibly in them, \
+including questions outside the papers and "does the library cover X?": search first \
+rather than guessing it's out of scope; use `search_papers`. If the question \
+decomposes into more than one sub-question needing distinct evidence, say in \
+one short line which you'll search for before your first call — that line \
+becomes the start of your visible answer, so keep it brief, and skip it for a \
+single-search question. Comparing two papers is one filtered search per \
+paper, not one unfiltered search — the paper argument narrows within scope, \
+it never overrides it — and every sub-question needs its own search, even one \
+that turns up a passage you already had. You have at most {search_budget} \
+searches this turn and must answer within the same turn; a reformulation \
+counts against that same budget. Each result tells you how many searches are \
+left — stop before you hit zero. If you end up skipping a sub-question or \
+answering from a weaker passage than you wanted, say so at the end of your \
+answer, not the start — the plan you opened with may not match what you \
+actually got to.
 
-Ground every factual claim in retrieved passages and cite them inline with the \
-[rN] markers exactly as they appear in the results (e.g. "MLA shrinks the KV cache \
-[r2]."). Only cite refs you actually received. Be concise and technical.
+Once a search returns:
+- If a result doesn't actually answer the sub-question it was for (the common \
+case — retrieval rarely returns nothing, it returns plausible-looking chunks \
+that miss): don't treat it as coverage. You may reformulate that one \
+sub-question's query once; if it's still empty, say in your final answer that \
+the papers in scope don't appear to cover this rather than filling the gap \
+from memory.
+- If nothing you retrieved answers a question that's outside the papers, you \
+may answer it from general knowledge instead — label that clearly as not \
+from the library.
+
+When writing a query, resolve pronouns/references against the conversation \
+first. Include the user's own term alongside the paper's likely technical \
+vocabulary, not instead of it — if the user uses an acronym, search for the \
+acronym itself, not just its expansion, since the passage may only ever use \
+the acronym.
+
+Every result carries paper=<paper_id> — that field is the paper's identity, \
+not its content; attribute claims from it, never by guessing which paper a \
+passage sounds like. Cite retrieved passages inline with the [rN] markers \
+exactly as they appear in the results, and name the paper in prose, not just \
+the marker — e.g. "<paper name> reports X [r3]," not "X [r3]." If a title looks \
+wrong (garbled, or just an author/org name), use the paper_id instead — the \
+id is always the paper's real identity. If \
+papers disagree, present both attributed positions rather than reconciling \
+them, and say when a passage only partially answers. Only cite refs you \
+actually received. Be concise and technical.
 
 {filter_note}
-Papers in the library: {papers}"""
+Papers in scope: {papers}"""
 
 
 class ChatAgent:
@@ -93,7 +146,7 @@ class ChatAgent:
         self.faithfulness = faithfulness or build_faithfulness_checker(cfg.faithfulness)
         self.search_tool = _search_tool()
 
-    def _system(self, paper_ids: list[str] | None) -> str:
+    def _system(self, paper_ids: list[str] | None, search_budget: int) -> str:
         # Scope the injected catalog to the active filter — otherwise the model can
         # read every paper off the prompt prefix and answer catalog questions
         # ("which models?") without searching, bypassing the filter entirely.
@@ -101,16 +154,34 @@ class ChatAgent:
         if paper_ids is not None:
             allowed = set(paper_ids)
             recs = [p for p in recs if p["paper_id"] in allowed]
-        papers = ", ".join(f"{p['paper_id']} ({p['title']})" for p in recs) or "(none)"
+        # Rarest-first tags per paper as a routing hint — e.g. distinguishing two
+        # near-duplicate titles in the same paper family — since sorting by raw tag
+        # order would surface whatever generic tags nearly every paper in the
+        # library shares.
+        tag_counts: dict[str, int] = {}
+        for p in recs:
+            for t in p.get("tags", []):
+                tag_counts[t] = tag_counts.get(t, 0) + 1
+
+        def topical(p: dict) -> str:
+            tags = sorted(p.get("tags", []), key=lambda t: tag_counts[t])[:3]
+            return f"; {', '.join(tags)}" if tags else ""
+
+        papers = ", ".join(f"{p['paper_id']} ({p['title']}{topical(p)})" for p in recs) or "(none)"
+        # "papers in scope" is the one phrase the prompt uses everywhere it needs to talk
+        # about what's searchable — this note is the only place that defines it, so a
+        # branch can say "papers in scope" and be correct whether or not a filter is
+        # active, instead of every branch separately hardcoding "the library".
         if paper_ids is not None:
             note = (
-                "The user restricted this conversation to the papers listed below — "
-                "treat those as the only papers that exist. Do not mention, list, or "
-                "search any other paper."
+                "The user restricted this conversation's scope to the papers listed "
+                "below — those, and only those, are 'papers in scope' throughout this "
+                "prompt; treat them as the only papers that exist. Do not mention, "
+                "list, or search any other paper."
             )
         else:
-            note = "No paper/tag filter is active; all papers are searchable."
-        return SYSTEM_PROMPT.format(filter_note=note, papers=papers)
+            note = "No paper/tag filter is active; 'papers in scope' means the entire library."
+        return SYSTEM_PROMPT.format(filter_note=note, papers=papers, search_budget=search_budget)
 
     def run(
         self,
@@ -163,6 +234,12 @@ class ChatAgent:
         registry: dict[str, dict] = {}
         bodies: dict[str, str] = {}
         counter = {"n": ref_start}
+        # max_rounds counts ReAct rounds, not searches, and the harness doesn't reserve
+        # a final round to answer in — if the model spends every round on tool calls it
+        # returns with no real answer. Budget one fewer than the true round cap so the
+        # model treats the last round as the one it must spend answering, not searching.
+        search_budget = max(self.cfg.retrieval.max_rounds - 1, 1)
+        searches_used = {"n": 0}
 
         def trace(entry: dict):
             if on_trace:
@@ -174,6 +251,11 @@ class ChatAgent:
             query = (args.get("query") or "").strip()
             if not query:
                 return "Error: empty query."
+            searches_used["n"] += 1
+            # Told to the model in the tool result (not just the system prompt) so it
+            # doesn't have to self-count tool calls across a long interleaved trace —
+            # a read, not a memory task.
+            remaining = max(search_budget - searches_used["n"], 0)
             trace(
                 {
                     "type": "action",
@@ -198,7 +280,10 @@ class ChatAgent:
             results = outcome.results
             if not results:
                 trace({"type": "observation", "text": "(no results)"})
-                return "No results for that query (within the active filter)."
+                return (
+                    "No results for that query (within the active filter). "
+                    f"[{remaining} searches remaining this turn]"
+                )
             blocks = []
             for r in results:
                 counter["n"] += 1
@@ -226,11 +311,12 @@ class ChatAgent:
                     f"[{len(results)} of up to {self.cfg.retrieval.max_k} returned "
                     f"— {outcome.cutoff_reason}]\n\n"
                 ) + observation
+            observation = f"[{remaining} searches remaining this turn]\n\n" + observation
             trace({"type": "observation", "text": observation})
             return observation
 
         text, usage = self.client.run_tools(
-            system=self._system(paper_ids),
+            system=self._system(paper_ids, search_budget),
             messages=[dict(m) for m in messages],
             tools=[self.search_tool],
             execute=execute,
