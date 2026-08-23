@@ -79,6 +79,7 @@ A working inventory of what PaperLens does today, organized into four sections:
 - **Notes rail (drawer)** — side drawer listing all annotations with badge/count indicator (`web/src/pages/PaperViewer.tsx`)
 - **Jump to annotation** — smooth-scrolls to the highlighted passage (`web/src/pages/PaperViewer.tsx`)
 - **First-time annotation hint** — floating tip until the paper has at least one annotation (`web/src/pages/PaperViewer.tsx`)
+- **Paper outline / jump nav** — collapsible "Contents" rail built from the paper's rendered heading ids, indented by section-number depth (numbered headings) or inferred from the nearest numbered neighbors (unnumbered ones) (`web/src/pages/PaperViewer.tsx`, `web/src/outline.ts`)
 - **Loading state** (`web/src/pages/PaperViewer.tsx`)
 
 ### Admin / ingestion management

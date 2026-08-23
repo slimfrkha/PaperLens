@@ -19,8 +19,9 @@ import {
   UnstyledButton,
 } from "@mantine/core";
 import Markdown from "../components/Markdown";
-import { IconExternal, IconSidebar } from "../components/Icons";
+import { IconExternal, IconList, IconSidebar } from "../components/Icons";
 import AnnotationPopover from "../components/AnnotationPopover";
+import { buildOutline, type OutlineEntry } from "../outline";
 import {
   type Annotation,
   createAnnotation,
@@ -68,6 +69,8 @@ export default function PaperViewer() {
   const [unresolvedIds, setUnresolvedIds] = useState<Set<string>>(new Set());
   const [popover, setPopover] = useState<PopoverState | null>(null);
   const [railOpen, setRailOpen] = useState(false);
+  const [tocOpen, setTocOpen] = useState(false);
+  const [outline, setOutline] = useState<OutlineEntry[]>([]);
   const ref = useRef<HTMLDivElement>(null);
   const popoverSeq = useRef(0);
   // Tracks which annotation ids already have a registered highlight range, so the
@@ -104,6 +107,19 @@ export default function PaperViewer() {
       return () => clearTimeout(t);
     }
   }, [data, location.state]);
+
+  // Builds the "Contents" rail from the rendered headings once ReactMarkdown has
+  // committed its DOM — same 200ms-after-mount wait as the citation-highlight effect
+  // above, and for the same reason: headings don't exist until after this render commits.
+  useEffect(() => {
+    const el = ref.current;
+    if (!data || !el) return;
+    // Docling always emits the paper's own title as the first `##` heading; it's already
+    // shown separately in the page header above the reading pane, so including it here
+    // would just duplicate it as the outline's redundant first entry.
+    const t = setTimeout(() => setOutline(buildOutline(el).slice(1)), 200);
+    return () => clearTimeout(t);
+  }, [data]);
 
   // Restores previously-saved annotation highlights. Depends on `data` (not just `id`) so
   // it re-registers if the reading DOM is ever recreated after mount, and on `annotations`
@@ -301,15 +317,15 @@ export default function PaperViewer() {
         </Box>
       </Stack>
 
-      {!railOpen && (
+      {!tocOpen && !railOpen && (
         // Fixed to the viewport, not the document flow: a citation jump auto-scrolls the
         // page to the cited passage, which would otherwise carry the Notes toggle and hint
         // off-screen before the user ever saw them — and once scrolled past the title, a
         // non-floating toggle would stay out of reach for the rest of the page. top: 76 =
         // AppShell's 60px header (App.tsx:63) + 16px clearance, so it sits below the header
-        // bar instead of overlapping the nav/theme-toggle. Hidden while the rail is open —
-        // the Drawer sits on top of it at the same corner, so left showing it just layers a
-        // dead-looking icon over the open panel.
+        // bar instead of overlapping the nav/theme-toggle. Hidden while the rail or the
+        // Contents rail is open — either Drawer sits on top of it at the same corner, so
+        // showing it then just layers a dead-looking icon over the open panel.
         <Affix position={{ top: 76, right: 16 }}>
           <Stack gap="xs" align="flex-end">
             <Tooltip label="Your notes for this paper">
@@ -338,6 +354,24 @@ export default function PaperViewer() {
               </Paper>
             )}
           </Stack>
+        </Affix>
+      )}
+
+      {!tocOpen && !railOpen && (
+        // Mirrors the Notes toggle above (same positioning rationale) but on the left, so
+        // the two floating buttons never stack.
+        <Affix position={{ top: 76, left: 16 }}>
+          <Tooltip label="Jump to a section">
+            <ActionIcon
+              variant="light"
+              color="gray"
+              size="lg"
+              aria-label="Contents"
+              onClick={() => setTocOpen(true)}
+            >
+              <IconList size={16} />
+            </ActionIcon>
+          </Tooltip>
         </Affix>
       )}
 
@@ -388,6 +422,38 @@ export default function PaperViewer() {
               </UnstyledButton>
             );
           })}
+        </Stack>
+      </Drawer>
+
+      <Drawer
+        opened={tocOpen}
+        onClose={() => setTocOpen(false)}
+        position="left"
+        title="Contents"
+        size="sm"
+      >
+        <Stack gap={4}>
+          {outline.length === 0 && (
+            <Text size="sm" c="dimmed">
+              No headings found in this paper.
+            </Text>
+          )}
+          {outline.map((entry) => (
+            <UnstyledButton
+              key={entry.id}
+              pl={entry.depth * 12}
+              onClick={() =>
+                document
+                  .getElementById(entry.id)
+                  ?.scrollIntoView({ behavior: "smooth", block: "start" })
+              }
+              style={{ textAlign: "left" }}
+            >
+              <Text size="sm" lineClamp={2}>
+                {entry.text}
+              </Text>
+            </UnstyledButton>
+          ))}
         </Stack>
       </Drawer>
     </Center>

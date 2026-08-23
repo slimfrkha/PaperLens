@@ -33,6 +33,12 @@ export const IconSidebar = (p: IconProps) => (
   </Svg>
 );
 
+export const IconList = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" />
+  </Svg>
+);
+
 export const IconPlus = (p: IconProps) => (
   <Svg {...p}>
     <path d="M12 5v14M5 12h14" />

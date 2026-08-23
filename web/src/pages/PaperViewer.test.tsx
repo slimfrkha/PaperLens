@@ -360,3 +360,68 @@ describe("PaperViewer annotations", () => {
     expect(await screen.findByText(/not found in current text/i)).toBeInTheDocument();
   });
 });
+
+describe("PaperViewer outline (Contents rail)", () => {
+  beforeEach(() => {
+    Element.prototype.scrollIntoView = vi.fn();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  // The shared `paper` fixture's markdown has only one heading, which the production
+  // code treats as the paper's own title and strips from the outline (see
+  // PaperViewer.tsx's outline-building effect) — so these tests need a second heading to
+  // survive that strip and actually appear in the Contents drawer.
+  function mockFetchWithHeadings() {
+    return mockFetch([], (url) =>
+      url === "/api/papers/paper1"
+        ? { ...paper, markdown: "## Paper Title\n\nAbstract text.\n\n## Section One\n\nBody text." }
+        : undefined,
+    );
+  }
+
+  it("Contents toggle opens a drawer listing the paper's rendered headings", async () => {
+    vi.stubGlobal("fetch", mockFetchWithHeadings());
+    renderPaperViewer();
+    await screen.findByText("Test Paper");
+
+    fireEvent.click(screen.getByLabelText("Contents"));
+    // Scoped by role, not text: the heading itself is still rendered (unscoped) in the
+    // reading pane behind the drawer, so a plain text query would match both.
+    expect(await screen.findByRole("button", { name: "Section One" })).toBeInTheDocument();
+  });
+
+  it("clicking a heading scrolls to it", async () => {
+    vi.stubGlobal("fetch", mockFetchWithHeadings());
+    renderPaperViewer();
+    await screen.findByText("Test Paper");
+
+    fireEvent.click(screen.getByLabelText("Contents"));
+    fireEvent.click(await screen.findByRole("button", { name: "Section One" }));
+
+    expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({
+      behavior: "smooth",
+      block: "start",
+    });
+  });
+
+  it("opening the Contents rail hides the Notes toggle", async () => {
+    vi.stubGlobal("fetch", mockFetchWithHeadings());
+    renderPaperViewer();
+    await screen.findByText("Test Paper");
+
+    fireEvent.click(screen.getByLabelText("Contents"));
+    expect(screen.queryByLabelText("Notes")).not.toBeInTheDocument();
+  });
+
+  it("opening the Notes rail hides the Contents toggle", async () => {
+    vi.stubGlobal("fetch", mockFetchWithHeadings());
+    renderPaperViewer();
+    await screen.findByText("Test Paper");
+
+    fireEvent.click(screen.getByLabelText("Notes"));
+    expect(screen.queryByLabelText("Contents")).not.toBeInTheDocument();
+  });
+});
