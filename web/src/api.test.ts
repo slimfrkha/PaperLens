@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { addPaper, chat, removePaper, setFeedback, stopChat } from "./api";
+import { addPapers, chat, removePaper, setFeedback, stopChat } from "./api";
 
 function mockStreamResponse(sse: string): Response {
   let sent = false;
@@ -266,44 +266,53 @@ describe("setFeedback", () => {
   });
 });
 
-describe("addPaper", () => {
+describe("addPapers", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
 
-  it("POSTs the raw id/URL and returns the queued name", async () => {
+  it("POSTs the raw ids/URLs and returns the per-line results", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: () => Promise.resolve({ queued: true, name: "2412.19437" }),
+      json: () =>
+        Promise.resolve({
+          results: [
+            { input: "https://arxiv.org/abs/2412.19437", status: "queued", name: "2412.19437" },
+          ],
+        }),
     } as Response);
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await addPaper("https://arxiv.org/abs/2412.19437");
+    const result = await addPapers(["https://arxiv.org/abs/2412.19437"]);
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/admin/papers",
       expect.objectContaining({
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ arxiv_id_or_url: "https://arxiv.org/abs/2412.19437" }),
+        body: JSON.stringify({ arxiv_ids_or_urls: ["https://arxiv.org/abs/2412.19437"] }),
       }),
     );
-    expect(result).toEqual({ queued: true, name: "2412.19437" });
+    expect(result).toEqual({
+      results: [
+        { input: "https://arxiv.org/abs/2412.19437", status: "queued", name: "2412.19437" },
+      ],
+    });
   });
 
-  it("throws the backend's error message on a 409 duplicate", async () => {
+  it("throws the backend's error message on a non-2xx response", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({
         ok: false,
-        status: 409,
-        statusText: "Conflict",
-        json: () => Promise.resolve({ error: "already curated as deepseek-v3" }),
+        status: 500,
+        statusText: "Internal Server Error",
+        json: () => Promise.resolve({ error: "boom" }),
       } as Response),
     );
 
-    await expect(addPaper("2412.19437")).rejects.toThrow("already curated as deepseek-v3");
+    await expect(addPapers(["2412.19437"])).rejects.toThrow("boom");
   });
 });
 

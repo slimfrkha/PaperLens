@@ -62,14 +62,14 @@ server:
   port: 8000
 
 papers:
-  - { name: deepseek-v3, arxiv_id: "2412.19437" }
-  - { name: deepseek-v4-preview, arxiv_id: "2606.19348" }
-  - { name: glm-4.5, arxiv_id: "2508.06471" }
-  - { name: glm-5, arxiv_id: "2602.15763" }
-  - { name: kimi-k2, arxiv_id: "2507.20534" }
-  - { name: kimi-k2.5, arxiv_id: "2602.02276" }
-  - { name: mimo-v2-flash, arxiv_id: "2601.02780" }
-  - { name: minimax-m2-series, arxiv_id: "2605.26494" }
-  - { name: minimax-m3-msa, arxiv_id: "2606.13392" }
-  - { name: nemotron-3-whitepaper, arxiv_id: "2512.20856" }
-  - { name: nemotron-3-ultra, arxiv_id: "2606.15007" }
+  - {name: deepseek-v3, arxiv_id: "2412.19437"}
+  - {name: deepseek-v4-preview, arxiv_id: "2606.19348"}
+  - {name: glm-4.5, arxiv_id: "2508.06471"}
+  - {name: glm-5, arxiv_id: "2602.15763"}
+  - {name: kimi-k2, arxiv_id: "2507.20534"}
+  - {name: kimi-k2.5, arxiv_id: "2602.02276"}
+  - {name: mimo-v2-flash, arxiv_id: "2601.02780"}
+  - {name: minimax-m2-series, arxiv_id: "2605.26494"}
+  - {name: minimax-m3-msa, arxiv_id: "2606.13392"}
+  - {name: nemotron-3-whitepaper, arxiv_id: "2512.20856"}
+  - {name: nemotron-3-ultra, arxiv_id: "2606.15007"}

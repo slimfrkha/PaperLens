@@ -150,12 +150,19 @@ export const getTags = () => fetch("/api/tags").then(j<TagCount[]>);
 export const getStatus = () => fetch("/api/admin/status").then(j<AdminStatus>);
 export const rescan = () =>
   fetch("/api/admin/rescan", { method: "POST" }).then(j<{ started: boolean }>);
-export const addPaper = (arxivIdOrUrl: string) =>
+export interface AddPaperResult {
+  input: string;
+  status: "queued" | "duplicate" | "invalid" | "error";
+  name?: string;
+  existing_name?: string;
+  detail?: string; // present for "error" — the failed-write message
+}
+export const addPapers = (lines: string[]) =>
   fetch("/api/admin/papers", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ arxiv_id_or_url: arxivIdOrUrl }),
-  }).then(jOrError<{ queued: boolean; name: string }>);
+    body: JSON.stringify({ arxiv_ids_or_urls: lines }),
+  }).then(jOrError<{ results: AddPaperResult[] }>);
 export const removePaper = (paperId: string) =>
   fetch(`/api/admin/papers/${encodeURIComponent(paperId)}`, { method: "DELETE" }).then(
     jOrError<void>,

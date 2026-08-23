@@ -10,15 +10,18 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 
+from rag import config_writer
 from rag.config import Paper
 from rag.index import open_collection
 from rag.llm import Usage
 from rag.manifest import Manifest
 from server.main import create_app
+from server.worker import IngestionWorker
 
 
 def _parse_sse(text: str) -> list[dict]:
@@ -740,11 +743,12 @@ def _admin_app(make_config, tmp_path, papers_yaml: str = "papers: []\n"):
         ("  2412.19437  ", "2412.19437"),
     ],
 )
-def test_add_paper_route_normalizes_id_or_url(make_config, tmp_path, raw, expected):
+def test_add_papers_route_normalizes_id_or_url(make_config, tmp_path, raw, expected):
+    # There's no separate single-add route — adding one paper is a length-1 batch.
     cfg, client = _admin_app(make_config, tmp_path)
-    resp = client.post("/api/admin/papers", json={"arxiv_id_or_url": raw})
+    resp = client.post("/api/admin/papers", json={"arxiv_ids_or_urls": [raw]})
     assert resp.status_code == 200
-    assert resp.json() == {"queued": True, "name": expected}
+    assert resp.json() == {"results": [{"input": raw, "status": "queued", "name": expected}]}
     assert [p.name for p in cfg.papers] == [expected]
 
 
@@ -756,30 +760,104 @@ def test_add_paper_route_normalizes_id_or_url(make_config, tmp_path, raw, expect
         "",
     ],
 )
-def test_add_paper_route_rejects_unrecognizable_input(make_config, tmp_path, raw):
+def test_add_papers_route_rejects_unrecognizable_input(make_config, tmp_path, raw):
     cfg, client = _admin_app(make_config, tmp_path)
-    resp = client.post("/api/admin/papers", json={"arxiv_id_or_url": raw})
-    assert resp.status_code == 400
+    resp = client.post("/api/admin/papers", json={"arxiv_ids_or_urls": [raw]})
+    assert resp.status_code == 200
+    assert resp.json() == {"results": [{"input": raw, "status": "invalid"}]}
     assert cfg.papers == []
 
 
-def test_add_paper_route_dedups_by_arxiv_id_against_curated_entry(make_config, tmp_path):
-    # Pre-curated under a human-chosen name that won't textually match a
-    # UI-generated name == arxiv_id.
+def test_add_papers_route_reports_per_line_status(make_config, tmp_path):
     cfg, client = _admin_app(
         make_config,
         tmp_path,
         papers_yaml='papers:\n  - { name: deepseek-v3, arxiv_id: "2412.19437" }\n',
     )
-    # A route-created Config doesn't re-parse the file it was handed source_path
-    # for, so seed cfg.papers to match what a real load_config() would have done.
     cfg.papers.append(Paper(name="deepseek-v3", arxiv_id="2412.19437"))
 
-    resp = client.post("/api/admin/papers", json={"arxiv_id_or_url": "2412.19437"})
+    resp = client.post(
+        "/api/admin/papers",
+        json={
+            "arxiv_ids_or_urls": [
+                "2401.00001",  # new -> queued
+                "2412.19437",  # already curated -> duplicate
+                "not-an-id",  # invalid
+                "https://arxiv.org/abs/2401.00001",  # same as line 1, normalized -> duplicate
+            ]
+        },
+    )
 
-    assert resp.status_code == 409
-    assert resp.json() == {"error": "already curated as deepseek-v3"}
-    assert [p.name for p in cfg.papers] == ["deepseek-v3"]  # no duplicate appended
+    assert resp.status_code == 200
+    results = resp.json()["results"]
+    assert results[0] == {"input": "2401.00001", "status": "queued", "name": "2401.00001"}
+    assert results[1] == {
+        "input": "2412.19437",
+        "status": "duplicate",
+        "existing_name": "deepseek-v3",
+    }
+    assert results[2] == {"input": "not-an-id", "status": "invalid"}
+    assert results[3] == {
+        "input": "https://arxiv.org/abs/2401.00001",
+        "status": "duplicate",
+        "existing_name": "2401.00001",
+    }
+    assert [p.name for p in cfg.papers] == ["deepseek-v3", "2401.00001"]  # no double-append
+
+
+def test_add_papers_route_survives_a_per_line_write_failure(make_config, tmp_path):
+    cfg, client = _admin_app(make_config, tmp_path)
+    real_add_paper = config_writer.add_paper
+
+    def flaky_add_paper(config_path, name, arxiv_id):
+        if arxiv_id == "2401.00002":
+            raise OSError("disk full")
+        return real_add_paper(config_path, name, arxiv_id)
+
+    with patch.object(config_writer, "add_paper", side_effect=flaky_add_paper):
+        resp = client.post(
+            "/api/admin/papers",
+            json={"arxiv_ids_or_urls": ["2401.00001", "2401.00002", "2401.00003"]},
+        )
+
+    assert resp.status_code == 200
+    results = resp.json()["results"]
+    assert results[0]["status"] == "queued"
+    assert results[1] == {"input": "2401.00002", "status": "error", "detail": "disk full"}
+    assert results[2]["status"] == "queued"
+    # The two successful lines still got queued despite the middle line failing.
+    assert {p.name for p in cfg.papers} == {"2401.00001", "2401.00003"}
+
+
+def test_add_papers_route_triggers_worker_once(make_config, tmp_path):
+    with patch.object(IngestionWorker, "trigger", return_value=True) as mock_trigger:
+        cfg, client = _admin_app(make_config, tmp_path)
+        resp = client.post(
+            "/api/admin/papers",
+            json={"arxiv_ids_or_urls": ["2401.00001", "2401.00002", "2401.00003"]},
+        )
+    assert resp.status_code == 200
+    assert mock_trigger.call_count == 1
+
+
+def test_add_papers_route_skips_trigger_when_nothing_queued(make_config, tmp_path):
+    with patch.object(IngestionWorker, "trigger") as mock_trigger:
+        cfg, client = _admin_app(make_config, tmp_path)
+        resp = client.post("/api/admin/papers", json={"arxiv_ids_or_urls": ["not-an-id"]})
+    assert resp.status_code == 200
+    mock_trigger.assert_not_called()
+
+
+def test_add_papers_route_handles_empty_and_blank_input(make_config, tmp_path):
+    cfg, client = _admin_app(make_config, tmp_path)
+
+    resp = client.post("/api/admin/papers", json={"arxiv_ids_or_urls": []})
+    assert resp.status_code == 200
+    assert resp.json() == {"results": []}
+
+    resp = client.post("/api/admin/papers", json={"arxiv_ids_or_urls": ["   ", ""]})
+    assert resp.status_code == 200
+    assert all(r["status"] == "invalid" for r in resp.json()["results"])
 
 
 def test_remove_paper_route_cleans_manifest_chunks_files_and_config(make_config, tmp_path):

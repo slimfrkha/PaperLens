@@ -80,7 +80,8 @@ retrying loop.
 
 The `papers:` list in config.yaml is what `pending_papers` diffs against the manifest to
 decide what's left to ingest — hand-edit it and hit "Re-scan config", or use the Admin
-UI's add/remove-paper actions (`POST`/`DELETE /api/admin/papers`), which write that same
+UI's add/remove-paper actions (`POST /api/admin/papers`, `DELETE
+/api/admin/papers/{paper_id}`), which write that same
 list through `rag.config_writer` (a comment-preserving `ruamel.yaml` round-trip, so a
 UI-driven edit doesn't clobber the rest of the file's formatting) and mutate the running
 process's in-memory `cfg.papers` in place — `IngestConfig.papers` is the same list object
@@ -337,7 +338,8 @@ dealing with two very different kinds of coupling.
 - **Identity & ingestion path.** `arxiv_id` is the sole identifier end-to-end: the config
   schema (`Paper{name, arxiv_id}`), the fixed download URL (`arxiv.org/pdf/{id}`,
   `src/rag/pipeline.py`), and the *only* admin ingestion path — `POST /api/admin/papers`
-  requires an arXiv ID or `arxiv.org` URL (`_normalize_arxiv_id`, `src/server/main.py`).
+  requires each line to be an arXiv ID or `arxiv.org` URL (`_normalize_arxiv_id`,
+  `src/server/main.py`).
   There's no "upload an arbitrary file" flow.
 - **Extraction.** OCR is off by default (`src/rag/extract.py`) because arXiv PDFs are
   LaTeX-generated with a real text layer; a scanned document extracts empty or garbled

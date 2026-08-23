@@ -38,5 +38,5 @@ class AnnotationUpdate(BaseModel):
     note: str
 
 
-class AddPaperRequest(BaseModel):
-    arxiv_id_or_url: str
+class AddPapersRequest(BaseModel):
+    arxiv_ids_or_urls: list[str]

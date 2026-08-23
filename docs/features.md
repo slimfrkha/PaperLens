@@ -84,7 +84,7 @@ A working inventory of what PaperLens does today, organized into four sections:
 
 ### Admin / ingestion management
 
-- **Add paper by arXiv id/URL** — inline error display on failure, e.g. "already curated" (`web/src/pages/AdminPage.tsx`, `web/src/api.ts`)
+- **Add paper(s) by arXiv id/URL** — one tags-style input: type or paste ids/URLs, space/tab/enter/comma turns each into a removable pill, pasting a multi-line list creates one pill per line; Add submits every pill in one request and shows a per-line queued/duplicate/invalid/error status list (`web/src/pages/AdminPage.tsx`, `web/src/api.ts`)
 - **Re-scan config** — triggers a re-scan/re-sync of the papers config (`web/src/pages/AdminPage.tsx`, `web/src/api.ts`)
 - **Live ingestion progress** — polls every 1.5s, current paper/stage, done/total counts, animated progress bar (`web/src/pages/AdminPage.tsx`)
 - **Ingestion state badge** — idle/running/error (`web/src/pages/AdminPage.tsx`)
@@ -191,10 +191,10 @@ A working inventory of what PaperLens does today, organized into four sections:
 - **FastAPI app composition** — `create_app(cfg)` wires manifest, chat store, annotation store, ingestion worker, Chroma collection, all HTTP routes; SPA served as catch-all fallback (`src/server/main.py`)
 - **In-process ingestion worker** — background thread over pending papers, re-scans for newly-added papers within the same run, single-flight via `trigger()` (`src/server/worker.py`)
 - **Lazy, singleton `ChatAgent` build with lock** — embedder/reranker/LLM stack builds once on first use, guarded against double-build by the startup warmer (`src/server/main.py`)
-- **Admin add/remove-paper routes** — add normalizes an arXiv id/URL, writes config, triggers ingestion; remove deletes config entry, Chroma chunks, manifest record, annotations, cached PDF/markdown (`src/server/main.py`)
+- **Admin add/remove-paper routes** — add takes one or more arXiv ids/URLs per call: normalizes, dedupes, writes config, triggers ingestion once per batch; remove deletes config entry, Chroma chunks, manifest record, annotations, cached PDF/markdown (`src/server/main.py`)
 - **Chat session store (file-backed)** — one JSON file per session, parallel messages/citations/traces/feedback/usage arrays, single-flight per-chat guard, write-temp-then-rename (`src/server/chats.py`)
 - **Annotation store (file-backed)** — per-paper JSON anchored by text snippet + section slug (not a chunk id/offset), reflow-resilient across re-extraction (`src/server/annotations.py`)
-- **Request/response schemas** — pydantic models for chat, feedback, annotations, add-paper requests (`src/server/schemas.py`)
+- **Request/response schemas** — pydantic models for chat, feedback, annotations, add-paper(s) requests (`src/server/schemas.py`)
 - **HTTP API surface** — papers/tags listing, paper markdown fetch, admin status/rescan/add/remove, chat session CRUD + feedback, streaming `/api/chat` (`src/server/main.py`)
 
 ### Startup / model warming

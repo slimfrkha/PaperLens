@@ -10,17 +10,30 @@ import {
   Progress,
   SimpleGrid,
   Stack,
+  TagsInput,
   Text,
-  TextInput,
   Title,
 } from "@mantine/core";
 import { IconPlus, IconRescan } from "../components/Icons";
-import { addPaper, getStatus, rescan, type AdminStatus } from "../api";
+import { addPapers, getStatus, rescan, type AdminStatus, type AddPaperResult } from "../api";
+
+const statusGlyph = (s: AddPaperResult["status"]) =>
+  s === "queued" ? "✓" : s === "duplicate" ? "⚠" : "✗";
+const statusColor = (s: AddPaperResult["status"]) =>
+  s === "queued" ? "green" : s === "duplicate" ? "yellow" : "red";
+const statusDetail = (r: AddPaperResult) => {
+  if (r.status === "duplicate") return ` — already curated as ${r.existing_name}`;
+  if (r.status === "invalid") return " — not a recognizable arXiv id or URL";
+  if (r.status === "error") return ` — ${r.detail}`;
+  return " — queued";
+};
 
 export default function AdminPage() {
   const [status, setStatus] = useState<AdminStatus | null>(null);
-  const [newPaper, setNewPaper] = useState("");
+  const [paperIds, setPaperIds] = useState<string[]>([]);
+  const [tagsSearch, setTagsSearch] = useState("");
   const [addError, setAddError] = useState<string | null>(null);
+  const [addResults, setAddResults] = useState<AddPaperResult[] | null>(null);
   const [adding, setAdding] = useState(false);
 
   const load = () =>
@@ -34,20 +47,42 @@ export default function AdminPage() {
     return () => clearInterval(iv);
   }, []);
 
-  const handleAddPaper = async () => {
-    const raw = newPaper.trim();
-    if (!raw) return;
+  // Text typed but not yet turned into a pill (no Enter/Tab/Space/comma pressed) —
+  // included below in both the disabled check and the submitted list, so clicking
+  // Add right after typing (the single most common path) isn't a silent no-op.
+  const pendingId = tagsSearch.trim();
+
+  const handleAdd = async () => {
+    const ids = pendingId && !paperIds.includes(pendingId) ? [...paperIds, pendingId] : paperIds;
+    if (ids.length === 0) return;
     setAdding(true);
     setAddError(null);
+    setAddResults(null);
+    setPaperIds(ids);
+    setTagsSearch("");
     try {
-      await addPaper(raw);
-      setNewPaper("");
-      load(); // show the new pending paper without waiting for the next poll tick
+      const { results } = await addPapers(ids);
+      setAddResults(results);
+      setPaperIds([]);
+      load(); // show the new pending paper(s) without waiting for the next poll tick
     } catch (e) {
-      setAddError(e instanceof Error ? e.message : "failed to add paper");
+      setAddError(e instanceof Error ? e.message : "failed to add paper(s)");
     } finally {
       setAdding(false);
     }
+  };
+
+  // TagsInput's splitChars only covers single-character triggers (space, comma,
+  // paste-newlines below) — Tab is a multi-character `event.key`, so it can't sit in
+  // that array without corrupting paste-splitting (which reuses splitChars as a regex
+  // character class). Commit it by hand instead.
+  const handleTagsKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== "Tab") return;
+    const raw = tagsSearch.trim();
+    if (!raw) return;
+    event.preventDefault();
+    setPaperIds((prev) => (prev.includes(raw) ? prev : [...prev, raw]));
+    setTagsSearch("");
   };
 
   if (!status)
@@ -74,22 +109,40 @@ export default function AdminPage() {
           Add paper
         </Text>
         <Group align="flex-end" gap="sm">
-          <TextInput
-            placeholder="arXiv id or URL, e.g. 2412.19437"
-            value={newPaper}
-            onChange={(e) => setNewPaper(e.currentTarget.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleAddPaper()}
+          <TagsInput
+            placeholder="Paste or type arXiv ids/URLs — space, tab, enter, or comma to add"
+            value={paperIds}
+            onChange={setPaperIds}
+            searchValue={tagsSearch}
+            onSearchChange={setTagsSearch}
+            onKeyDown={handleTagsKeyDown}
+            splitChars={[",", " ", "\n"]}
             disabled={adding}
             style={{ flex: 1 }}
           />
-          <Button leftSection={<IconPlus size={16} />} onClick={handleAddPaper} loading={adding}>
-            Add paper
+          <Button
+            leftSection={<IconPlus size={16} />}
+            onClick={handleAdd}
+            loading={adding}
+            disabled={paperIds.length === 0 && !pendingId}
+          >
+            Add paper(s)
           </Button>
         </Group>
         {addError && (
           <Text size="sm" c="red" mt="xs">
             {addError}
           </Text>
+        )}
+        {addResults && (
+          <Stack gap={4} mt="sm">
+            {addResults.map((r, i) => (
+              <Text key={i} size="sm" c={statusColor(r.status)}>
+                {statusGlyph(r.status)} {r.input}
+                {statusDetail(r)}
+              </Text>
+            ))}
+          </Stack>
         )}
       </Card>
 

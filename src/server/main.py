@@ -27,7 +27,7 @@ from .annotations import AnnotationStore
 from .chat_turn import run_turn
 from .chats import ChatStore
 from .schemas import (
-    AddPaperRequest,
+    AddPapersRequest,
     AnnotationCreate,
     AnnotationUpdate,
     ChatRequest,
@@ -204,28 +204,44 @@ def create_app(cfg: Config) -> FastAPI:
     def admin_rescan():
         return {"started": worker.trigger()}
 
-    @app.post("/api/admin/papers")
-    def add_paper(req: AddPaperRequest):
-        arxiv_id = _normalize_arxiv_id(req.arxiv_id_or_url)
+    def _add_one_paper(raw: str) -> dict:
+        """Normalize, dedupe, and queue a single arXiv id/URL — one line of an
+        add_papers request. There's no separate single-add route: adding one paper
+        is just a length-1 batch, so the UI (and any other caller) always goes
+        through this same endpoint.
+
+        config_writer's dedup is by arxiv_id (not name) against every existing
+        papers: entry, so a paper already curated under a human-chosen name (e.g.
+        `deepseek-v3`) is still caught even though this route's generated `name`
+        won't match it textually. Only on success does cfg.papers get the new
+        entry — an unconditional append here would double-append (and
+        double-ingest) on a race between two near-simultaneous requests for the
+        same arxiv_id.
+        """
+        arxiv_id = _normalize_arxiv_id(raw)
         if arxiv_id is None:
-            return JSONResponse({"error": "not a recognizable arXiv id or URL"}, status_code=400)
+            return {"input": raw, "status": "invalid"}
         name = arxiv_id
-        # config_writer's dedup is by arxiv_id (not name) against every existing
-        # papers: entry, so a paper already curated under a human-chosen name (e.g.
-        # `deepseek-v3`) is still caught even though this route's generated `name`
-        # won't match it textually. Only on success does cfg.papers get the new
-        # entry — an unconditional append here would double-append (and
-        # double-ingest) on a race between two near-simultaneous requests for the
-        # same arxiv_id.
-        existing_name = config_writer.add_paper(cfg.source_path, name, arxiv_id)
+        try:
+            existing_name = config_writer.add_paper(cfg.source_path, name, arxiv_id)
+        except OSError as e:
+            # A failed write on one line of a batch shouldn't 500 the whole
+            # request and strand already-written lines without a worker trigger.
+            return {"input": raw, "status": "error", "detail": str(e)}
         if existing_name is not None:
-            return JSONResponse({"error": f"already curated as {existing_name}"}, status_code=409)
+            return {"input": raw, "status": "duplicate", "existing_name": existing_name}
         # In-place append: icfg.papers (the worker's view) is the same list object
         # by reference (see Config.for_ingest), so this is immediately visible to
         # pending_papers() without any config reload.
         cfg.papers.append(Paper(name=name, arxiv_id=arxiv_id))
-        worker.trigger()
-        return {"queued": True, "name": name}
+        return {"input": raw, "status": "queued", "name": name}
+
+    @app.post("/api/admin/papers")
+    def add_papers(req: AddPapersRequest):
+        results = [_add_one_paper(raw) for raw in req.arxiv_ids_or_urls]
+        if any(r["status"] == "queued" for r in results):
+            worker.trigger()
+        return {"results": results}
 
     @app.delete("/api/admin/papers/{paper_id}")
     def remove_paper(paper_id: str):
