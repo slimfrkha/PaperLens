@@ -720,6 +720,56 @@ def test_annotation_delete_returns_false_for_unknown_annotation(make_config):
     assert resp.json() == {"ok": False}
 
 
+def test_list_all_annotations_merges_across_papers(make_config):
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    manifest = Manifest(cfg.paths.rag_db)
+    manifest.upsert(
+        {"paper_id": "paper-a", "title": "Paper A", "tags": [], "arxiv_id": "1234.5678"}
+    )
+    manifest.upsert({"paper_id": "paper-b", "title": "Paper B", "tags": []})
+    client = TestClient(create_app(cfg))
+
+    # paper-a gets two annotations, paper-b gets zero.
+    client.post("/api/papers/paper-a/annotations", json={"snippet": "s1", "note": "n1"})
+    client.post("/api/papers/paper-a/annotations", json={"snippet": "s2", "note": "n2"})
+
+    resp = client.get("/api/annotations")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 2
+    assert {a["paper_id"] for a in body} == {"paper-a"}
+    assert {a["paper_title"] for a in body} == {"Paper A"}
+    assert {a["arxiv_id"] for a in body} == {"1234.5678"}
+    assert {a["snippet"] for a in body} == {"s1", "s2"}
+
+
+def test_list_all_annotations_empty_library(make_config):
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    client = TestClient(create_app(cfg))
+
+    resp = client.get("/api/annotations")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_list_all_annotations_skips_papers_with_no_annotations(make_config):
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    manifest = Manifest(cfg.paths.rag_db)
+    manifest.upsert({"paper_id": "paper-a", "title": "Paper A", "tags": []})
+    manifest.upsert({"paper_id": "paper-b", "title": "Paper B", "tags": []})
+    client = TestClient(create_app(cfg))
+
+    client.post("/api/papers/paper-b/annotations", json={"snippet": "only-b", "note": ""})
+
+    body = client.get("/api/annotations").json()
+    assert len(body) == 1
+    assert body[0]["paper_id"] == "paper-b"
+    assert body[0]["arxiv_id"] is None
+
+
 def _admin_app(make_config, tmp_path, papers_yaml: str = "papers: []\n"):
     """A create_app() instance wired to a real config.yaml on disk, so the
     admin add/remove-paper routes (which rewrite that file via config_writer) have

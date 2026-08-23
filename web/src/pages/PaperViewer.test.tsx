@@ -1,6 +1,6 @@
 import { MantineProvider } from "@mantine/core";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getAnnotationRange } from "../highlight";
 import PaperViewer from "./PaperViewer";
@@ -103,6 +103,31 @@ function renderPaperViewerWithNav() {
     <MantineProvider>
       <MemoryRouter initialEntries={["/papers/paper1"]}>
         <NavigateTo to="/papers/paper2" />
+        <Routes>
+          <Route path="/papers/:id" element={<PaperViewer />} />
+        </Routes>
+      </MemoryRouter>
+    </MantineProvider>,
+  );
+}
+
+// Surfaces location.state.highlight as text, so a test can assert PaperViewer's
+// citation-highlight effect actually clears it after consuming it (not just that the
+// highlight got applied) — the state itself isn't otherwise observable from outside.
+function LocationStateProbe() {
+  const location = useLocation() as { state?: { highlight?: string } };
+  return <div data-testid="loc-state">{location.state?.highlight ?? "none"}</div>;
+}
+
+function renderPaperViewerWithHighlightState(snippet: string) {
+  return render(
+    <MantineProvider>
+      <MemoryRouter
+        initialEntries={[
+          { pathname: "/papers/paper1", state: { highlight: snippet, section: "Section One" } },
+        ]}
+      >
+        <LocationStateProbe />
         <Routes>
           <Route path="/papers/:id" element={<PaperViewer />} />
         </Routes>
@@ -314,6 +339,73 @@ describe("PaperViewer annotations", () => {
 
     fireEvent.click(screen.getByLabelText("Notes"));
     expect(await screen.findByText(/no annotations yet/i)).toBeInTheDocument();
+  });
+
+  it("consumes the deep-link highlight from location.state so a refresh can't re-apply it", async () => {
+    // Regression: the browser preserves history.state (this navigation's {highlight,
+    // section}) across a native page refresh, unlike component state — without clearing
+    // it once applied, refreshing the page re-triggers the same highlight indefinitely,
+    // even reconstructing it for a passage whose annotation has since been deleted.
+    const snippet = "This is a long test passage worth annotating right here.";
+    vi.stubGlobal("fetch", mockFetch([]));
+    renderPaperViewerWithHighlightState(snippet);
+
+    await screen.findByText("Test Paper");
+    expect(screen.getByTestId("loc-state")).toHaveTextContent(snippet);
+    await waitFor(() => expect(screen.getByTestId("loc-state")).toHaveTextContent("none"));
+  });
+
+  it("deleting an annotation also clears any active citation highlight on the same passage", async () => {
+    // Regression: navigating here via a Notes-page/citation click-through registers a
+    // separate transient "citation" highlight (independent of the annotation's own
+    // persistent one) — deleting the annotation used to leave that highlight showing.
+    const annotation = {
+      id: "a1",
+      snippet: "This is a long test passage worth annotating right here.",
+      section_title: "Section One",
+      section_slug: "section-one",
+      note: "",
+      created_at: "",
+      updated_at: "",
+    };
+    const fetchMock = mockFetch([annotation], (url, init) =>
+      url === "/api/papers/paper1/annotations/a1" && init?.method === "DELETE"
+        ? { ok: true }
+        : undefined,
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    renderPaperViewerWithHighlightState(annotation.snippet);
+    await screen.findByText("Test Paper");
+
+    await waitFor(() =>
+      expect(
+        (CSS as unknown as { highlights: { get: (n: string) => unknown } }).highlights.get(
+          "citation",
+        ),
+      ).not.toBeUndefined(),
+    );
+
+    const paragraph = document.querySelector(".reading p")!;
+    document.caretRangeFromPoint = () => {
+      const r = document.createRange();
+      r.setStart(paragraph.firstChild!, 5);
+      r.setEnd(paragraph.firstChild!, 5);
+      return r;
+    };
+    fireEvent.click(paragraph, { clientX: 1, clientY: 1 });
+    fireEvent.click(await screen.findByText("Delete"));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/papers/paper1/annotations/a1",
+        expect.objectContaining({ method: "DELETE" }),
+      ),
+    );
+    expect(
+      (CSS as unknown as { highlights: { get: (n: string) => unknown } }).highlights.get(
+        "citation",
+      ),
+    ).toBeUndefined();
   });
 
   it("navigating to a different paper clears the previous paper's highlight registrations", async () => {

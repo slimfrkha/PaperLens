@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useLocation, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   ActionIcon,
   Affix,
@@ -59,7 +59,11 @@ interface PopoverState {
 
 export default function PaperViewer() {
   const { id } = useParams();
-  const location = useLocation() as { state?: { highlight?: string; section?: string } };
+  const navigate = useNavigate();
+  const location = useLocation() as {
+    pathname: string;
+    state?: { highlight?: string; section?: string };
+  };
   const [data, setData] = useState<PaperData | null>(null);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   // Annotation ids whose snippet failed to re-anchor (paper re-extracted with different
@@ -103,10 +107,19 @@ export default function PaperViewer() {
     const snippet = location.state?.highlight;
     if (data && snippet && ref.current) {
       const el = ref.current;
-      const t = setTimeout(() => highlightPassage(el, snippet), 200);
+      const t = setTimeout(() => {
+        highlightPassage(el, snippet);
+        // Consume the one-time deep-link highlight: the browser preserves
+        // history.state (this navigation's {highlight, section}) across a native
+        // page refresh, unlike component state, so without this a refresh
+        // re-applies the highlight indefinitely — even reconstructing it for text
+        // whose annotation has since been deleted, since this just searches the
+        // raw document text and has no notion of whether an annotation still exists.
+        navigate(location.pathname, { replace: true, state: {} });
+      }, 200);
       return () => clearTimeout(t);
     }
-  }, [data, location.state]);
+  }, [data, location.state, location.pathname, navigate]);
 
   // Builds the "Contents" rail from the rendered headings once ReactMarkdown has
   // committed its DOM — same 200ms-after-mount wait as the citation-highlight effect
@@ -255,6 +268,11 @@ export default function PaperViewer() {
     if (!id || popover?.mode !== "view" || !popover.annotationId) return;
     await deleteAnnotation(id, popover.annotationId);
     removeAnnotationHighlight(popover.annotationId);
+    // The deleted annotation's own persistent highlight is gone via the line above, but
+    // a separate transient "citation" highlight (from navigating here via a citation or
+    // Notes-page click-through) can still be showing the same passage — clear it too so
+    // deleting a note doesn't leave it looking highlighted.
+    clearHighlight();
     registeredIds.current.delete(popover.annotationId);
     setUnresolvedIds((prev) => {
       if (!prev.has(popover.annotationId!)) return prev;

@@ -45,6 +45,14 @@ export interface Annotation {
   updated_at: string;
 }
 
+/** An Annotation joined with the paper it belongs to — the shape `/api/annotations`
+ *  (every annotation across the whole library) returns, for the cross-paper Notes page. */
+export interface LibraryAnnotation extends Annotation {
+  paper_id: string;
+  paper_title: string;
+  arxiv_id?: string;
+}
+
 export interface AdminStatus {
   db: { n_papers: number; n_chunks: number };
   tags: TagCount[];
@@ -114,6 +122,7 @@ export const getPaper = (id: string) =>
   );
 export const getAnnotations = (paperId: string) =>
   fetch(`/api/papers/${encodeURIComponent(paperId)}/annotations`).then(j<Annotation[]>);
+export const getAllAnnotations = () => fetch("/api/annotations").then(j<LibraryAnnotation[]>);
 export const createAnnotation = (
   paperId: string,
   snippet: string,

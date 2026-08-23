@@ -183,6 +183,24 @@ def create_app(cfg: Config) -> FastAPI:
         ok = annotations.delete(paper_id, annotation_id)
         return {"ok": ok}
 
+    @app.get("/api/annotations")
+    def list_all_annotations():
+        # Every annotation across the whole library, joined with paper title/arxiv_id —
+        # the read-side aggregation behind the cross-paper Notes page. A plain loop, not a
+        # new AnnotationStore method: AnnotationStore stays a pure per-paper file store.
+        out = []
+        for p in manifest.papers():
+            for a in annotations.list_all(p["paper_id"]):
+                out.append(
+                    {
+                        **a,
+                        "paper_id": p["paper_id"],
+                        "paper_title": p["title"],
+                        "arxiv_id": p.get("arxiv_id"),
+                    }
+                )
+        return out
+
     @app.get("/api/tags")
     def list_tags():
         return manifest.discriminating_tags()

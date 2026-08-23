@@ -82,6 +82,14 @@ A working inventory of what PaperLens does today, organized into four sections:
 - **Paper outline / jump nav** — collapsible "Contents" rail built from the paper's rendered heading ids, indented by section-number depth (numbered headings) or inferred from the nearest numbered neighbors (unnumbered ones) (`web/src/pages/PaperViewer.tsx`, `web/src/outline.ts`)
 - **Loading state** (`web/src/pages/PaperViewer.tsx`)
 
+### Notes (cross-paper)
+
+- **Aggregated Notes page** — every annotation across the whole library, grouped by paper (paper title, arXiv link), sorted alphabetically by paper with notes newest-first (`web/src/pages/NotesPage.tsx`, `GET /api/annotations` in `src/server/main.py`)
+- **Text/paper filtering** — client-side substring match over snippet+note, plus a paper multi-select (`web/src/pages/NotesPage.tsx`)
+- **Click-through to source passage** — reuses the citation navigate-with-state mechanism (`Answer.tsx`'s `{highlight, section}` pattern) to open the paper with the passage highlighted, no `PaperViewer.tsx` changes needed (`web/src/pages/NotesPage.tsx`)
+- **Delete a note (with confirmation)** — reuses the existing `deleteAnnotation` API, removes it from the list in place (`web/src/pages/NotesPage.tsx`, `web/src/api.ts`)
+- **Copy notes as Markdown** — exports the currently filtered view, grouped by paper (`web/src/exportNotes.ts`, `web/src/pages/NotesPage.tsx`)
+
 ### Admin / ingestion management
 
 - **Add paper(s) by arXiv id/URL** — one tags-style input: type or paste ids/URLs, space/tab/enter/comma turns each into a removable pill, pasting a multi-line list creates one pill per line; Add submits every pill in one request and shows a per-line queued/duplicate/invalid/error status list (`web/src/pages/AdminPage.tsx`, `web/src/api.ts`)

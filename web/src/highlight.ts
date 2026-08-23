@@ -35,10 +35,10 @@ function rangeFor(container: HTMLElement, query: string, bounds?: [number, numbe
     const needle = norm.slice(0, len);
     if (needle.length < 20) break;
     // Search on a whitespace-collapsed copy while keeping an index back-map.
-    const idx = collapsedIndexOf(window, needle);
-    if (idx < 0) continue;
-    const startAbs = from + idx;
-    const endAbs = startAbs + rawLengthFor(window, idx, needle.length);
+    const found = collapsedIndexOf(window, needle);
+    if (!found) continue;
+    const startAbs = from + found.index;
+    const endAbs = startAbs + found.length;
     const s = spans.find((sp) => startAbs >= sp.start && startAbs < sp.end);
     const e = spans.find((sp) => endAbs > sp.start && endAbs <= sp.end);
     if (!s || !e) continue;
@@ -50,9 +50,12 @@ function rangeFor(container: HTMLElement, query: string, bounds?: [number, numbe
   return null;
 }
 
-// Find `needle` (already whitespace-collapsed) inside raw `text`, returning the
-// raw start index, tolerating runs of whitespace in the source.
-function collapsedIndexOf(text: string, needle: string): number {
+// Find `needle` (already whitespace-collapsed) inside raw `text`, tolerating runs of
+// whitespace in the source. Returns both the raw start index and the raw match length
+// (`m[0].length`, not `needle.length` — the source span can be longer than the
+// collapsed needle when it contains multiple/irregular whitespace) so the caller can
+// build a range that ends exactly where the match ends, not past it.
+function collapsedIndexOf(text: string, needle: string): { index: number; length: number } | null {
   const re = new RegExp(
     needle
       .split(" ")
@@ -60,13 +63,7 @@ function collapsedIndexOf(text: string, needle: string): number {
       .join("\\s+"),
   );
   const m = re.exec(text);
-  return m ? m.index : -1;
-}
-
-function rawLengthFor(text: string, start: number, approxLen: number): number {
-  // Extend to the end of the collapsed match by re-running the regex from start.
-  const slice = text.slice(start, start + approxLen * 3);
-  return Math.min(slice.length, approxLen * 3);
+  return m ? { index: m.index, length: m[0].length } : null;
 }
 
 // Find the [start, end) character bounds (in textMap's flat text) of the section headed

@@ -61,6 +61,19 @@ function buildContainer(html: string): HTMLDivElement {
 }
 
 describe("addAnnotationHighlight", () => {
+  it("ends the range exactly at the matched text, not past it into what follows", () => {
+    // Regression: rangeFor used to size the match as `needle.length * 3` raw
+    // characters (a blanket guess meant to tolerate whitespace differences) instead of
+    // the regex's actual matched length, overshooting into unrelated trailing text
+    // whenever the container had more text after the snippet.
+    const el = buildContainer(
+      "<p>A short snippet worth remembering. And then a lot more unrelated trailing text follows it.</p>",
+    );
+    const range = addAnnotationHighlight("a1", el, "A short snippet worth remembering.");
+    expect(range).not.toBeNull();
+    expect(range!.toString()).toBe("A short snippet worth remembering.");
+  });
+
   it("resolves a snippet against the whole document when no section is given", () => {
     const el = buildContainer("<p>Some passage worth remembering here.</p>");
     const range = addAnnotationHighlight("a1", el, "Some passage worth remembering here.");

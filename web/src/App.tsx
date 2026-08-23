@@ -11,6 +11,7 @@ import { NavLink, Route, Routes } from "react-router-dom";
 import ChatPage from "./pages/ChatPage";
 import PapersPage from "./pages/PapersPage";
 import PaperViewer from "./pages/PaperViewer";
+import NotesPage from "./pages/NotesPage";
 import AdminPage from "./pages/AdminPage";
 import { IconBook, IconMoon, IconSun } from "./components/Icons";
 
@@ -89,6 +90,7 @@ export default function App() {
             <Group gap="xl">
               <Nav to="/" label="Chat" />
               <Nav to="/papers" label="Papers" />
+              <Nav to="/notes" label="Notes" />
               <Nav to="/admin" label="Admin" />
             </Group>
             <ColorSchemeToggle />
@@ -102,6 +104,7 @@ export default function App() {
             <Route path="/c/:chatId" element={<ChatPage />} />
             <Route path="/papers" element={<PapersPage />} />
             <Route path="/papers/:id" element={<PaperViewer />} />
+            <Route path="/notes" element={<NotesPage />} />
             <Route path="/admin" element={<AdminPage />} />
           </Routes>
         </div>
