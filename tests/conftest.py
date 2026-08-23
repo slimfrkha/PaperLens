@@ -246,3 +246,22 @@ def seed_chunks():
         return (doc_id or f"{paper_id}-{section}", text, meta)
 
     return _make
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _stop_chroma_systems():
+    """Stop every chromadb System opened during the session before interpreter exit.
+
+    Tests open a fresh temp Chroma DB per ``make_searcher``/``open_collection`` call
+    and never close the client. chromadb caches each one as a live ``System`` in a
+    process-global registry, so by the end of the suite dozens of them sit around
+    to be torn down implicitly at interpreter shutdown — slow enough to make the
+    process hang for minutes after the last test finishes. Stopping them explicitly
+    here, while the interpreter is still in a normal state, avoids that hang.
+    """
+    yield
+    from chromadb.api.client import SharedSystemClient
+
+    for system in list(SharedSystemClient._identifier_to_system.values()):
+        system.stop()
+    SharedSystemClient.clear_system_cache()
