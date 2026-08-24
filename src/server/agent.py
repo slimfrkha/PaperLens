@@ -351,6 +351,109 @@ class ChatAgent:
             mode = "ask"
         return mode, scope_size
 
+    def _build_search_executor(
+        self,
+        *,
+        paper_ids: list[str] | None,
+        per_paper: bool,
+        ref_counter: dict[str, int],
+        citations: list[dict],
+        on_trace: Callable[[dict], None],
+        search_budget: int | None = None,
+    ) -> Callable[[str, dict], str]:
+        """Builds the `execute(name, args) -> str` callable passed to `client.run_tools`
+        for a `search_papers` tool call. Shared by `run`'s primary ReAct loop and
+        `compare`'s synthesis-round defensive search (the model is told not to need it —
+        see `SYNTHESIS_SYSTEM_PROMPT`) — same `Searcher.search` call, same citation-dict
+        shape, same observation format, in both.
+
+        Appends each result's citation dict to `citations` (mutated in place) and bumps
+        `ref_counter["n"]` per ref, so a caller accumulating citations across several
+        calls to this executor (e.g. `compare`'s per-paper rows feeding into one
+        synthesis-round citation list) keeps one continuous ref sequence.
+
+        `search_budget`, when given, is `run`'s primary-search-path behavior: track and
+        report the remaining-searches countdown, prepend the cutoff-reason diagnostic to
+        the observation, and include `per_paper` on the action trace entry. `None` is
+        `compare`'s synthesis defensive search — none of the three. These three only
+        co-occur because today's two callers happen to agree on all of them, not because
+        they're conceptually linked — split this flag if a third caller ever wants one
+        without the others.
+        """
+        searches_used = {"n": 0}
+
+        def execute(name: str, args: dict) -> str:
+            if name != "search_papers":
+                return f"Unknown tool: {name}"
+            query = (args.get("query") or "").strip()
+            if not query:
+                return "Error: empty query."
+            action: dict = {"type": "action", "query": query, "paper": args.get("paper") or None}
+            remaining: int | None = None
+            if search_budget is not None:
+                searches_used["n"] += 1
+                # Told to the model in the tool result (not just the system prompt) so it
+                # doesn't have to self-count tool calls across a long interleaved trace —
+                # a read, not a memory task.
+                remaining = max(search_budget - searches_used["n"], 0)
+                action["per_paper"] = per_paper
+            on_trace(action)
+            outcome = self.searcher.search(
+                query,
+                min_k=self.cfg.retrieval.min_k,
+                max_k=self.cfg.retrieval.max_k,
+                candidates=max(self.cfg.retrieval.candidates, self.cfg.retrieval.max_k * 4),
+                paper=args.get("paper") or None,
+                paper_ids=paper_ids,
+                rerank=self.cfg.reranker.enabled,
+                per_paper=per_paper,
+                elbow_enabled=self.cfg.retrieval.elbow_enabled,
+                elbow_mad_multiplier=self.cfg.retrieval.elbow_mad_multiplier,
+                elbow_prominence=self.cfg.retrieval.elbow_prominence,
+            )
+            results = outcome.results
+            if not results:
+                on_trace({"type": "observation", "text": "(no results)"})
+                if remaining is not None:
+                    return (
+                        "No results for that query (within the active filter). "
+                        f"[{remaining} searches remaining this turn]"
+                    )
+                return "No results for that query (within the active filter)."
+            blocks = []
+            for r in results:
+                ref_counter["n"] += 1
+                ref = f"r{ref_counter['n']}"
+                rec = self.manifest.get(r.paper_id)
+                citations.append(
+                    {
+                        "ref": ref,
+                        "paper_id": r.paper_id,
+                        "title": rec["title"] if rec else r.paper_id,
+                        "arxiv_id": rec.get("arxiv_id") if rec else None,
+                        "breadcrumb": r.breadcrumb,
+                        "section_title": r.section_title,
+                        "section_number": r.section_number,
+                        "source": r.source,
+                        "snippet": r.body[:500],
+                        "body": r.body,
+                    }
+                )
+                # Full passage — exactly what the model receives, shown verbatim in the trace.
+                blocks.append(f'[{ref}] paper={r.paper_id}  section="{r.breadcrumb}"\n{r.body}')
+            observation = "\n\n".join(blocks)
+            if remaining is not None:
+                if outcome.cutoff_reason != "no_elbow":
+                    observation = (
+                        f"[{len(results)} of up to {self.cfg.retrieval.max_k} returned "
+                        f"— {outcome.cutoff_reason}]\n\n"
+                    ) + observation
+                observation = f"[{remaining} searches remaining this turn]\n\n" + observation
+            on_trace({"type": "observation", "text": observation})
+            return observation
+
+        return execute
+
     def run(
         self,
         messages,
@@ -387,89 +490,26 @@ class ChatAgent:
         partial text as a normal answer, same as if the model had finished on its own.
         """
         paper_ids = self._resolve_paper_ids(tags, papers, fallback_to_manifest=per_paper)
-        registry: dict[str, dict] = {}
-        bodies: dict[str, str] = {}
+        citations: list[dict] = []
         counter = {"n": ref_start}
         # max_rounds counts ReAct rounds, not searches, and the harness doesn't reserve
         # a final round to answer in — if the model spends every round on tool calls it
         # returns with no real answer. Budget one fewer than the true round cap so the
         # model treats the last round as the one it must spend answering, not searching.
         search_budget = max(self.cfg.retrieval.max_rounds - 1, 1)
-        searches_used = {"n": 0}
 
         def trace(entry: dict):
             if on_trace:
                 on_trace(entry)
 
-        def execute(name: str, args: dict) -> str:
-            if name != "search_papers":
-                return f"Unknown tool: {name}"
-            query = (args.get("query") or "").strip()
-            if not query:
-                return "Error: empty query."
-            searches_used["n"] += 1
-            # Told to the model in the tool result (not just the system prompt) so it
-            # doesn't have to self-count tool calls across a long interleaved trace —
-            # a read, not a memory task.
-            remaining = max(search_budget - searches_used["n"], 0)
-            trace(
-                {
-                    "type": "action",
-                    "query": query,
-                    "paper": args.get("paper") or None,
-                    "per_paper": per_paper,
-                }
-            )
-            outcome = self.searcher.search(
-                query,
-                min_k=self.cfg.retrieval.min_k,
-                max_k=self.cfg.retrieval.max_k,
-                candidates=max(self.cfg.retrieval.candidates, self.cfg.retrieval.max_k * 4),
-                paper=args.get("paper") or None,
-                paper_ids=paper_ids,
-                rerank=self.cfg.reranker.enabled,
-                per_paper=per_paper,
-                elbow_enabled=self.cfg.retrieval.elbow_enabled,
-                elbow_mad_multiplier=self.cfg.retrieval.elbow_mad_multiplier,
-                elbow_prominence=self.cfg.retrieval.elbow_prominence,
-            )
-            results = outcome.results
-            if not results:
-                trace({"type": "observation", "text": "(no results)"})
-                return (
-                    "No results for that query (within the active filter). "
-                    f"[{remaining} searches remaining this turn]"
-                )
-            blocks = []
-            for r in results:
-                counter["n"] += 1
-                ref = f"r{counter['n']}"
-                rec = self.manifest.get(r.paper_id)
-                registry[ref] = {
-                    "ref": ref,
-                    "paper_id": r.paper_id,
-                    "title": rec["title"] if rec else r.paper_id,
-                    "arxiv_id": rec.get("arxiv_id") if rec else None,
-                    "breadcrumb": r.breadcrumb,
-                    "section_title": r.section_title,
-                    "section_number": r.section_number,
-                    "source": r.source,
-                    "snippet": r.body[:500],
-                    "body": r.body,
-                }
-                # Full passage, kept for the faithfulness check (split into sentences there).
-                bodies[ref] = r.body
-                # Full passage — exactly what the model receives, shown verbatim in the trace.
-                blocks.append(f'[{ref}] paper={r.paper_id}  section="{r.breadcrumb}"\n{r.body}')
-            observation = "\n\n".join(blocks)
-            if outcome.cutoff_reason != "no_elbow":
-                observation = (
-                    f"[{len(results)} of up to {self.cfg.retrieval.max_k} returned "
-                    f"— {outcome.cutoff_reason}]\n\n"
-                ) + observation
-            observation = f"[{remaining} searches remaining this turn]\n\n" + observation
-            trace({"type": "observation", "text": observation})
-            return observation
+        execute = self._build_search_executor(
+            paper_ids=paper_ids,
+            per_paper=per_paper,
+            ref_counter=counter,
+            citations=citations,
+            on_trace=trace,
+            search_budget=search_budget,
+        )
 
         text, usage = self.client.run_tools(
             system=self._system(paper_ids, search_budget),
@@ -481,9 +521,11 @@ class ChatAgent:
             max_rounds=self.cfg.retrieval.max_rounds,
             stop_check=stop_check,
         )
-        if self.cfg.faithfulness.enabled and registry:
+        if self.cfg.faithfulness.enabled and citations:
+            registry = {c["ref"]: c for c in citations}
+            bodies = {c["ref"]: c["body"] for c in citations}
             self._check_faithfulness(text, registry, bodies)
-        return text, list(registry.values()), usage
+        return text, citations, usage
 
     def compare(
         self,
@@ -595,53 +637,14 @@ class ChatAgent:
         # numbering rather than colliding with any row's [rN], so `counter` starts where
         # the per-paper loop left off.
         counter = {"n": running_ref}
-
-        def synth_execute(name: str, args: dict) -> str:
-            if name != "search_papers":
-                return f"Unknown tool: {name}"
-            query = (args.get("query") or "").strip()
-            if not query:
-                return "Error: empty query."
-            synth_trace({"type": "action", "query": query, "paper": args.get("paper") or None})
-            outcome = self.searcher.search(
-                query,
-                min_k=self.cfg.retrieval.min_k,
-                max_k=self.cfg.retrieval.max_k,
-                candidates=max(self.cfg.retrieval.candidates, self.cfg.retrieval.max_k * 4),
-                paper=args.get("paper") or None,
-                paper_ids=paper_ids,
-                rerank=self.cfg.reranker.enabled,
-                per_paper=False,
-                elbow_enabled=self.cfg.retrieval.elbow_enabled,
-                elbow_mad_multiplier=self.cfg.retrieval.elbow_mad_multiplier,
-                elbow_prominence=self.cfg.retrieval.elbow_prominence,
-            )
-            results = outcome.results
-            if not results:
-                synth_trace({"type": "observation", "text": "(no results)"})
-                return "No results for that query (within the active filter)."
-            blocks = []
-            for r in results:
-                counter["n"] += 1
-                ref = f"r{counter['n']}"
-                rec2 = self.manifest.get(r.paper_id)
-                citation = {
-                    "ref": ref,
-                    "paper_id": r.paper_id,
-                    "title": rec2["title"] if rec2 else r.paper_id,
-                    "arxiv_id": rec2.get("arxiv_id") if rec2 else None,
-                    "breadcrumb": r.breadcrumb,
-                    "section_title": r.section_title,
-                    "section_number": r.section_number,
-                    "source": r.source,
-                    "snippet": r.body[:500],
-                    "body": r.body,
-                }
-                citations.append(citation)
-                blocks.append(f'[{ref}] paper={r.paper_id}  section="{r.breadcrumb}"\n{r.body}')
-            observation = "\n\n".join(blocks)
-            synth_trace({"type": "observation", "text": observation})
-            return observation
+        execute = self._build_search_executor(
+            paper_ids=paper_ids,
+            per_paper=False,
+            ref_counter=counter,
+            citations=citations,
+            on_trace=synth_trace,
+            search_budget=None,
+        )
 
         # Full conversation history, same as every per-paper sub-run above got — a
         # multi-turn follow-up ("and their inference cost?") needs the same context to
@@ -652,12 +655,17 @@ class ChatAgent:
         # Context-length errors are a request-validation failure that providers surface
         # before any streaming starts, so this assumes `on_text` hasn't emitted partial
         # text from the failed attempt by the time the retry runs.
+        #
+        # Note: `execute` is reused, unchanged, across both attempts below — a first
+        # attempt that completes one search before the overall call fails still leaves
+        # that citation in `citations` even though only the retry's `final_text` ships.
+        # Pre-existing behavior, not something this executor introduces.
         try:
             final_text, synth_usage = self.client.run_tools(
                 system=synth_system,
                 messages=messages,
                 tools=[self.search_tool],
-                execute=synth_execute,
+                execute=execute,
                 on_text=on_text,
                 on_reasoning=lambda t: synth_trace({"type": "thought", "text": t}),
                 max_rounds=2,
@@ -668,7 +676,7 @@ class ChatAgent:
                 system=synth_system,
                 messages=[messages[-1]],
                 tools=[self.search_tool],
-                execute=synth_execute,
+                execute=execute,
                 on_text=on_text,
                 on_reasoning=lambda t: synth_trace({"type": "thought", "text": t}),
                 max_rounds=2,

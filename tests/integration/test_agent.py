@@ -552,7 +552,8 @@ def test_compare_builds_one_row_per_paper_and_continues_ref_numbering_into_synth
     make_agent, fake_llm
 ):
     # tool_calls fires on every run_tools call the FakeLLM sees, including the synthesis
-    # round — this exercises synth_execute's defensive search path (see agent.compare's
+    # round — this exercises the synthesis-round executor's defensive search path (built
+    # by ChatAgent._build_search_executor with search_budget=None; see agent.compare's
     # "A search tool is available but you should not need it") for free, on top of the
     # two per-paper searches, so 3 citations are expected, not 2.
     llm = fake_llm(answer="See [r1].", tool_calls=[("search_papers", {"query": "x"})])

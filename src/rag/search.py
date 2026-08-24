@@ -391,8 +391,8 @@ class Searcher:
         # search would already pull (which also makes a single resolved paper a no-op,
         # identical to per_paper=False). Assumes the caller's usual max_k <= candidates — if
         # max_k > candidates, the floor wins and each paper's fetch exceeds candidates; every
-        # real caller (ChatAgent.execute) already guarantees candidates >= max_k, so this
-        # isn't guarded here.
+        # real caller (ChatAgent._build_search_executor) already guarantees candidates >=
+        # max_k, so this isn't guarded here.
         if per_paper:
             assert ids is not None  # enforced by the per_paper/ids guard above
             n_papers = len(ids)

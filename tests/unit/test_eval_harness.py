@@ -598,8 +598,8 @@ def test_score_items_scoped_per_paper_no_rerank_sorts_across_scopes_by_score(mak
 
 def test_per_paper_sweep_and_confirm_respect_cfg_reranker_enabled(monkeypatch, make_config):
     # Regression guard: rerank must come from cfg.reranker.enabled, matching run/
-    # screen_retrieval and what ChatAgent.execute actually calls in production -- not
-    # hardcoded True regardless of the loaded config.
+    # screen_retrieval and what ChatAgent._build_search_executor actually calls in
+    # production -- not hardcoded True regardless of the loaded config.
     from eval import harness as harness_mod
     from rag.config import HFRerankerCfg
 
