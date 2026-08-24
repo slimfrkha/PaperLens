@@ -48,6 +48,26 @@ def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
+# Fields `append_turn` appends a real value for on every turn (`None` for the user-turn
+# slot, the turn's own value for the assistant-turn slot).
+TURN_FIELDS = (
+    "citations",
+    "traces",
+    "usage",
+    "per_paper",
+    "compare",
+    "compare_results",
+    "auto",
+)
+
+# Every field that runs parallel to `messages` — `None` for a slot that hasn't happened
+# yet. Shared by `create` (start empty) and `truncate_at` (drop the same tail everywhere).
+# `feedback` is on top of `TURN_FIELDS`, not part of it: `append_turn` never touches it —
+# a vote comes later, if ever, and keeps its own independent defensive padding in
+# `set_feedback`, unchanged from today.
+ARRAY_FIELDS = (*TURN_FIELDS, "feedback")
+
+
 class ChatStore:
     def __init__(self, directory: str):
         self.dir = Path(directory)
@@ -118,14 +138,7 @@ class ChatStore:
             "created_at": _now(),
             "updated_at": _now(),
             "messages": [],
-            "citations": [],
-            "traces": [],
-            "feedback": [],
-            "usage": [],
-            "per_paper": [],
-            "compare": [],
-            "compare_results": [],
-            "auto": [],
+            **{field: [] for field in ARRAY_FIELDS},
         }
         self._write(chat)
         return chat
@@ -144,51 +157,45 @@ class ChatStore:
         compare_results: list | None = None,
         auto: bool = False,
     ) -> dict:
-        """Append one user+assistant exchange, preserving prior turns."""
+        """Append one user+assistant exchange, preserving prior turns.
+
+        `chat_id` not resolving to an existing chat (the fallback skeleton below) is not
+        a path the current product flow reaches — the frontend always creates a chat via
+        `create()` before ever sending a message for it — but `ChatStore` is a public API,
+        not something only `chat_turn.py` may call, so it stays defended rather than
+        assumed away.
+        """
         with self._lock:
             chat = self.get(chat_id) or {
                 "id": chat_id,
                 "name": "",
                 "created_at": _now(),
                 "messages": [],
-                "citations": [],
-                "traces": [],
             }
-            chat.setdefault("traces", [])
-            chat.setdefault("usage", [])
-            chat.setdefault("per_paper", [])
-            chat.setdefault("compare", [])
-            chat.setdefault("compare_results", [])
-            chat.setdefault("auto", [])
-            # Keep parallel arrays aligned even for sessions created before traces/usage.
-            while len(chat["traces"]) < len(chat["messages"]):
-                chat["traces"].append(None)
-            while len(chat["usage"]) < len(chat["messages"]):
-                chat["usage"].append(None)
-            while len(chat["per_paper"]) < len(chat["messages"]):
-                chat["per_paper"].append(None)
-            while len(chat["compare"]) < len(chat["messages"]):
-                chat["compare"].append(None)
-            while len(chat["compare_results"]) < len(chat["messages"]):
-                chat["compare_results"].append(None)
-            while len(chat["auto"]) < len(chat["messages"]):
-                chat["auto"].append(None)
+            for field in TURN_FIELDS:
+                chat.setdefault(field, [])
+                # Keep parallel arrays aligned even for sessions created before this
+                # field existed.
+                while len(chat[field]) < len(chat["messages"]):
+                    chat[field].append(None)
             chat["messages"].append({"role": "user", "content": user_content})
-            chat["citations"].append(None)
-            chat["traces"].append(None)
-            chat["usage"].append(None)
-            chat["per_paper"].append(None)
-            chat["compare"].append(None)
-            chat["compare_results"].append(None)
-            chat["auto"].append(None)
             chat["messages"].append({"role": "assistant", "content": assistant_content})
-            chat["citations"].append(citations)
-            chat["traces"].append(trace)
-            chat["usage"].append(usage)
-            chat["per_paper"].append(per_paper)
-            chat["compare"].append(compare)
-            chat["compare_results"].append(compare_results)
-            chat["auto"].append(auto)
+            # One entry per TURN_FIELDS member — a KeyError here means a field was added
+            # to TURN_FIELDS without a value for it. Loud and immediate, unlike the
+            # previous failure mode (a forgotten .append() call silently misaligning the
+            # arrays instead).
+            assistant_values = {
+                "citations": citations,
+                "traces": trace,
+                "usage": usage,
+                "per_paper": per_paper,
+                "compare": compare,
+                "compare_results": compare_results,
+                "auto": auto,
+            }
+            for field in TURN_FIELDS:
+                chat[field].append(None)  # user turn: nothing to store yet
+                chat[field].append(assistant_values[field])  # assistant turn: this turn's value
             if name is not None:
                 chat["name"] = name
             chat["updated_at"] = _now()
@@ -245,17 +252,7 @@ class ChatStore:
                 raise ValueError("index out of range")
             if chat["messages"][index]["role"] != "user":
                 raise ValueError("edit index must be a user turn")
-            for key in (
-                "messages",
-                "citations",
-                "traces",
-                "feedback",
-                "usage",
-                "per_paper",
-                "compare",
-                "compare_results",
-                "auto",
-            ):
+            for key in ("messages", *ARRAY_FIELDS):
                 chat[key] = chat.get(key, [])[:index]
             chat["updated_at"] = _now()
             self._write(chat)

@@ -29,6 +29,23 @@ def test_append_turn_keeps_parallel_arrays_aligned(tmp_path):
     assert saved["traces"] == [None, trace]
 
 
+def test_append_turn_on_a_never_created_chat_id_builds_a_fresh_session(tmp_path):
+    # ChatStore is a public API, not something only chat_turn.py may call (which always
+    # creates the chat first) -- append_turn's fallback skeleton must still produce a
+    # well-formed, fully-aligned session for a chat_id that skipped create() entirely.
+    store = ChatStore(str(tmp_path))
+    saved = store.append_turn("never-created", "hi", "hello [r1]", [{"ref": "r1"}], [])
+
+    assert saved["id"] == "never-created"
+    assert [m["role"] for m in saved["messages"]] == ["user", "assistant"]
+    assert saved["citations"] == [None, [{"ref": "r1"}]]
+    for field in ("traces", "usage", "per_paper", "compare", "compare_results", "auto"):
+        assert len(saved[field]) == 2
+    # feedback is outside TURN_FIELDS (see ARRAY_FIELDS) and the fallback skeleton omits
+    # it too -- unlike the other 7 fields, it's not just short here, it's absent entirely.
+    assert "feedback" not in saved
+
+
 def test_append_turn_pads_legacy_sessions_without_traces(tmp_path):
     store = ChatStore(str(tmp_path))
     chat = store.create()
