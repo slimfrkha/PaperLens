@@ -269,18 +269,21 @@ def _stop_chroma_systems():
 
 # --- THROWAWAY: diagnosing the post-suite CI hang (exit code 143). Not for merge. ---
 def pytest_configure(config):
+    import threading
     import traceback
 
-    from docling.document_converter import DocumentConverter
+    orig_thread_init = threading.Thread.__init__
 
-    orig_init = DocumentConverter.__init__
+    def traced_thread_init(self, *a, **kw):
+        name = kw.get("name")
+        if name is None and len(a) > 2:
+            name = a[2]
+        if name and str(name).startswith("Stage-"):
+            print(f"\n=== [diag] thread {name!r} started from: ===", flush=True)
+            traceback.print_stack()
+        return orig_thread_init(self, *a, **kw)
 
-    def traced_init(self, *a, **k):
-        print("\n=== [diag] REAL DocumentConverter() constructed from: ===", flush=True)
-        traceback.print_stack()
-        return orig_init(self, *a, **k)
-
-    DocumentConverter.__init__ = traced_init
+    threading.Thread.__init__ = traced_thread_init
 
 
 def pytest_sessionfinish(session, exitstatus):
