@@ -871,8 +871,11 @@ def _admin_app(make_config, tmp_path, papers_yaml: str = "papers: []\n"):
 )
 def test_add_papers_route_normalizes_id_or_url(make_config, tmp_path, raw, expected):
     # There's no separate single-add route — adding one paper is a length-1 batch.
+    # A recognizable id gets queued, which fires the real (unmocked) worker trigger —
+    # patch it so this doesn't spin up a real background ingestion thread.
     cfg, client = _admin_app(make_config, tmp_path)
-    resp = client.post("/api/admin/papers", json={"arxiv_ids_or_urls": [raw]})
+    with patch.object(IngestionWorker, "trigger", return_value=True):
+        resp = client.post("/api/admin/papers", json={"arxiv_ids_or_urls": [raw]})
     assert resp.status_code == 200
     assert resp.json() == {"results": [{"input": raw, "status": "queued", "name": expected}]}
     assert [p.name for p in cfg.papers] == [expected]
@@ -902,17 +905,20 @@ def test_add_papers_route_reports_per_line_status(make_config, tmp_path):
     )
     cfg.papers.append(Paper(name="deepseek-v3", arxiv_id="2412.19437"))
 
-    resp = client.post(
-        "/api/admin/papers",
-        json={
-            "arxiv_ids_or_urls": [
-                "2401.00001",  # new -> queued
-                "2412.19437",  # already curated -> duplicate
-                "not-an-id",  # invalid
-                "https://arxiv.org/abs/2401.00001",  # same as line 1, normalized -> duplicate
-            ]
-        },
-    )
+    # 2401.00001 queues, which fires the real (unmocked) worker trigger — patch it so
+    # this doesn't spin up a real background ingestion thread.
+    with patch.object(IngestionWorker, "trigger", return_value=True):
+        resp = client.post(
+            "/api/admin/papers",
+            json={
+                "arxiv_ids_or_urls": [
+                    "2401.00001",  # new -> queued
+                    "2412.19437",  # already curated -> duplicate
+                    "not-an-id",  # invalid
+                    "https://arxiv.org/abs/2401.00001",  # same as line 1, normalized -> duplicate
+                ]
+            },
+        )
 
     assert resp.status_code == 200
     results = resp.json()["results"]
@@ -940,7 +946,12 @@ def test_add_papers_route_survives_a_per_line_write_failure(make_config, tmp_pat
             raise OSError("disk full")
         return real_add_paper(config_path, name, arxiv_id)
 
-    with patch.object(config_writer, "add_paper", side_effect=flaky_add_paper):
+    # Two lines queue, which fires the real (unmocked) worker trigger — patch it so
+    # this doesn't spin up a real background ingestion thread.
+    with (
+        patch.object(config_writer, "add_paper", side_effect=flaky_add_paper),
+        patch.object(IngestionWorker, "trigger", return_value=True),
+    ):
         resp = client.post(
             "/api/admin/papers",
             json={"arxiv_ids_or_urls": ["2401.00001", "2401.00002", "2401.00003"]},
