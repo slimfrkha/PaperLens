@@ -496,6 +496,243 @@ def test_faithfulness_contradiction_triggers_log_line(
     assert "[faithfulness]" in capsys.readouterr().out
 
 
+class _FlakyOnFullHistorySynthesisLLM:
+    """Duck-typed LLM client: any per-paper sub-run call answers directly (no search
+    scripted); the synthesis call (identified by its distinct system prompt) raises on its
+    first attempt — as if the full-history request overflowed context — then succeeds on
+    the retry, so the test can assert compare()'s degrade-and-retry path end to end."""
+
+    def __init__(self) -> None:
+        self.run_tools_calls: list[dict] = []
+        self.synthesis_attempts = 0
+
+    def complete(self, system, user, max_tokens=None):
+        return "title"
+
+    def run_tools(
+        self,
+        system,
+        messages,
+        tools,
+        execute,
+        on_text=None,
+        on_reasoning=None,
+        max_rounds=8,
+        stop_check=None,
+    ):
+        self.run_tools_calls.append(
+            {"system": system, "messages": messages, "tools": tools, "max_rounds": max_rounds}
+        )
+        if system.startswith("You already ran"):
+            self.synthesis_attempts += 1
+            if self.synthesis_attempts == 1:
+                raise RuntimeError("context length exceeded")
+            if on_text:
+                on_text("Synthesized answer.")
+            return "Synthesized answer.", Usage(input_tokens=5, output_tokens=5)
+        if on_text:
+            on_text("Row answer.")
+        return "Row answer.", Usage(input_tokens=1, output_tokens=1)
+
+
+def test_compare_raises_when_fewer_than_two_papers_resolve(make_agent, fake_llm):
+    llm = fake_llm(answer="ok", tool_calls=[])
+    agent = make_agent(llm)
+    with pytest.raises(ValueError):
+        agent.compare(
+            [{"role": "user", "content": "x"}],
+            tags=[],
+            papers=["paper-a"],
+            on_text=lambda _t: None,
+            on_row=lambda _r: None,
+        )
+
+
+def test_compare_builds_one_row_per_paper_and_continues_ref_numbering_into_synthesis(
+    make_agent, fake_llm
+):
+    # tool_calls fires on every run_tools call the FakeLLM sees, including the synthesis
+    # round — this exercises synth_execute's defensive search path (see agent.compare's
+    # "A search tool is available but you should not need it") for free, on top of the
+    # two per-paper searches, so 3 citations are expected, not 2.
+    llm = fake_llm(answer="See [r1].", tool_calls=[("search_papers", {"query": "x"})])
+    agent = make_agent(llm)
+    agent.cfg.retrieval.min_k = 1
+    agent.cfg.retrieval.max_k = 1
+
+    rows_seen: list[dict] = []
+    _text, compare_results, citations, _usage = agent.compare(
+        [{"role": "user", "content": "compare the two papers"}],
+        tags=[],
+        papers=[],
+        on_text=lambda _t: None,
+        on_row=rows_seen.append,
+    )
+
+    assert {r["paper_id"] for r in compare_results} == {"paper-a", "paper-b"}
+    assert rows_seen == compare_results  # on_row fired once per completed paper, in order
+    for row in compare_results:
+        assert len(row["citations"]) == 1
+        assert row["citations"][0]["paper_id"] == row["paper_id"]
+
+    # 2 per-paper citations + 1 from the synthesis round's defensive search.
+    assert [c["ref"] for c in citations] == ["r1", "r2", "r3"]  # no collisions
+
+
+def test_synthesis_call_gets_full_history_and_the_defensive_search_tool(make_agent, fake_llm):
+    llm = fake_llm(answer="Combined answer.", tool_calls=[])
+    agent = make_agent(llm)
+
+    messages = [
+        {"role": "user", "content": "what's the model size in each?"},
+        {"role": "assistant", "content": "Paper A uses 7B params [r1]."},
+        {"role": "user", "content": "and their training data?"},
+    ]
+    text, _compare_results, _citations, _usage = agent.compare(
+        messages, tags=[], papers=[], on_text=lambda _t: None, on_row=lambda _r: None
+    )
+
+    assert text == "Combined answer."
+    synthesis_call = llm.run_tools_calls[-1]
+    assert synthesis_call["messages"] == messages  # full history, not just the last message
+    assert synthesis_call["tools"] == [agent.search_tool]
+    assert synthesis_call["max_rounds"] == 2
+
+
+def test_synthesis_failure_retries_with_trimmed_history(make_agent):
+    # The retry fires on any exception from the first attempt (context overflow included,
+    # but not asserted as the cause here or in the caveat text — see agent.py's comment on
+    # why the wording doesn't name a specific diagnosis it hasn't verified).
+    llm = _FlakyOnFullHistorySynthesisLLM()
+    agent = make_agent(llm)
+
+    messages = [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "second question"},
+    ]
+    text, _compare_results, _citations, _usage = agent.compare(
+        messages, tags=[], papers=[], on_text=lambda _t: None, on_row=lambda _r: None
+    )
+
+    assert llm.synthesis_attempts == 2
+    synthesis_calls = [c for c in llm.run_tools_calls if c["system"].startswith("You already ran")]
+    assert len(synthesis_calls) == 2
+    assert synthesis_calls[0]["messages"] == messages  # first attempt: full history
+    assert synthesis_calls[1]["messages"] == [messages[-1]]  # retry: trimmed
+    assert text.startswith("_(retried with just your current question")
+    assert "Synthesized answer." in text
+
+
+def test_subrun_failure_produces_placeholder_row_and_continues(make_agent, fake_llm):
+    llm = fake_llm(answer="See [r1].", tool_calls=[("search_papers", {"query": "x"})])
+    agent = make_agent(llm)
+    agent.cfg.retrieval.min_k = 1
+    agent.cfg.retrieval.max_k = 1
+
+    original_run = agent.run
+
+    def flaky_run(messages, tags, papers, **kwargs):
+        if papers == ["paper-b"]:
+            raise RuntimeError("boom")
+        return original_run(messages, tags, papers, **kwargs)
+
+    agent.run = flaky_run
+
+    _text, compare_results, _citations, _usage = agent.compare(
+        [{"role": "user", "content": "compare"}],
+        tags=[],
+        papers=[],
+        on_text=lambda _t: None,
+        on_row=lambda _r: None,
+    )
+
+    failed = next(r for r in compare_results if r["paper_id"] == "paper-b")
+    assert failed["text"] == "_(search failed for this paper)_"
+    assert failed["citations"] == []
+    ok = next(r for r in compare_results if r["paper_id"] == "paper-a")
+    assert ok["citations"]
+    # the placeholder still feeds into synthesis instead of being silently dropped.
+    synthesis_call = llm.run_tools_calls[-1]
+    assert "_(search failed for this paper)_" in synthesis_call["system"]
+
+
+def test_compare_stopped_before_synthesis_falls_back_to_flattened_rows(make_agent, fake_llm):
+    llm = fake_llm(answer="Paper answer.", tool_calls=[("search_papers", {"query": "x"})])
+    agent = make_agent(llm)
+    agent.cfg.retrieval.min_k = 1
+    agent.cfg.retrieval.max_k = 1
+
+    calls = {"n": 0}
+
+    def stop_check():
+        # False for the check before paper 1 (lets it run); True from then on, so paper 2
+        # never starts and the after-loop check skips synthesis.
+        calls["n"] += 1
+        return calls["n"] > 1
+
+    text, compare_results, citations, usage = agent.compare(
+        [{"role": "user", "content": "compare"}],
+        tags=[],
+        papers=[],
+        on_text=lambda _t: None,
+        on_row=lambda _r: None,
+        stop_check=stop_check,
+    )
+
+    assert len(compare_results) == 1  # only the first paper's sub-run ran
+    row = compare_results[0]
+    assert text == f"## {row['title']}\n\n{row['text']}\n\n"
+    assert citations == row["citations"]
+    assert usage.input_tokens is None and usage.output_tokens is None
+
+
+def test_faithfulness_attaches_to_the_synthesized_text(
+    make_agent, fake_llm, fake_faithfulness_checker
+):
+    checker = fake_faithfulness_checker()
+    llm = fake_llm(answer="Combined finding [r1].", tool_calls=[("search_papers", {"query": "x"})])
+    agent = make_agent(llm, faithfulness=checker)
+    agent.cfg.retrieval.min_k = 1
+    agent.cfg.retrieval.max_k = 1
+
+    _text, _compare_results, citations, _usage = agent.compare(
+        [{"role": "user", "content": "compare"}],
+        tags=[],
+        papers=[],
+        on_text=lambda _t: None,
+        on_row=lambda _r: None,
+    )
+
+    cited = next(c for c in citations if c["ref"] == "r1")
+    assert "faithfulness" in cited
+
+
+def test_faithfulness_attaches_to_fullwidth_bracket_citations_in_synthesis(
+    make_agent, fake_llm, fake_faithfulness_checker
+):
+    # Regression for a real observed case: a local model synthesized an answer citing
+    # 【r1】 (fullwidth CJK brackets) instead of [r1] — the top-level faithfulness check
+    # on the synthesized text must still find and attach it, end to end through
+    # ChatAgent.compare, not just at the attribute_refs unit-test level.
+    checker = fake_faithfulness_checker()
+    llm = fake_llm(answer="Combined finding【r1】.", tool_calls=[("search_papers", {"query": "x"})])
+    agent = make_agent(llm, faithfulness=checker)
+    agent.cfg.retrieval.min_k = 1
+    agent.cfg.retrieval.max_k = 1
+
+    _text, _compare_results, citations, _usage = agent.compare(
+        [{"role": "user", "content": "compare"}],
+        tags=[],
+        papers=[],
+        on_text=lambda _t: None,
+        on_row=lambda _r: None,
+    )
+
+    cited = next(c for c in citations if c["ref"] == "r1")
+    assert "faithfulness" in cited
+
+
 def test_faithfulness_all_entailment_does_not_log(
     make_agent, fake_llm, fake_faithfulness_checker, capsys
 ):

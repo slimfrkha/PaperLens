@@ -7,6 +7,7 @@ import {
   Group,
   Loader,
   MultiSelect,
+  SegmentedControl,
   Stack,
   Text,
   Textarea,
@@ -28,7 +29,9 @@ import {
   type ChatMessage,
   type ChatSummary,
   type Citation,
+  type CompareRow,
   type Feedback,
+  type Paper,
   type TagCount,
   type TraceEntry,
   type UsageInfo,
@@ -36,9 +39,18 @@ import {
 import Answer from "../components/Answer";
 import AnswerActions from "../components/AnswerActions";
 import ChatSidebar from "../components/ChatSidebar";
+import ComparePanel from "../components/ComparePanel";
 import FeedbackControl from "../components/FeedbackControl";
 import SourceCards from "../components/SourceCards";
 import TraceBox from "../components/TraceBox";
+import { resolveScopeSize } from "../compareScope";
+import { citedCitations } from "../exportAnswer";
+
+// Above this resolved-paper-count, Compare (N sequential search+answer sub-runs plus a
+// synthesis pass) is confirmed before sending — a tooltip alone isn't a guard against an
+// unfiltered send over a large pool. No backend cap: the backend only enforces the floor
+// (<2 papers raises), a slow turn is an inconvenience, not an incident, in a local tool.
+const COMPARE_CONFIRM_THRESHOLD = 12;
 
 interface Turn {
   role: "user" | "assistant";
@@ -48,6 +60,9 @@ interface Turn {
   streaming?: boolean;
   feedback?: Feedback | null;
   usage?: UsageInfo;
+  compare?: boolean;
+  compareResults?: CompareRow[];
+  compareTotal?: number; // resolved scope size at send time — only set while streaming live
 }
 
 export default function ChatPage() {
@@ -61,7 +76,9 @@ export default function ChatPage() {
   const [tagOptions, setTagOptions] = useState<string[]>([]);
   const [papers, setPapers] = useState<string[]>([]);
   const [paperOptions, setPaperOptions] = useState<{ value: string; label: string }[]>([]);
+  const [allPapers, setAllPapers] = useState<Paper[]>([]); // for resolveScopeSize — carries tags
   const [perPaper, setPerPaper] = useState(false);
+  const [mode, setMode] = useState<"ask" | "compare">("ask");
   const [busy, setBusy] = useState(false);
   const [empty, setEmpty] = useState(false);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
@@ -87,6 +104,7 @@ export default function ChatPage() {
     getTags().then((t: TagCount[]) => setTagOptions(t.map((x) => x.tag)));
     getPapers().then((p) => {
       setEmpty(p.length === 0);
+      setAllPapers(p);
       setPaperOptions(p.map((x) => ({ value: x.paper_id, label: x.title })));
     });
     refreshSessions();
@@ -102,6 +120,7 @@ export default function ChatPage() {
       setTags([]);
       setPapers([]);
       setPerPaper(false);
+      setMode("ask");
     }
   }
 
@@ -124,19 +143,23 @@ export default function ChatPage() {
             trace: s.traces?.[i] ?? undefined,
             feedback: s.feedback?.[i] ?? undefined,
             usage: s.usage?.[i] ?? undefined,
+            compare: s.compare?.[i] ?? undefined,
+            compareResults: s.compare_results?.[i] ?? undefined,
           })),
         );
         // Filters aren't persisted per chat; reset so a reopened chat never shows
         // another session's stale (and now locked) filter values.
         setTags([]);
         setPapers([]);
-        // Per-paper isn't a locked filter — it should reflect what the conversation's
+        // Neither toggle is a locked filter — each should reflect what the conversation's
         // latest message actually used, not silently reset to a default that may not
         // match (e.g. reloading a chat whose last message used per-paper mode would
         // otherwise show the toggle off, misleading the user about what's about to happen
         // if they send another message without checking).
         const lastPerPaper = s.per_paper?.length ? s.per_paper[s.per_paper.length - 1] : null;
         setPerPaper(lastPerPaper ?? false);
+        const lastCompare = s.compare?.length ? s.compare[s.compare.length - 1] : null;
+        setMode(lastCompare ? "compare" : "ask");
         loadedId.current = chatId;
       })
       .catch(() => setTurns([]));
@@ -185,6 +208,8 @@ export default function ChatPage() {
   // directly (not via a setTurns functional updater), so an await between capturing it
   // and calling runTurn could hand it a stale snapshot.
   async function runTurn(prefix: Turn[], question: string, id: string, editIndex?: number) {
+    const sendCompare = mode === "compare";
+    const scopeSize = sendCompare ? resolveScopeSize(allPapers, tags, papers) : 0;
     const history: ChatMessage[] = [
       ...prefix.map((t) => ({ role: t.role, content: t.content })),
       { role: "user", content: question },
@@ -192,7 +217,14 @@ export default function ChatPage() {
     setTurns([
       ...prefix,
       { role: "user", content: question },
-      { role: "assistant", content: "", streaming: true },
+      {
+        role: "assistant",
+        content: "",
+        streaming: true,
+        compare: sendCompare,
+        compareResults: sendCompare ? [] : undefined,
+        compareTotal: sendCompare ? scopeSize : undefined,
+      },
     ]);
     setBusy(true);
     const controller = new AbortController();
@@ -204,7 +236,10 @@ export default function ChatPage() {
         history,
         tags,
         papers,
-        perPaper,
+        // The secondary knob only applies inside Ask — Compare's per-paper sub-runs
+        // already search one paper at a time, so it's never sent under Compare.
+        mode === "ask" ? perPaper : false,
+        sendCompare,
         id,
         {
           onToken: (tok) =>
@@ -219,6 +254,8 @@ export default function ChatPage() {
             patchLast((t) => ({ ...t, trace: [...(t.trace ?? []), e] }));
           },
           onUsage: (u) => patchLast((t) => ({ ...t, usage: u })),
+          onCompareRow: (row) =>
+            patchLast((t) => ({ ...t, compareResults: [...(t.compareResults ?? []), row] })),
           onMeta: () => refreshSessions(),
           onError: (e) => patchLast((t) => ({ ...t, content: t.content + `\n\n_Error: ${e}_` })),
           onDone: () => patchLast((t) => ({ ...t, streaming: false })),
@@ -230,6 +267,19 @@ export default function ChatPage() {
       setBusy(false);
       refreshSessions();
     }
+  }
+
+  // Compare is N sequential search+answer sub-runs plus a synthesis pass — materially
+  // slower than Ask on a large scope. Checked (and, if declined, bailed out of) before
+  // send()/sendEdit() touch any state, so a cancel leaves the composer/edit box untouched
+  // instead of silently discarding what the user typed.
+  function confirmLargeCompareIfNeeded(): boolean {
+    if (mode !== "compare") return true;
+    const n = resolveScopeSize(allPapers, tags, papers);
+    if (n <= COMPARE_CONFIRM_THRESHOLD) return true;
+    return window.confirm(
+      `Compare will run ${n} separate paper searches plus a synthesis pass — this can take a while. Continue?`,
+    );
   }
 
   // Stops the in-flight turn: aborts our side of the SSE fetch immediately (so the
@@ -248,6 +298,7 @@ export default function ChatPage() {
   async function send() {
     const q = input.trim();
     if (!q || busy) return;
+    if (!confirmLargeCompareIfNeeded()) return;
     setInput("");
     // A stale open edit box shouldn't survive an unrelated normal send — otherwise its
     // Save button becomes a silent no-op once `busy` flips true for this turn instead.
@@ -277,6 +328,7 @@ export default function ChatPage() {
   async function sendEdit(index: number, newContent: string) {
     const q = newContent.trim();
     if (!q || busy || !chatId) return;
+    if (!confirmLargeCompareIfNeeded()) return;
 
     // Exchanges strictly after this one (own reply + any full user/assistant pairs
     // beyond it) that editing here would discard — confirm only when it's more than
@@ -310,33 +362,62 @@ export default function ChatPage() {
     setTags([]);
     setPapers([]);
     setPerPaper(false);
+    setMode("ask");
     navigate("/");
   }
+
+  // Derived, not stored state — mirrors the backend's tag/paper-intersection +
+  // manifest-fallback scope resolution (agent.py) over the already-fetched paper list,
+  // so Compare can disable itself / warn without a new request per keystroke.
+  const scopeSize = resolveScopeSize(allPapers, tags, papers);
 
   const composer = (
     <Box className="composer" p={6}>
       <Group align="flex-end" gap={6} wrap="nowrap">
         <Tooltip
-          label="Runs retrieval once per paper instead of once over the whole library, so one paper with many relevant chunks can't crowd out the others before reranking."
+          label={
+            scopeSize < 2
+              ? "Compare needs at least 2 papers in scope"
+              : `Runs one guaranteed search+answer per paper (${scopeSize} in scope), then synthesizes them into one comparative answer — slower than Ask on a large scope.`
+          }
           multiline
           w={260}
         >
-          {/* Chip's own input is 0x0 (the visible surface is a sibling label), so
-              Tooltip's hover handlers need this wrapper to land on a hoverable box.
-              alignSelf overrides the row's flex-end (which bottom-aligns against the
-              taller textarea/send button) so the short pill centers instead. */}
+          {/* alignSelf overrides the row's flex-end (which bottom-aligns against the
+              taller textarea/send button) so the control centers instead. */}
           <Box style={{ alignSelf: "center" }}>
-            <Chip
+            <SegmentedControl
               size="xs"
-              variant="light"
-              checked={perPaper}
-              onChange={setPerPaper}
-              aria-label="Search each paper separately"
-            >
-              Per-paper
-            </Chip>
+              value={mode}
+              onChange={(v) => setMode(v as "ask" | "compare")}
+              data={[
+                { label: "Ask", value: "ask" },
+                { label: "Compare", value: "compare", disabled: scopeSize < 2 },
+              ]}
+            />
           </Box>
         </Tooltip>
+        {mode === "ask" && (
+          <Tooltip
+            label="Runs retrieval once per paper instead of once over the whole library, so one paper with many relevant chunks can't crowd out the others before reranking."
+            multiline
+            w={260}
+          >
+            {/* Chip's own input is 0x0 (the visible surface is a sibling label), so
+                Tooltip's hover handlers need this wrapper to land on a hoverable box. */}
+            <Box style={{ alignSelf: "center" }}>
+              <Chip
+                size="xs"
+                variant="light"
+                checked={perPaper}
+                onChange={setPerPaper}
+                aria-label="Broaden recall per paper"
+              >
+                Broaden recall
+              </Chip>
+            </Box>
+          </Tooltip>
+        )}
         <Textarea
           flex={1}
           variant="unstyled"
@@ -344,7 +425,11 @@ export default function ChatPage() {
           minRows={1}
           maxRows={8}
           value={input}
-          placeholder="Ask about a paper or a concept…"
+          placeholder={
+            mode === "compare"
+              ? `Ask one thing to compare across ${scopeSize} papers…`
+              : "Ask about a paper or a concept…"
+          }
           styles={{ input: { paddingInline: 10, fontSize: "0.95rem" } }}
           onChange={(e) => setInput(e.currentTarget.value)}
           onKeyDown={(e) => {
@@ -516,7 +601,19 @@ export default function ChatPage() {
                 </Group>
               ) : (
                 <Box key={i}>
-                  {t.trace && <TraceBox entries={t.trace} streaming={t.streaming} />}
+                  {t.compare ? (
+                    <ComparePanel
+                      rows={t.compareResults ?? []}
+                      totalPapers={t.compareTotal ?? t.compareResults?.length ?? 0}
+                      streaming={t.streaming}
+                      // The synthesis pass's own text streams through the same `content`
+                      // field a normal answer uses — the moment any of it has arrived,
+                      // every per-paper sub-run is done and synthesis has started.
+                      synthesizing={t.streaming && !!t.content}
+                    />
+                  ) : (
+                    t.trace && <TraceBox entries={t.trace} streaming={t.streaming} />
+                  )}
                   {t.content ? (
                     <Answer text={t.content} citations={t.citations ?? []} />
                   ) : t.streaming ? (
@@ -527,7 +624,9 @@ export default function ChatPage() {
                       </Text>
                     </Group>
                   ) : null}
-                  {!t.streaming && t.citations && <SourceCards citations={t.citations} />}
+                  {!t.streaming && t.citations && (
+                    <SourceCards citations={citedCitations(t.content, t.citations)} />
+                  )}
                   {!t.streaming && t.usage && (
                     <Text size="xs" c="dimmed" mt={4}>
                       {formatUsage(t.usage)}

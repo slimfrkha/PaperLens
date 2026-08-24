@@ -136,6 +136,15 @@ def test_attribute_refs_uncited_ref_is_absent():
     assert "r2" not in out
 
 
+def test_attribute_refs_accepts_fullwidth_cjk_brackets():
+    # A real local model has been observed emitting 【rN】 instead of [rN] despite every
+    # system prompt instructing ASCII brackets explicitly — a parsing-tolerance fix, not
+    # a prompt-compliance one, since prompt wording alone didn't stop it in practice.
+    text = "MLA shrinks the cache【r1】. The MoE layer balances load【r2】."
+    out = attribute_refs(text, {"r1", "r2"})
+    assert set(out) == {"r1", "r2"}
+
+
 def test_best_support_picks_highest_score():
     verdicts = [
         Verdict(label="neutral", score=0.2),

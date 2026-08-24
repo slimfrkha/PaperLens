@@ -10,14 +10,41 @@ from collections.abc import Callable
 from rag.config import LLMSpec
 from rag.llm import Usage
 
-from .agent import ChatAgent
+from .agent import ChatAgent, _flatten_compare_rows
 from .chats import ChatStore, generate_name
 from .schemas import ChatRequest
 
-# How often _run_agent checks whether it should give up waiting on the agent thread —
-# the bound on how long Stop takes to unlock the chat, regardless of what the agent
-# thread is actually blocked on.
+# How often _run_agent/_run_agent_compare check whether they should give up waiting on the
+# agent thread — the bound on how long Stop takes to unlock the chat, regardless of what
+# the agent thread is actually blocked on.
 _ABANDON_POLL_INTERVAL_S = 0.1
+
+
+def _run_in_thread_with_abandon(
+    target: Callable[[], None], stop_check: Callable[[], bool] | None
+) -> bool:
+    """Runs `target` (which stores its own result via closure) in a daemon thread, polling
+    until it finishes or `stop_check` fires first. Returns True if the thread finished
+    normally (its result is ready to read), False if it was abandoned instead.
+
+    A stop signal can't always make the blocked call return promptly on its own — whether
+    closing the LLM connection actually interrupts a thread stuck on a network read
+    (mid-prefill on a local model) or on retrieval (embedding/reranking) depends on the
+    SDK/platform, and isn't guaranteed. So once `stop_check` fires this stops *waiting* on
+    the thread rather than depending on it to return: the abandoned thread — which may
+    still be running, possibly for a long time — is left to finish or error out on its own,
+    and its eventual result is simply never read by the caller.
+
+    Shared by both `_run_agent` and `_run_agent_compare` so this abandon race lives in one
+    place — only the fallback *value* each builds when this returns False differs.
+    """
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    while thread.is_alive():
+        thread.join(timeout=_ABANDON_POLL_INTERVAL_S)
+        if thread.is_alive() and stop_check and stop_check():
+            return False
+    return True
 
 
 def _run_agent(
@@ -28,17 +55,9 @@ def _run_agent(
     ref_start: int,
     stop_check: Callable[[], bool] | None,
 ) -> tuple[str, list[dict], Usage]:
-    """Runs ``agent.run()`` in a helper thread and returns its ``(text, citations, usage)``.
-
-    A stop signal can't always make the blocked call return promptly on its own —
-    whether closing the LLM connection actually interrupts a thread stuck on a network
-    read (mid-prefill on a local model) or on retrieval (embedding/reranking) depends on
-    the SDK/platform, and isn't guaranteed. So once `stop_check` fires this stops
-    *waiting* on the agent thread rather than depending on the thread itself returning:
-    whatever text streamed via `on_text` so far becomes the answer, and the abandoned
-    thread — which may still be running, possibly for a long time — is left to finish or
-    error out on its own. Its eventual result, if any, is simply discarded here, so it
-    can never persist a stale turn after (or racing) a later one on the same chat.
+    """Runs ``agent.run()`` via `_run_in_thread_with_abandon` and returns its
+    ``(text, citations, usage)`` — or, if abandoned, whatever text streamed so far with
+    empty citations (see `_run_in_thread_with_abandon`'s docstring for why).
 
     Once abandoned, `on_text`/`on_trace` stop forwarding to `emit` — the SSE stream this
     turn owns is about to end (`run_turn` moves straight on to persisting), so any further
@@ -78,17 +97,75 @@ def _run_agent(
         except Exception as e:  # re-raised below, but only in the thread that waited it out
             result_error = e
 
-    thread = threading.Thread(target=_target, daemon=True)
-    thread.start()
-    while thread.is_alive():
-        thread.join(timeout=_ABANDON_POLL_INTERVAL_S)
-        if thread.is_alive() and stop_check and stop_check():
-            abandoned.set()
-            return "".join(parts), [], Usage(None, None)
+    if not _run_in_thread_with_abandon(_target, stop_check):
+        abandoned.set()
+        return "".join(parts), [], Usage(None, None)
 
     if result_error is not None:
         raise result_error
     assert result_value is not None  # thread finished without setting either result slot
+    return result_value
+
+
+def _run_agent_compare(
+    agent: ChatAgent,
+    req: ChatRequest,
+    on_trace: Callable[[dict], None],
+    emit: Callable[[str, str], None],
+    ref_start: int,
+    stop_check: Callable[[], bool] | None,
+) -> tuple[str, list[dict], list[dict], Usage]:
+    """Compare-mode counterpart to `_run_agent` — same `_run_in_thread_with_abandon` race,
+    but accumulates `rows` (parallel to `_run_agent`'s `parts`) so an abandoned turn still
+    returns a usable `compare_results`/`citations` pair via `_flatten_compare_rows` — the
+    same helper `ChatAgent.compare` uses for its own internal stop-before-synthesis
+    fallback, so both stop paths degrade the same way."""
+    rows: list[dict] = []
+    abandoned = threading.Event()
+
+    def on_text(t: str) -> None:
+        if abandoned.is_set():
+            return
+        emit("token", t)
+
+    def guarded_on_trace(e: dict) -> None:
+        if abandoned.is_set():
+            return
+        on_trace(e)
+
+    def on_row(row: dict) -> None:
+        if abandoned.is_set():
+            return
+        rows.append(row)
+        emit("compare_row", json.dumps(row))
+
+    result_value: tuple[str, list[dict], list[dict], Usage] | None = None
+    result_error: Exception | None = None
+
+    def _target() -> None:
+        nonlocal result_value, result_error
+        try:
+            result_value = agent.compare(
+                [m.model_dump() for m in req.messages],
+                req.tags,
+                req.papers,
+                on_text=on_text,
+                on_row=on_row,
+                on_trace=guarded_on_trace,
+                ref_start=ref_start,
+                stop_check=stop_check,
+            )
+        except Exception as e:
+            result_error = e
+
+    if not _run_in_thread_with_abandon(_target, stop_check):
+        abandoned.set()
+        text, citations = _flatten_compare_rows(rows)
+        return text, rows, citations, Usage(None, None)
+
+    if result_error is not None:
+        raise result_error
+    assert result_value is not None
     return result_value
 
 
@@ -136,7 +213,13 @@ def run_turn(
         # Spans the whole turn (retrieval + rerank + LLM + faithfulness check), not just LLM
         # think time — that's the wait the user actually feels.
         t0 = time.perf_counter()
-        text, citations, usage = _run_agent(agent, req, on_trace, emit, ref_start, stop_check)
+        if req.compare:
+            text, compare_results, citations, usage = _run_agent_compare(
+                agent, req, on_trace, emit, ref_start, stop_check
+            )
+        else:
+            text, citations, usage = _run_agent(agent, req, on_trace, emit, ref_start, stop_check)
+            compare_results = None
         latency_ms = int((time.perf_counter() - t0) * 1000)
         usage_payload = {
             "input_tokens": usage.input_tokens,
@@ -158,7 +241,11 @@ def run_turn(
                 trace_entries,
                 usage_payload,
                 name=name,
-                per_paper=req.per_paper,
+                # The secondary knob is hidden/unsendable under Compare (see ChatPage), but
+                # the backend doesn't trust the client alone: never persist both as true.
+                per_paper=req.per_paper and not req.compare,
+                compare=req.compare,
+                compare_results=compare_results,
             )
             emit("meta", json.dumps({"chat_id": saved["id"], "name": saved["name"]}))
     except Exception as e:  # surface errors to the client

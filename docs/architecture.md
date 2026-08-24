@@ -280,6 +280,75 @@ circularity risk [harness](harness.md) documents for synthetic query generation.
 macro-F1 number from such a set as an upper bound on real-world accuracy, not a validated
 guarantee; the fix is folding in pairs mined from real citations over time.
 
+## 🆚 Compare mode: an agent-level guarantee, not a retrieval knob
+
+**Per-paper retrieval** (above) only fixes *recall* — each paper gets a fair share of the
+candidate budget before the shared rerank/elbow cutoff, which stays global. A paper can
+still clear recall fairly and get discarded before the model ever answers, so nothing
+actually guarantees every paper in scope gets asked. **Compare mode** closes that gap one
+layer up, at the agent, not the retriever: `ChatAgent.compare` runs the question once per
+paper as an independent `ChatAgent.run` call scoped to that one paper, then makes one more
+model call to synthesize every per-paper answer into a single comparative answer.
+
+```mermaid
+sequenceDiagram
+  participant U as User
+  participant C as ChatAgent.compare
+  participant R as ChatAgent.run (x N, one per paper)
+  participant L as LLM backend
+  U->>C: question, N papers in scope
+  loop once per paper
+    C->>R: run(messages, papers=[paper_id])
+    R-->>C: that paper's own answer + citations + trace
+  end
+  C->>L: run_tools(SYNTHESIS_SYSTEM_PROMPT, per-paper answers)
+  L-->>C: synthesized answer, reusing each [rN] marker
+  opt faithfulness.enabled
+    C->>C: check synthesized text vs union of all cited passages
+  end
+  C-->>U: synthesized answer (+ per-paper carousel drill-down)
+```
+
+Design decisions worth knowing the *why* of:
+
+- **Reuses `ChatAgent.run` unmodified, per paper.** The per-paper loop is not a new search
+  path — it's `N` normal single-paper turns, so per-paper search budget, citation
+  numbering, and each paper's own faithfulness check all come for free, already tested. The
+  only new code is the loop itself and the synthesis step after it.
+- **Synthesize, don't just concatenate.** An earlier design considered rendering the `N`
+  per-paper answers directly (a markdown table, or a row per paper) instead of feeding them
+  back into the model. Both give up genuine cross-paper reasoning — "these two papers
+  disagree" or "three of five use the same technique" never gets said if no single
+  generation step ever sees more than one paper's answer at once. Synthesizing also means
+  the final answer is structurally identical to a normal turn's (one `text`, one `citations`
+  list), so `Answer.tsx`/`SourceCards.tsx`/export/faithfulness all render it with zero new
+  code — the per-paper answers become an optional carousel drill-down above it instead of
+  the primary output.
+- **Citation continuity across the synthesis step is the one new risk.** Each per-paper
+  sub-run already numbers its own refs uniquely (`ref_start` threaded between sub-runs, the
+  same mechanism that already continues numbering across turns in one chat) — that part is
+  unchanged. The synthesis prompt has to *reuse* those exact `[rN]` markers rather than
+  inventing or renumbering them; if it hallucinates one anyway, `Answer.tsx`'s existing
+  `byRef.get(ref)` fallback already degrades to plain text, so nothing new needed to catch
+  it. The one genuinely new registry concern is a defensive search the synthesis step is
+  told not to need but is still given a real tool for (not a stub) — any citation it
+  produces continues the same running ref counter rather than colliding with a per-paper
+  ref.
+- **The faithfulness check runs a second, separate time — on the synthesized text.** Each
+  per-paper sub-run's own faithfulness check (above) verifies that paper's own answer for
+  the carousel; it says nothing about whether the *synthesized* answer's claims are still
+  supported once restated. `ChatAgent.compare` runs `_check_faithfulness` again against the
+  final synthesized text and the union of every sub-run's cited passages — the only new
+  plumbing this feature needed on top of what faithfulness already provides.
+- **The ref-marker parser is deliberately lenient about what a model actually writes, not
+  just what the prompt asks for.** Real usage surfaced a local model citing with fullwidth
+  CJK brackets (`【r1】`) and comma-bunched brackets (`[r10, r12]`) instead of the `[rN]`
+  form every prompt explicitly instructs — reliably enough that a prompt reword alone wasn't
+  a fix. Both `_REF_BRACKET` (`src/rag/faithfulness.py`) and `REF_MARKER`
+  (`web/src/exportAnswer.ts`) tolerate both forms, on both backend faithfulness attribution
+  and frontend citation rendering — a parsing-tolerance fix, not a change to what markers the
+  system prompts ask the model to produce.
+
 ## 🗂️ Swappable backends: the ChoiceRegistry pattern
 
 Embedders, rerankers, sparse backends, faithfulness backends, and LLM backends are selected by

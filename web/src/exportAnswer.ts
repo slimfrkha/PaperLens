@@ -2,8 +2,19 @@ import type { Citation } from "./api";
 
 // The `[rN]` marker pattern — the one place it's defined. `Answer.tsx` imports this
 // (rather than keeping its own copy) so the two can't silently drift apart on what
-// counts as a citation marker.
-export const REF_MARKER = /\[(r\d+)\]/g;
+// counts as a citation marker. Also accepts fullwidth CJK brackets `【r1】` — observed
+// from a real local model that used them instead of ASCII brackets despite every
+// prompt instructing `[rN]` explicitly (mirrors `_REF_BRACKET` in
+// src/rag/faithfulness.py — a parsing-tolerance fix, not a change to what markers we
+// ask for). Also matches one or more comma-separated refs per bracket (`[r1, r2]`),
+// mirroring `_REF_BRACKET`'s own bunched-ref support — group 1 is the whole bunch
+// string, not a single ref; callers must extract each `r\d+` from it (see REF_ID
+// below and `extractCitedRefs`) rather than treating group 1 as one ref.
+export const REF_MARKER = /[[【](r\d+(?:\s*,\s*r\d+)*)[\]】]/g;
+// Pulls each individual ref out of a REF_MARKER match's group 1 (which may be a bunch,
+// e.g. "r10, r12") — exported so `Answer.tsx` can unpack a bunch the same way when it
+// rewrites a matched bracket into one markdown link per ref.
+export const REF_ID = /r\d+/g;
 
 /** Ordered, deduped refs from `text` that are real citations (present in `byRef`) —
  *  a turn's citations array can include registry entries the model never actually
@@ -13,10 +24,11 @@ export function extractCitedRefs(text: string, byRef: Map<string, Citation>): st
   const seen = new Set<string>();
   const refs: string[] = [];
   for (const m of text.matchAll(REF_MARKER)) {
-    const ref = m[1];
-    if (byRef.has(ref) && !seen.has(ref)) {
-      seen.add(ref);
-      refs.push(ref);
+    for (const [ref] of m[1].matchAll(REF_ID)) {
+      if (byRef.has(ref) && !seen.has(ref)) {
+        seen.add(ref);
+        refs.push(ref);
+      }
     }
   }
   return refs;
@@ -43,9 +55,15 @@ export function refNumber(c: Citation): string {
 export function answerToMarkdown(text: string, cited: Citation[]): string {
   if (cited.length === 0) return text;
   const byRef = new Map(cited.map((c) => [c.ref, c]));
-  const processed = text.replace(REF_MARKER, (m, ref: string) => {
-    const c = byRef.get(ref);
-    return c ? `[^${refNumber(c)}]` : m;
+  // group may be a bunch ("r10, r12") — one footnote marker per ref that resolves,
+  // same as Answer.tsx's own bunched-bracket handling; falls back to the original
+  // bracket unchanged only if none of the bunch resolves.
+  const processed = text.replace(REF_MARKER, (m, group: string) => {
+    const notes = [...group.matchAll(REF_ID)]
+      .map((refMatch) => byRef.get(refMatch[0]))
+      .filter((c): c is Citation => !!c)
+      .map((c) => `[^${refNumber(c)}]`);
+    return notes.length > 0 ? notes.join("") : m;
   });
   const sorted = [...cited].sort((a, b) => Number(refNumber(a)) - Number(refNumber(b)));
   const lines = sorted.map((c) => {

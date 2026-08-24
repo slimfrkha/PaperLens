@@ -88,6 +88,19 @@ export interface UsageInfo {
   latency_ms: number;
 }
 
+/** One paper's own dedicated search+answer sub-run within a Compare turn — the
+ *  carousel's drill-down data. `text`/`citations` render through the same `Answer`
+ *  component a normal turn's answer does, so its own citation links and faithfulness
+ *  flags work exactly like a normal answer's. */
+export interface CompareRow {
+  paper_id: string;
+  title: string;
+  arxiv_id?: string | null;
+  text: string;
+  citations: Citation[];
+  trace: TraceEntry[];
+}
+
 export interface ChatSession {
   id: string;
   name: string;
@@ -97,6 +110,8 @@ export interface ChatSession {
   feedback?: (Feedback | null)[];
   usage?: (UsageInfo | null)[];
   per_paper?: (boolean | null)[];
+  compare?: (boolean | null)[];
+  compare_results?: (CompareRow[] | null)[];
 }
 
 async function j<T>(r: Response): Promise<T> {
@@ -209,13 +224,16 @@ export interface ChatHandlers {
   onTrace?: (e: TraceEntry) => void;
   onMeta?: (m: { chat_id: string; name: string }) => void;
   onUsage?: (u: UsageInfo) => void;
+  onCompareRow?: (r: CompareRow) => void;
   onError?: (e: string) => void;
   onDone?: () => void;
 }
 
 const isAbortError = (e: unknown) => e instanceof DOMException && e.name === "AbortError";
 
-/** POST /api/chat and parse the SSE stream (token / citations / trace / usage / meta / error / done).
+/** POST /api/chat and parse the SSE stream (token / citations / trace / usage /
+ *  compare_row / meta / error / done). `compare_row` only fires on a Compare turn, once
+ *  per completed paper — the carousel's drill-down data filling in progressively.
  *  `editIndex` truncates the stored chat back to that user turn before resuming from it.
  *  `signal`, if given, aborts the request (e.g. the chat page's Stop button) — an abort
  *  ends the stream silently (no onError/onDone) rather than throwing, since the caller
@@ -225,6 +243,7 @@ export async function chat(
   tags: string[],
   papers: string[],
   perPaper: boolean,
+  compare: boolean,
   chatId: string | null,
   h: ChatHandlers,
   editIndex?: number,
@@ -240,6 +259,7 @@ export async function chat(
         tags,
         papers,
         per_paper: perPaper,
+        compare,
         chat_id: chatId,
         edit_index: editIndex ?? null,
       }),
@@ -266,6 +286,7 @@ export async function chat(
     else if (event === "citations") h.onCitations(JSON.parse(data) as Citation[]);
     else if (event === "trace") h.onTrace?.(JSON.parse(data) as TraceEntry);
     else if (event === "usage") h.onUsage?.(JSON.parse(data) as UsageInfo);
+    else if (event === "compare_row") h.onCompareRow?.(JSON.parse(data) as CompareRow);
     else if (event === "meta") h.onMeta?.(JSON.parse(data));
     else if (event === "error") h.onError?.(data);
     else if (event === "done") h.onDone?.();

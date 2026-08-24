@@ -283,7 +283,69 @@ describe("ChatPage feedback control", () => {
   });
 });
 
-describe("ChatPage per-paper toggle", () => {
+describe("ChatPage Sources section", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("only shows citations actually cited in the answer text, not every retrieved passage", async () => {
+    // Regression: a turn's stored `citations` array can include passages a search call
+    // retrieved but the model never actually cited inline (registry entries aren't
+    // filtered to what the final text uses) — SourceCards used to render all of them,
+    // making the "Sources" list disagree with the answer's own faithfulness summary
+    // (which only counts actually-cited refs). Most visible on a Compare turn's large
+    // union citations list, but the bug — and the fix — apply to any turn.
+    const cite = (ref: string, paperId: string, title: string) => ({
+      ref,
+      paper_id: paperId,
+      title,
+      breadcrumb: "",
+      section_title: "Method",
+      snippet: "some passage",
+    });
+    const session = {
+      id: "test-id",
+      name: "Test",
+      messages: [
+        { role: "user", content: "question" },
+        { role: "assistant", content: "The cited claim [r1]." },
+      ],
+      citations: [null, [cite("r1", "p1", "Cited Paper"), cite("r2", "p2", "Uncited Paper")]],
+      traces: [null, []],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        const body =
+          url === "/api/chats/test-id"
+            ? session
+            : url.startsWith("/api/tags") ||
+                url.startsWith("/api/papers") ||
+                url.startsWith("/api/chats")
+              ? []
+              : {};
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
+      }),
+    );
+
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+
+    await screen.findByText(/The cited claim/i);
+    expect(screen.getByText("Cited Paper")).toBeInTheDocument();
+    expect(screen.queryByText("Uncited Paper")).not.toBeInTheDocument();
+  });
+});
+
+describe("ChatPage secondary 'Broaden recall per paper' knob (Ask mode)", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -301,7 +363,7 @@ describe("ChatPage per-paper toggle", () => {
     );
 
     await screen.findByText(/regression marker text/i);
-    expect(screen.getByLabelText("Search each paper separately")).not.toBeChecked();
+    expect(screen.getByLabelText("Broaden recall per paper")).not.toBeChecked();
   });
 
   it("toggling on and sending includes per_paper: true in the request body", async () => {
@@ -335,7 +397,7 @@ describe("ChatPage per-paper toggle", () => {
     );
     await screen.findByText(/regression marker text/i);
 
-    fireEvent.click(screen.getByLabelText("Search each paper separately"));
+    fireEvent.click(screen.getByLabelText("Broaden recall per paper"));
     fireEvent.change(screen.getByPlaceholderText("Ask about a paper or a concept…"), {
       target: { value: "a question" },
     });
@@ -379,7 +441,7 @@ describe("ChatPage per-paper toggle", () => {
     await screen.findByText(/regression marker text/i);
     const composer = screen.getByPlaceholderText("Ask about a paper or a concept…");
 
-    fireEvent.click(screen.getByLabelText("Search each paper separately"));
+    fireEvent.click(screen.getByLabelText("Broaden recall per paper"));
     fireEvent.change(composer, { target: { value: "first" } });
     fireEvent.click(screen.getByLabelText("Send"));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/chat", expect.anything()));
@@ -409,12 +471,12 @@ describe("ChatPage per-paper toggle", () => {
       </MantineProvider>,
     );
     await screen.findByText(/regression marker text/i);
-    fireEvent.click(screen.getByLabelText("Search each paper separately"));
-    expect(screen.getByLabelText("Search each paper separately")).toBeChecked();
+    fireEvent.click(screen.getByLabelText("Broaden recall per paper"));
+    expect(screen.getByLabelText("Broaden recall per paper")).toBeChecked();
 
     fireEvent.click(screen.getByRole("button", { name: /New chat/i }));
 
-    expect(await screen.findByLabelText("Search each paper separately")).not.toBeChecked();
+    expect(await screen.findByLabelText("Broaden recall per paper")).not.toBeChecked();
   });
 
   it("restores the target conversation's own per_paper state when switching (not a blind reset)", async () => {
@@ -466,12 +528,12 @@ describe("ChatPage per-paper toggle", () => {
     );
     await screen.findByText(/regression marker text/i);
     // test-id has no per_paper history (chatSession predates the field) -> off by default.
-    expect(screen.getByLabelText("Search each paper separately")).not.toBeChecked();
+    expect(screen.getByLabelText("Broaden recall per paper")).not.toBeChecked();
 
     fireEvent.click(await screen.findByText("Other"));
 
     // other-id's last message used per_paper: true -> restored, not reset to off.
-    expect(await screen.findByLabelText("Search each paper separately")).toBeChecked();
+    expect(await screen.findByLabelText("Broaden recall per paper")).toBeChecked();
   });
 
   it("restores true from an earlier turn but false from the latest turn (uses the latest, not the first)", async () => {
@@ -513,7 +575,240 @@ describe("ChatPage per-paper toggle", () => {
       </MantineProvider>,
     );
 
-    expect(await screen.findByLabelText("Search each paper separately")).not.toBeChecked();
+    expect(await screen.findByLabelText("Broaden recall per paper")).not.toBeChecked();
+  });
+});
+
+describe("ChatPage Ask/Compare mode", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const twoPapers = [
+    { paper_id: "p1", title: "Paper One", tags: [] },
+    { paper_id: "p2", title: "Paper Two", tags: [] },
+  ];
+
+  function twoPapersFetch(extra?: (url: string) => Response | null) {
+    return vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      void init;
+      const url = String(input);
+      const overridden = extra?.(url);
+      if (overridden) return Promise.resolve(overridden);
+      const body =
+        url === "/api/chats/test-id"
+          ? chatSession
+          : url === "/api/papers"
+            ? twoPapers
+            : url.startsWith("/api/tags") || url.startsWith("/api/chats")
+              ? []
+              : {};
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
+    });
+  }
+
+  it("Ask is selected by default and Compare is disabled below 2 resolved papers", async () => {
+    vi.stubGlobal("fetch", mockFetch()); // default mock: 0 papers
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+
+    await screen.findByText(/regression marker text/i);
+    expect(screen.getByRole("radio", { name: "Ask" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "Compare" })).toBeDisabled();
+  });
+
+  it("Compare is enabled once 2+ papers resolve into scope", async () => {
+    vi.stubGlobal("fetch", twoPapersFetch());
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+
+    await screen.findByText(/regression marker text/i);
+    await waitFor(() => expect(screen.getByRole("radio", { name: "Compare" })).not.toBeDisabled());
+  });
+
+  it("switching to Compare hides the secondary 'Broaden recall' knob; switching back restores it", async () => {
+    vi.stubGlobal("fetch", twoPapersFetch());
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+    await screen.findByText(/regression marker text/i);
+    await waitFor(() => expect(screen.getByRole("radio", { name: "Compare" })).not.toBeDisabled());
+    expect(screen.getByLabelText("Broaden recall per paper")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: "Compare" }));
+    expect(screen.queryByLabelText("Broaden recall per paper")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: "Ask" }));
+    expect(screen.getByLabelText("Broaden recall per paper")).toBeInTheDocument();
+  });
+
+  it("sending in Compare mode includes compare: true and per_paper: false in the request body", async () => {
+    const sse = "event: citations\ndata: []\n\nevent: done\ndata: \n\n";
+    const fetchMock = twoPapersFetch((url) =>
+      url === "/api/chat" ? mockStreamResponse(sse) : null,
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+    await screen.findByText(/regression marker text/i);
+    await waitFor(() => expect(screen.getByRole("radio", { name: "Compare" })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole("radio", { name: "Compare" }));
+    fireEvent.change(screen.getByPlaceholderText(/Ask one thing to compare/i), {
+      target: { value: "compare them" },
+    });
+    fireEvent.click(screen.getByLabelText("Send"));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/chat", expect.anything()));
+    const call = fetchMock.mock.calls.find(([u]) => String(u) === "/api/chat")!;
+    const sent = JSON.parse((call[1] as RequestInit).body as string);
+    expect(sent.compare).toBe(true);
+    expect(sent.per_paper).toBe(false);
+  });
+
+  it("resets to Ask on New chat", async () => {
+    vi.stubGlobal("fetch", twoPapersFetch());
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/" element={<ChatPage />} />
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+    await screen.findByText(/regression marker text/i);
+    await waitFor(() => expect(screen.getByRole("radio", { name: "Compare" })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole("radio", { name: "Compare" }));
+    expect(screen.getByRole("radio", { name: "Compare" })).toBeChecked();
+
+    fireEvent.click(screen.getByRole("button", { name: /New chat/i }));
+
+    expect(await screen.findByRole("radio", { name: "Ask" })).toBeChecked();
+  });
+
+  it("restores Compare when switching to a conversation whose latest turn used it (not a blind reset)", async () => {
+    const otherSession = {
+      id: "other-id",
+      name: "Other",
+      messages: [
+        { role: "user", content: "other question" },
+        { role: "assistant", content: "other answer" },
+      ],
+      citations: [null, []],
+      compare: [null, true],
+    };
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/chats") {
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve([
+              { id: "test-id", name: "Test", updated_at: "" },
+              { id: "other-id", name: "Other", updated_at: "" },
+            ]),
+        } as Response);
+      }
+      const body =
+        url === "/api/chats/test-id"
+          ? chatSession
+          : url === "/api/chats/other-id"
+            ? otherSession
+            : url === "/api/papers"
+              ? twoPapers
+              : url.startsWith("/api/tags")
+                ? []
+                : {};
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+    await screen.findByText(/regression marker text/i);
+    expect(screen.getByRole("radio", { name: "Ask" })).toBeChecked();
+
+    fireEvent.click(await screen.findByText("Other"));
+
+    expect(await screen.findByRole("radio", { name: "Compare" })).toBeChecked();
+  });
+
+  it("confirms before sending Compare over more than 12 resolved papers, and aborts on cancel", async () => {
+    const manyPapers = Array.from({ length: 13 }, (_, i) => ({
+      paper_id: `p${i}`,
+      title: `Paper ${i}`,
+      tags: [],
+    }));
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      const body =
+        url === "/api/chats/test-id"
+          ? chatSession
+          : url === "/api/papers"
+            ? manyPapers
+            : url.startsWith("/api/tags") || url.startsWith("/api/chats")
+              ? []
+              : {};
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+    await screen.findByText(/regression marker text/i);
+    await waitFor(() => expect(screen.getByRole("radio", { name: "Compare" })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole("radio", { name: "Compare" }));
+    fireEvent.change(screen.getByPlaceholderText(/Ask one thing to compare/i), {
+      target: { value: "compare them" },
+    });
+    fireEvent.click(screen.getByLabelText("Send"));
+
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(fetchMock.mock.calls.some(([u]) => String(u) === "/api/chat")).toBe(false);
+    confirmSpy.mockRestore();
   });
 });
 

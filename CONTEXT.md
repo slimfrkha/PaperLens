@@ -142,15 +142,46 @@ then pools every paper's candidates flat before the shared rerank/**elbow cutoff
 Purpose: stop one paper with many relevant chunks from crowding the candidate budget out of
 other papers before the reranker ever sees them; the final elbow cutoff stays global, with
 no per-paper quota — per-paper retrieval only ever shaped recall, never guaranteed every
-paper survives into what's returned. When no paper/tag filter is active, `ChatAgent` falls
-back to every paper in the **manifest** — `Searcher` itself has no manifest awareness and
-raises if asked for per-paper recall with no resolved paper list.
+paper survives into what's returned. That gap — no guarantee every paper in scope actually
+gets asked — is what **Compare mode** closes at the agent level instead of the retrieval
+level; the two coexist as a primary/secondary pair (see below), not competing toggles. When
+no paper/tag filter is active, `ChatAgent` falls back to every paper in the **manifest** —
+`Searcher` itself has no manifest awareness and raises if asked for per-paper recall with
+no resolved paper list.
 
 - Code: the `per_paper` branch in `Searcher.search` (`src/rag/search.py`); the manifest
   fallback in `ChatAgent.run` (`src/server/agent.py`); `ChatRequest.per_paper`
   (`src/server/schemas.py`).
+- Product-facing: the "Broaden recall per paper" knob, shown (and only sendable) in **Ask**
+  mode — hidden under **Compare mode**, where it's structurally meaningless (Compare's
+  per-paper sub-runs already search one paper at a time).
 - `_Avoid_:` per-source retrieval (collides with `Result.source`'s dense/sparse/both
   meaning), per-document retrieval, paper-level round-robin.
+
+### 🆚 Compare mode
+
+An agent-level answer shape, alongside — not replacing — **per-paper retrieval**: the
+primary **Ask**/**Compare** switch in the composer. Ask produces one combined answer over a
+shared retrieval pool, same as before. Compare runs the question once per paper as an
+independent sub-run (`ChatAgent.compare`, reusing `ChatAgent.run` unmodified, scoped to one
+paper at a time), guaranteeing every paper in the resolved scope actually gets asked — a
+guarantee per-paper retrieval's recall-only fix doesn't give, since the shared rerank/elbow
+cutoff after it stays global. Every per-paper answer then feeds back into the model once
+more to synthesize one final, genuinely comparative answer that reuses each sub-run's own
+`[rN]` **ref**s (`SYNTHESIS_SYSTEM_PROMPT`). The per-paper legwork becomes an optional,
+collapsible carousel drill-down above the final answer, one slide per paper, mirroring how
+the **Turn**'s trace already sits above a normal answer.
+
+- Code: `ChatAgent.compare`/`SYNTHESIS_SYSTEM_PROMPT`/`_resolve_paper_ids`
+  (`src/server/agent.py`); `ChatRequest.compare`, `"compare"`/`"compare_results"` on a
+  stored **Turn** (`src/server/schemas.py`, `src/server/chats.py`); `compare_row` SSE event
+  (`src/server/chat_turn.py`); `ComparePanel`/`TraceEntries` (`web/src/components/`).
+- **Naming — don't confuse with `paperlens-eval comparative`**: that's an unrelated
+  eval-harness command (see [docs/harness.md](docs/harness.md)) measuring whether
+  retrieval-level per-paper retrieval helps genuinely cross-paper questions — a different
+  layer (harness measurement, not a product feature) that happens to use the adjacent word
+  "comparative," not "compare."
+- `_Avoid_:` comparative mode (see naming note above), side-by-side mode, multi-paper mode.
 
 ### 🪜 Elbow cutoff
 

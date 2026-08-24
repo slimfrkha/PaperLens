@@ -36,6 +36,31 @@ describe("extractCitedRefs / citedCitations", () => {
     const text = "Only [r1] is actually cited in the answer.";
     expect(citedCitations(text, citations).map((c) => c.ref)).toEqual(["r1"]);
   });
+
+  it("recognizes fullwidth CJK brackets 【rN】 alongside ASCII [rN]", () => {
+    // A real local model has been observed emitting 【rN】 instead of [rN] despite every
+    // prompt instructing ASCII brackets explicitly — a parsing-tolerance fix, not a
+    // prompt-compliance one, since prompt wording alone didn't stop it in practice.
+    const byRef = new Map([
+      ["r1", citation({ ref: "r1", paper_id: "p1" })],
+      ["r2", citation({ ref: "r2", paper_id: "p2" })],
+    ]);
+    const text = "671 billion【r1】 and 37 billion【r2】.";
+    expect(extractCitedRefs(text, byRef)).toEqual(["r1", "r2"]);
+  });
+
+  it("unpacks a comma-bunched bracket [r10, r12] into its individual refs", () => {
+    // Real observed case: a model's own per-paper answer bunched two refs into one
+    // bracket instead of writing [r10][r12] — the backend's attribute_refs already
+    // handled this (_REF_BRACKET's whole reason for existing); the frontend silently
+    // dropped both refs in the bunch until this fix.
+    const byRef = new Map([
+      ["r10", citation({ ref: "r10", paper_id: "p1" })],
+      ["r12", citation({ ref: "r12", paper_id: "p2" })],
+    ]);
+    const text = "284 B total, 13 B activated [r10, r12].";
+    expect(extractCitedRefs(text, byRef)).toEqual(["r10", "r12"]);
+  });
 });
 
 describe("answerToMarkdown", () => {
@@ -68,6 +93,18 @@ describe("answerToMarkdown", () => {
     const out = answerToMarkdown("[r10] then [r2]", cited);
     const refLines = out.split("\n").filter((l) => /^\[\^\d+\]:/.test(l));
     expect(refLines).toEqual(["[^2]: **Two** — Method", "[^10]: **Ten** — Method"]);
+  });
+
+  it("converts a comma-bunched [rN, rM] marker to two separate footnotes", () => {
+    // Real observed case: a model bunched two refs into one bracket instead of
+    // writing [r10][r12] — the raw capture group ("r10, r12") must not be used as a
+    // single lookup key (byRef has no such key, so it would silently fail).
+    const cited = [
+      citation({ ref: "r10", paper_id: "p10", title: "Ten" }),
+      citation({ ref: "r12", paper_id: "p12", title: "Twelve" }),
+    ];
+    const out = answerToMarkdown("Figures reported [r10, r12].", cited);
+    expect(out).toContain("Figures reported [^10][^12].");
   });
 });
 

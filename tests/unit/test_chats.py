@@ -93,6 +93,42 @@ def test_append_turn_pads_legacy_sessions_without_per_paper(tmp_path):
     assert len(saved["per_paper"]) == len(saved["messages"])
 
 
+def test_append_turn_stores_compare_and_compare_results_parallel_to_messages(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat = store.create()
+    rows = [
+        {"paper_id": "p", "title": "P", "arxiv_id": None, "text": "x", "citations": [], "trace": []}
+    ]
+    saved = store.append_turn(chat["id"], "hi", "hello", [], [], compare=True, compare_results=rows)
+
+    assert saved["compare"] == [None, True]
+    assert saved["compare_results"] == [None, rows]
+
+
+def test_append_turn_defaults_compare_to_false_and_results_to_none(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat = store.create()
+    saved = store.append_turn(chat["id"], "hi", "hello", [], [])
+
+    assert saved["compare"] == [None, False]
+    assert saved["compare_results"] == [None, None]
+
+
+def test_append_turn_pads_legacy_sessions_without_compare(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat = store.create()
+    # Simulate a pre-compare session: messages present, compare/compare_results missing.
+    chat["messages"] = [{"role": "user", "content": "old"}]
+    chat["citations"] = [None]
+    del chat["compare"]
+    del chat["compare_results"]
+    store._write(chat)
+
+    saved = store.append_turn(chat["id"], "q", "a", [], [])
+    assert len(saved["compare"]) == len(saved["messages"])
+    assert len(saved["compare_results"]) == len(saved["messages"])
+
+
 def test_delete_and_list_all_sorted_by_updated(tmp_path):
     store = ChatStore(str(tmp_path))
     a = store.append_turn(store.create()["id"], "q", "a", [], [], name="Alpha")
@@ -212,6 +248,8 @@ def test_truncate_at_drops_tail_across_all_parallel_arrays(tmp_path):
     assert truncated["feedback"] == [None, None]
     assert len(truncated["usage"]) == 2
     assert len(truncated["per_paper"]) == 2
+    assert len(truncated["compare"]) == 2
+    assert len(truncated["compare_results"]) == 2
 
 
 def test_truncate_at_index_zero_drops_everything(tmp_path):

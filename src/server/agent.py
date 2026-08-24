@@ -127,6 +127,45 @@ actually received. Be concise and technical.
 Papers in scope: {papers}"""
 
 
+SYNTHESIS_SYSTEM_PROMPT = """You already ran a separate, complete search over each paper \
+below and got one answer per paper to the same question. Do not search again — synthesize \
+what you already have.
+
+Write ONE answer that directly addresses the question by drawing on every per-paper answer \
+given. Where papers agree, say so once instead of repeating it per paper. Where they \
+differ, name the papers and state the difference plainly. If a paper's own answer says the \
+library doesn't cover something, say that too rather than silently dropping that paper.
+
+Every claim must come from the per-paper answers below, not general knowledge. Reuse each \
+[rN] marker exactly as it appears in the source answer you're drawing from — never invent \
+a new ref, renumber one, or drop the marker when restating a claim it supports. Name the \
+paper in prose alongside the marker, the same convention the source answers already use.
+
+A table is often the clearest way to present a per-paper comparison (e.g. "what's the \
+model size in each paper?") — use one when it fits. A table does not exempt you from \
+citing: every cell that states a fact still needs its [rN] marker in that same cell, \
+e.g. "7B [r3]", exactly like a prose sentence would. A table with no markers at all is \
+not an acceptable answer.
+
+A search tool is available but you should not need it — everything required is already in \
+the per-paper answers below. Only search again if a per-paper answer is genuinely missing \
+information you can't do without.
+
+Per-paper answers:
+{per_paper_answers}"""
+
+
+def _flatten_compare_rows(rows: list[dict]) -> tuple[str, list[dict]]:
+    """Shared fallback for a Compare turn that never reaches synthesis — used both by
+    `ChatAgent.compare` itself (stopped mid-loop) and by `chat_turn._run_agent_compare`'s
+    outer abandon-timeout path (a different, coarser stop race — see there). Flattens
+    whatever per-paper rows did complete into one concatenated text, same "persist partial
+    results" spirit a normal turn's abandoned-thread fallback already has."""
+    text = "".join(f"## {r['title']}\n\n{r['text']}\n\n" for r in rows)
+    citations = [c for r in rows for c in r["citations"]]
+    return text, citations
+
+
 class ChatAgent:
     def __init__(
         self,
@@ -183,6 +222,28 @@ class ChatAgent:
             note = "No paper/tag filter is active; 'papers in scope' means the entire library."
         return SYSTEM_PROMPT.format(filter_note=note, papers=papers, search_budget=search_budget)
 
+    def _resolve_paper_ids(
+        self, tags: list[str], papers: list[str], fallback_to_manifest: bool = False
+    ) -> list[str] | None:
+        """Intersects the tag filter and paper filter into one scope: `None` means no
+        filter is active. `fallback_to_manifest` turns that `None` into an explicit list
+        of every paper in the manifest — `run`'s `per_paper` and `compare` both need a
+        concrete list to loop/scope over (`Searcher` has no manifest to fall back to
+        "every paper" itself), while a normal Ask turn is fine describing an inactive
+        filter as "the entire library" with no explicit list."""
+        tag_ids = self.manifest.paper_ids_for_tags(tags) if tags else None
+        selected = list(papers) if papers else None
+        if tag_ids is None:
+            paper_ids = selected
+        elif selected is None:
+            paper_ids = tag_ids
+        else:
+            wanted = set(selected)
+            paper_ids = [p for p in tag_ids if p in wanted]
+        if fallback_to_manifest and paper_ids is None:
+            paper_ids = [p["paper_id"] for p in self.manifest.papers()]
+        return paper_ids
+
     def run(
         self,
         messages,
@@ -218,19 +279,7 @@ class ChatAgent:
         far instead of continuing — the caller (chat_turn.run_turn) still persists that
         partial text as a normal answer, same as if the model had finished on its own.
         """
-        tag_ids = self.manifest.paper_ids_for_tags(tags) if tags else None
-        selected = list(papers) if papers else None
-        if tag_ids is None:
-            paper_ids = selected
-        elif selected is None:
-            paper_ids = tag_ids
-        else:
-            wanted = set(selected)
-            paper_ids = [p for p in tag_ids if p in wanted]
-        # per_paper needs a concrete paper list to loop over — Searcher has no manifest to
-        # fall back to "every paper" itself, so this is the one place that fallback happens.
-        if per_paper and paper_ids is None:
-            paper_ids = [p["paper_id"] for p in self.manifest.papers()]
+        paper_ids = self._resolve_paper_ids(tags, papers, fallback_to_manifest=per_paper)
         registry: dict[str, dict] = {}
         bodies: dict[str, str] = {}
         counter = {"n": ref_start}
@@ -328,6 +377,227 @@ class ChatAgent:
         if self.cfg.faithfulness.enabled and registry:
             self._check_faithfulness(text, registry, bodies)
         return text, list(registry.values()), usage
+
+    def compare(
+        self,
+        messages,
+        tags,
+        papers,
+        on_text,
+        on_row,
+        on_trace=None,
+        ref_start: int = 0,
+        stop_check: Callable[[], bool] | None = None,
+    ) -> tuple[str, list[dict], list[dict], Usage]:
+        """Returns (text, compare_results, citations, usage).
+
+        Guarantees every paper in scope gets its own dedicated search+answer — runs `run`
+        once per paper (reusing it unmodified, scoped via `papers=[paper_id]`), then feeds
+        every per-paper answer back into the model once more to synthesize one final,
+        genuinely comparative `text` that reuses the same [rN] markers the sub-runs already
+        produced (see `SYNTHESIS_SYSTEM_PROMPT`). `citations` is the union of every
+        sub-run's citations, structurally identical to what `run` returns for a normal
+        turn. `on_row(row)` fires once per completed paper with that paper's own
+        `{paper_id, title, arxiv_id, text, citations, trace}` — the carousel's drill-down
+        data; `compare_results` (the second return value) is the accumulated list of every
+        row, in scope order.
+
+        `ref_start`/`stop_check` mean the same as in `run`. Raises `ValueError` if fewer
+        than 2 papers resolve in scope — the UI already disables Compare below 2, but this
+        is a contract the backend enforces on its own rather than trusting that alone.
+        """
+        paper_ids = self._resolve_paper_ids(tags, papers, fallback_to_manifest=True)
+        if paper_ids is None or len(paper_ids) < 2:
+            raise ValueError("Compare mode needs at least 2 papers in scope.")
+
+        rows: list[dict] = []
+        citations: list[dict] = []
+        running_ref = ref_start
+        total_in = 0
+        total_out = 0
+        any_usage = False
+
+        for paper_id in paper_ids:
+            if stop_check and stop_check():
+                break
+            rec = self.manifest.get(paper_id) or {}
+            row_trace: list[dict] = []
+            try:
+                row_text, row_citations, row_usage = self.run(
+                    messages,
+                    tags=[],
+                    papers=[paper_id],
+                    # This sub-run's own tokens are never streamed to the user — only the
+                    # final synthesized answer is; `row_text` (the return value) is what
+                    # feeds both the carousel and the synthesis prompt below.
+                    on_text=lambda _t: None,
+                    on_trace=row_trace.append,
+                    ref_start=running_ref,
+                    per_paper=False,
+                    stop_check=stop_check,
+                )
+            except Exception as e:
+                # Don't let one paper's failure drop the whole comparison — a placeholder
+                # row still participates in synthesis, so the final answer can say "no
+                # answer available for <paper>" instead of silently omitting it. Logged,
+                # not swallowed silently — this also catches a genuine bug in `run()`
+                # (not just an expected search/LLM failure), which would otherwise be
+                # indistinguishable from a normal placeholder row.
+                print(f"[compare] sub-run failed for {paper_id}: {e}")
+                row_text = "_(search failed for this paper)_"
+                row_citations = []
+                row_usage = Usage(None, None)
+            running_ref += len(row_citations)
+            if row_usage.input_tokens is not None:
+                total_in += row_usage.input_tokens
+                any_usage = True
+            if row_usage.output_tokens is not None:
+                total_out += row_usage.output_tokens
+                any_usage = True
+            row = {
+                "paper_id": paper_id,
+                "title": rec.get("title", paper_id),
+                "arxiv_id": rec.get("arxiv_id"),
+                "text": row_text,
+                "citations": row_citations,
+                "trace": row_trace,
+            }
+            rows.append(row)
+            citations.extend(row_citations)
+            on_row(row)
+
+        if stop_check and stop_check():
+            text, flat_citations = _flatten_compare_rows(rows)
+            return text, rows, flat_citations, Usage(None, None)
+
+        # Not bracketed like `[r['paper_id']]` — SYNTHESIS_SYSTEM_PROMPT spends a paragraph
+        # telling the model `[rN]` is reserved for citation markers; a per-paper header in
+        # the same bracket syntax is a needless, avoidable way to confuse that instruction.
+        per_paper_answers = "\n".join(
+            f"{r['title']} ({r['paper_id']}):\n{r['text']}\n" for r in rows
+        )
+        synth_system = SYNTHESIS_SYSTEM_PROMPT.format(per_paper_answers=per_paper_answers)
+
+        def synth_trace(entry: dict) -> None:
+            if on_trace:
+                on_trace(entry)
+
+        # Defensive fallback, not the expected path (the prompt tells the model not to
+        # search) — but if it fires anyway, new citations must continue this turn's ref
+        # numbering rather than colliding with any row's [rN], so `counter` starts where
+        # the per-paper loop left off.
+        counter = {"n": running_ref}
+
+        def synth_execute(name: str, args: dict) -> str:
+            if name != "search_papers":
+                return f"Unknown tool: {name}"
+            query = (args.get("query") or "").strip()
+            if not query:
+                return "Error: empty query."
+            synth_trace({"type": "action", "query": query, "paper": args.get("paper") or None})
+            outcome = self.searcher.search(
+                query,
+                min_k=self.cfg.retrieval.min_k,
+                max_k=self.cfg.retrieval.max_k,
+                candidates=max(self.cfg.retrieval.candidates, self.cfg.retrieval.max_k * 4),
+                paper=args.get("paper") or None,
+                paper_ids=paper_ids,
+                rerank=self.cfg.reranker.enabled,
+                per_paper=False,
+                elbow_enabled=self.cfg.retrieval.elbow_enabled,
+                elbow_mad_multiplier=self.cfg.retrieval.elbow_mad_multiplier,
+                elbow_prominence=self.cfg.retrieval.elbow_prominence,
+            )
+            results = outcome.results
+            if not results:
+                synth_trace({"type": "observation", "text": "(no results)"})
+                return "No results for that query (within the active filter)."
+            blocks = []
+            for r in results:
+                counter["n"] += 1
+                ref = f"r{counter['n']}"
+                rec2 = self.manifest.get(r.paper_id)
+                citation = {
+                    "ref": ref,
+                    "paper_id": r.paper_id,
+                    "title": rec2["title"] if rec2 else r.paper_id,
+                    "arxiv_id": rec2.get("arxiv_id") if rec2 else None,
+                    "breadcrumb": r.breadcrumb,
+                    "section_title": r.section_title,
+                    "section_number": r.section_number,
+                    "source": r.source,
+                    "snippet": r.body[:500],
+                    "body": r.body,
+                }
+                citations.append(citation)
+                blocks.append(f'[{ref}] paper={r.paper_id}  section="{r.breadcrumb}"\n{r.body}')
+            observation = "\n\n".join(blocks)
+            synth_trace({"type": "observation", "text": observation})
+            return observation
+
+        # Full conversation history, same as every per-paper sub-run above got — a
+        # multi-turn follow-up ("and their inference cost?") needs the same context to
+        # resolve pronouns/references that each sub-run already had. This is also the
+        # largest-context call in the whole feature (history + every per-paper answer), so
+        # on a context-length failure, retry once with just the current question rather
+        # than failing the whole comparison after every sub-run above already succeeded.
+        # Context-length errors are a request-validation failure that providers surface
+        # before any streaming starts, so this assumes `on_text` hasn't emitted partial
+        # text from the failed attempt by the time the retry runs.
+        try:
+            final_text, synth_usage = self.client.run_tools(
+                system=synth_system,
+                messages=messages,
+                tools=[self.search_tool],
+                execute=synth_execute,
+                on_text=on_text,
+                on_reasoning=lambda t: synth_trace({"type": "thought", "text": t}),
+                max_rounds=2,
+                stop_check=stop_check,
+            )
+        except Exception:
+            final_text, synth_usage = self.client.run_tools(
+                system=synth_system,
+                messages=[messages[-1]],
+                tools=[self.search_tool],
+                execute=synth_execute,
+                on_text=on_text,
+                on_reasoning=lambda t: synth_trace({"type": "thought", "text": t}),
+                max_rounds=2,
+                stop_check=stop_check,
+            )
+            # Softened wording deliberately: the except above catches any failure on the
+            # first attempt, not specifically a context-length error (no cross-SDK way to
+            # detect that specifically without importing every provider's SDK) — naming
+            # "too long" as the cause would assert a diagnosis this code hasn't verified.
+            final_text = (
+                "_(retried with just your current question after the first attempt "
+                "failed)_\n\n" + final_text
+            )
+
+        if synth_usage.input_tokens is not None:
+            total_in += synth_usage.input_tokens
+            any_usage = True
+        if synth_usage.output_tokens is not None:
+            total_out += synth_usage.output_tokens
+            any_usage = True
+        usage = Usage(total_in if any_usage else None, total_out if any_usage else None)
+
+        if self.cfg.faithfulness.enabled and citations:
+            registry = {c["ref"]: c for c in citations}
+            bodies = {c["ref"]: c["body"] for c in citations}
+            try:
+                self._check_faithfulness(final_text, registry, bodies)
+            except Exception as e:
+                # Don't lose an already-completed N-paper comparison (N sub-runs + a
+                # synthesis pass) to a crash in this last, purely-annotative step — the
+                # synthesized answer and every row are already good; just ship them
+                # without the faithfulness flags. `run()` has this same fragility on its
+                # own single-call faithfulness check; the blast radius is much bigger
+                # here, which is what makes catching it worth the extra two lines.
+                print(f"[compare] faithfulness check failed, shipping without it: {e}")
+
+        return final_text, rows, citations, usage
 
     def _check_faithfulness(
         self, text: str, registry: dict[str, dict], bodies: dict[str, str]

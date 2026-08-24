@@ -9,7 +9,9 @@ Each session is one JSON file in the configured `chat_history` directory:
       "citations": [null, [<citation>, ...], ...],              # parallel to messages
       "feedback":  [null, {"vote": "up", "note": "...", "updated_at": "..."}, ...],
       "usage":     [null, {"input_tokens": 512, "output_tokens": 128, "latency_ms": 2100}, ...],
-      "per_paper": [null, true, ...]
+      "per_paper": [null, true, ...],
+      "compare":   [null, false, ...],
+      "compare_results": [null, null, ...]   # or [<row>, ...] on a Compare turn
     }
 
 `messages` is a plain ChatML list; `citations[i]` holds the grounded sources for
@@ -20,7 +22,11 @@ counts + latency for that assistant turn (null for user turns; token counts may 
 null if the LLM backend never reported usage). `per_paper[i]` holds the per-paper-retrieval
 toggle's value for that assistant turn (null for user turns) — the UI reads the last entry
 to restore the toggle to what the conversation's latest message actually used, rather than
-resetting it to a default that may not match.
+resetting it to a default that may not match. `compare[i]` is the same pattern for the
+Compare-mode toggle; `compare_results[i]` holds that turn's per-paper carousel data
+(`[{paper_id, title, arxiv_id, text, citations, trace}, ...]`, one entry per paper) when
+`compare[i]` is true, `null` otherwise — this is what lets a reloaded conversation restore
+the carousel instead of just the final synthesized answer with no drill-down.
 """
 
 from __future__ import annotations
@@ -114,6 +120,8 @@ class ChatStore:
             "feedback": [],
             "usage": [],
             "per_paper": [],
+            "compare": [],
+            "compare_results": [],
         }
         self._write(chat)
         return chat
@@ -128,6 +136,8 @@ class ChatStore:
         usage: dict | None = None,
         name: str | None = None,
         per_paper: bool = False,
+        compare: bool = False,
+        compare_results: list | None = None,
     ) -> dict:
         """Append one user+assistant exchange, preserving prior turns."""
         with self._lock:
@@ -142,6 +152,8 @@ class ChatStore:
             chat.setdefault("traces", [])
             chat.setdefault("usage", [])
             chat.setdefault("per_paper", [])
+            chat.setdefault("compare", [])
+            chat.setdefault("compare_results", [])
             # Keep parallel arrays aligned even for sessions created before traces/usage.
             while len(chat["traces"]) < len(chat["messages"]):
                 chat["traces"].append(None)
@@ -149,16 +161,24 @@ class ChatStore:
                 chat["usage"].append(None)
             while len(chat["per_paper"]) < len(chat["messages"]):
                 chat["per_paper"].append(None)
+            while len(chat["compare"]) < len(chat["messages"]):
+                chat["compare"].append(None)
+            while len(chat["compare_results"]) < len(chat["messages"]):
+                chat["compare_results"].append(None)
             chat["messages"].append({"role": "user", "content": user_content})
             chat["citations"].append(None)
             chat["traces"].append(None)
             chat["usage"].append(None)
             chat["per_paper"].append(None)
+            chat["compare"].append(None)
+            chat["compare_results"].append(None)
             chat["messages"].append({"role": "assistant", "content": assistant_content})
             chat["citations"].append(citations)
             chat["traces"].append(trace)
             chat["usage"].append(usage)
             chat["per_paper"].append(per_paper)
+            chat["compare"].append(compare)
+            chat["compare_results"].append(compare_results)
             if name is not None:
                 chat["name"] = name
             chat["updated_at"] = _now()
@@ -215,7 +235,16 @@ class ChatStore:
                 raise ValueError("index out of range")
             if chat["messages"][index]["role"] != "user":
                 raise ValueError("edit index must be a user turn")
-            for key in ("messages", "citations", "traces", "feedback", "usage", "per_paper"):
+            for key in (
+                "messages",
+                "citations",
+                "traces",
+                "feedback",
+                "usage",
+                "per_paper",
+                "compare",
+                "compare_results",
+            ):
                 chat[key] = chat.get(key, [])[:index]
             chat["updated_at"] = _now()
             self._write(chat)

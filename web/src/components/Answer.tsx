@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import type { Components } from "react-markdown";
 import Markdown from "./Markdown";
 import type { Citation, FaithfulnessClaim } from "../api";
-import { REF_MARKER, extractCitedRefs, refNumber } from "../exportAnswer";
+import { REF_ID, REF_MARKER, extractCitedRefs, refNumber } from "../exportAnswer";
 import {
   createClaimResolver,
   faithfulnessColor,
@@ -25,12 +25,23 @@ export default function Answer({ text, citations }: { text: string; citations: C
   // Rewrite [rN] into a markdown link (cite:rN:instanceIdx) so it survives
   // markdown parsing; instanceIdx picks out this specific marker's own
   // faithfulness claim (a ref cited in several sentences can carry different
-  // verdicts per sentence — not one collapsed color for the whole ref).
-  const processed = text.replace(REF_MARKER, (m, ref, offset: number) => {
-    if (!citedRefs.has(ref)) return m;
-    const claim = resolveClaim(ref, sentenceAt(sentences, offset));
-    const idx = instanceClaims.push(claim) - 1;
-    return `[${ref}](cite:${ref}:${idx})`;
+  // verdicts per sentence — not one collapsed color for the whole ref). A bunched
+  // bracket ([r10, r12] — REF_MARKER's group 1 holds the whole bunch) becomes one
+  // link per ref, same visual result as if the model had written [r10][r12]. If
+  // any ref in the bunch doesn't resolve (e.g. a hallucinated one alongside a real
+  // one), the whole bracket falls back to plain text unchanged — same as a lone
+  // unresolved ref already does — rather than silently dropping just that ref's
+  // text while linking the rest.
+  const processed = text.replace(REF_MARKER, (m, group: string, offset: number) => {
+    const refsInGroup = [...group.matchAll(REF_ID)].map((refMatch) => refMatch[0]);
+    if (!refsInGroup.every((ref) => citedRefs.has(ref))) return m;
+    return refsInGroup
+      .map((ref) => {
+        const claim = resolveClaim(ref, sentenceAt(sentences, offset));
+        const idx = instanceClaims.push(claim) - 1;
+        return `[${ref}](cite:${ref}:${idx})`;
+      })
+      .join("");
   });
 
   const components: Components = {

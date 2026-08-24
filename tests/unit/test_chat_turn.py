@@ -9,11 +9,31 @@ import time
 
 from rag.config import OpenAISpec
 from rag.llm import Usage
-from server.chat_turn import run_turn
+from server.chat_turn import _run_in_thread_with_abandon, run_turn
 from server.chats import ChatStore
 from server.schemas import ChatMessage, ChatRequest
 
 _TAGGING = OpenAISpec(api_base="http://x")  # generate_name falls back to "New chat" on failure
+
+
+def test_run_in_thread_with_abandon_returns_true_when_thread_finishes():
+    done: list[int] = []
+    _run_in_thread_with_abandon(lambda: done.append(1), stop_check=None)
+    assert done == [1]
+
+
+def test_run_in_thread_with_abandon_returns_false_when_stopped_first():
+    release = threading.Event()
+
+    def target():
+        release.wait()  # blocks until the test lets it go
+
+    stop_flag = threading.Event()
+    stop_flag.set()  # already stopped, for a deterministic test
+
+    result = _run_in_thread_with_abandon(target, stop_flag.is_set)
+    assert result is False
+    release.set()  # let the background thread finish so it doesn't leak past the test
 
 
 class _TwoTokenAgent:
@@ -379,6 +399,155 @@ def test_run_turn_agent_run_error_still_emits_done(tmp_path):
 
     assert [e for e, _ in events] == ["error", "done"]
     assert events[0][1] == "RuntimeError: boom"
+
+
+class _TwoRowCompareAgent:
+    """Fake agent implementing `compare` only (not `run`) — proves run_turn dispatches to
+    `agent.compare` for a Compare turn rather than `agent.run`, since calling the latter on
+    this fake would raise AttributeError."""
+
+    def compare(
+        self,
+        messages,
+        tags,
+        papers,
+        on_text,
+        on_row,
+        on_trace=None,
+        ref_start=0,
+        stop_check=None,
+    ):
+        row1 = {
+            "paper_id": "p1",
+            "title": "P1",
+            "arxiv_id": None,
+            "text": "answer 1",
+            "citations": [{"ref": "r1", "paper_id": "p1"}],
+            "trace": [],
+        }
+        row2 = {
+            "paper_id": "p2",
+            "title": "P2",
+            "arxiv_id": None,
+            "text": "answer 2",
+            "citations": [{"ref": "r2", "paper_id": "p2"}],
+            "trace": [],
+        }
+        on_row(row1)
+        on_row(row2)
+        on_text("Synth")
+        on_text("esized")
+        citations = row1["citations"] + row2["citations"]
+        return "Synthesized", [row1, row2], citations, Usage(20, 10)
+
+
+def test_run_turn_dispatches_to_agent_compare_and_emits_compare_row_events(tmp_path):
+    events: list[tuple[str, str]] = []
+    req = ChatRequest(messages=[ChatMessage(role="user", content="compare them")], compare=True)
+
+    run_turn(
+        lambda: _TwoRowCompareAgent(),
+        ChatStore(str(tmp_path)),
+        req,
+        lambda e, d: events.append((e, d)),
+        _TAGGING,
+    )
+
+    kinds = [e for e, _ in events]
+    assert kinds == ["compare_row", "compare_row", "token", "token", "citations", "usage", "done"]
+    rows = [json.loads(d) for e, d in events if e == "compare_row"]
+    assert [r["paper_id"] for r in rows] == ["p1", "p2"]
+
+
+def test_run_turn_persists_compare_and_compare_results(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat = store.create()
+    req = ChatRequest(
+        messages=[ChatMessage(role="user", content="compare them")],
+        chat_id=chat["id"],
+        compare=True,
+    )
+
+    run_turn(lambda: _TwoRowCompareAgent(), store, req, lambda *a: None, _TAGGING)
+
+    saved = store.get(chat["id"])
+    assert saved["compare"][-1] is True
+    assert saved["messages"][-1] == {"role": "assistant", "content": "Synthesized"}
+    assert [r["paper_id"] for r in saved["compare_results"][-1]] == ["p1", "p2"]
+    assert saved["citations"][-1] == [
+        {"ref": "r1", "paper_id": "p1"},
+        {"ref": "r2", "paper_id": "p2"},
+    ]
+
+
+def test_run_turn_never_persists_per_paper_true_when_compare_true(tmp_path):
+    # The secondary knob is hidden/unsendable client-side under Compare, but the backend
+    # doesn't trust the client alone: never persist both as true on the same turn.
+    store = ChatStore(str(tmp_path))
+    chat = store.create()
+    req = ChatRequest(
+        messages=[ChatMessage(role="user", content="compare them")],
+        chat_id=chat["id"],
+        compare=True,
+        per_paper=True,
+    )
+
+    run_turn(lambda: _TwoRowCompareAgent(), store, req, lambda *a: None, _TAGGING)
+
+    saved = store.get(chat["id"])
+    assert saved["per_paper"][-1] is False
+
+
+def test_run_turn_abandons_a_compare_agent_that_never_finishes(tmp_path):
+    row = {
+        "paper_id": "p1",
+        "title": "P1",
+        "arxiv_id": None,
+        "text": "partial row",
+        "citations": [{"ref": "r1", "paper_id": "p1"}],
+        "trace": [],
+    }
+
+    class _NeverFinishesCompareAgent:
+        def compare(
+            self,
+            messages,
+            tags,
+            papers,
+            on_text,
+            on_row,
+            on_trace=None,
+            ref_start=0,
+            stop_check=None,
+        ):
+            on_row(row)
+            threading.Event().wait()  # blocks forever; run_turn must not wait for this
+
+    store = ChatStore(str(tmp_path))
+    chat = store.create()
+    req = ChatRequest(
+        messages=[ChatMessage(role="user", content="compare")], chat_id=chat["id"], compare=True
+    )
+    stop_flag = threading.Event()
+    stop_flag.set()  # already stopped before the turn starts, for a deterministic test
+
+    events: list[tuple[str, str]] = []
+    run_turn(
+        lambda: _NeverFinishesCompareAgent(),
+        store,
+        req,
+        lambda e, d: events.append((e, d)),
+        _TAGGING,
+        stop_flag.is_set,
+    )
+
+    assert [e for e, _ in events] == ["compare_row", "citations", "usage", "meta", "done"]
+    saved = store.get(chat["id"])
+    # abandon-path fallback flattens whatever rows completed, via _flatten_compare_rows —
+    # the same helper agent.compare() uses for its own internal stop-before-synthesis path.
+    assert saved["messages"][-1]["content"] == "## P1\n\npartial row\n\n"
+    assert saved["citations"][-1] == [row["citations"][0]]
+    assert saved["compare_results"][-1] == [row]
 
 
 def test_run_turn_get_agent_failure_emits_error_and_done(tmp_path):

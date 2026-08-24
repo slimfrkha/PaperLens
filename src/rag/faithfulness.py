@@ -35,7 +35,12 @@ from .config import FaithfulnessCfg, HFFaithfulnessCfg
 # bunching citations into one bracket is at least as likely as the system
 # prompt's one-marker-per-citation examples; matching only `[rN]` would silently
 # drop every ref in a bunched bracket, indistinguishable from "never cited".
-_REF_BRACKET = re.compile(r"\[(r\d+(?:\s*,\s*r\d+)*)\]")
+#
+# Also accepts fullwidth CJK brackets `【r1】` — observed in practice from a real
+# local model that used them instead of ASCII brackets despite every prompt
+# instructing `[rN]` explicitly (so a prompt reword alone isn't a reliable fix;
+# this is a parsing-tolerance fix, not a change to what markers we ask for).
+_REF_BRACKET = re.compile(r"[\[【](r\d+(?:\s*,\s*r\d+)*)[\]】]")
 _REF_ID = re.compile(r"r\d+")
 
 # Naive sentence boundary: `.`/`!`/`?` followed by whitespace. Doesn't special-
