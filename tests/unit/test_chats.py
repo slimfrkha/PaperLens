@@ -129,6 +129,35 @@ def test_append_turn_pads_legacy_sessions_without_compare(tmp_path):
     assert len(saved["compare_results"]) == len(saved["messages"])
 
 
+def test_append_turn_stores_auto_parallel_to_messages(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat = store.create()
+    saved = store.append_turn(chat["id"], "hi", "hello", [], [], auto=True)
+
+    assert saved["auto"] == [None, True]
+
+
+def test_append_turn_defaults_auto_to_false(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat = store.create()
+    saved = store.append_turn(chat["id"], "hi", "hello", [], [])
+
+    assert saved["auto"] == [None, False]
+
+
+def test_append_turn_pads_legacy_sessions_without_auto(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat = store.create()
+    # Simulate a pre-auto session: messages present, auto key missing entirely.
+    chat["messages"] = [{"role": "user", "content": "old"}]
+    chat["citations"] = [None]
+    del chat["auto"]
+    store._write(chat)
+
+    saved = store.append_turn(chat["id"], "q", "a", [], [])
+    assert len(saved["auto"]) == len(saved["messages"])
+
+
 def test_delete_and_list_all_sorted_by_updated(tmp_path):
     store = ChatStore(str(tmp_path))
     a = store.append_turn(store.create()["id"], "q", "a", [], [], name="Alpha")
@@ -250,6 +279,7 @@ def test_truncate_at_drops_tail_across_all_parallel_arrays(tmp_path):
     assert len(truncated["per_paper"]) == 2
     assert len(truncated["compare"]) == 2
     assert len(truncated["compare_results"]) == 2
+    assert len(truncated["auto"]) == 2
 
 
 def test_truncate_at_index_zero_drops_everything(tmp_path):

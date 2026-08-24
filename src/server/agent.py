@@ -9,7 +9,9 @@ Thought → Action → Observation trace.
 
 from __future__ import annotations
 
+import string
 from collections.abc import Callable
+from typing import Literal
 
 from rag.config import Config
 from rag.faithfulness import (
@@ -127,6 +129,44 @@ actually received. Be concise and technical.
 Papers in scope: {papers}"""
 
 
+CLASSIFY_SYSTEM_PROMPT = """Decide how a research-assistant chat should answer the user's \
+latest question over a library of arXiv papers: with one combined answer over the whole \
+pool ("ask"), or with a guaranteed independent search+answer for every paper in scope, \
+synthesized into one comparative answer ("compare").
+
+Choose "compare" only when the question genuinely needs every paper checked on its own — a \
+per-paper fact, or an explicit cross-paper comparison, where one paper dominating a pooled \
+search could silently drop another paper's answer. This includes a question that never says \
+"each" or "compare" but is clearly asking about a property every paper in scope has its own \
+answer to — use the paper list below to judge that, not just the question's wording: a \
+question phrased for one paper still needs "compare" when the scope holds several distinct \
+papers it could equally be about. Choose "ask" whenever a single answer drawn from the shared \
+pool is a faithful answer, including questions that are about the papers collectively rather \
+than paper-by-paper.
+
+Examples (illustrative only — never assume any specific paper, topic, or field; the pool in \
+scope could be about anything):
+- "What's the model size in each paper?" -> COMPARE (a per-paper fact; a pooled search could \
+miss one paper's number entirely)
+- "What's the model size?" over a scope of several distinct model papers -> COMPARE (no \
+"each," but the scope makes it a per-paper fact all the same)
+- "What's the model size?" over a scope of one survey paper and one position paper (neither \
+proposes a model) -> ASK (the scope doesn't make this a per-paper fact)
+- "How do these papers differ in their approach?" -> COMPARE (an explicit cross-paper \
+comparison)
+- "What's the main idea of the first paper?" -> ASK (one paper, no comparison)
+- "Summarize what this library covers on a given topic" -> ASK (one synthesized view over \
+the pool is a faithful answer; no per-paper guarantee needed)
+- "Thanks, that's helpful" -> ASK (not a research question at all)
+- A follow-up like "and their results?" after a per-paper comparison -> COMPARE (resolve it \
+against the conversation: it continues the same per-paper question)
+
+Papers in scope for this question:
+{papers}
+
+Reply with exactly one word, nothing else: COMPARE or ASK."""
+
+
 SYNTHESIS_SYSTEM_PROMPT = """You already ran a separate, complete search over each paper \
 below and got one answer per paper to the same question. Do not search again — synthesize \
 what you already have.
@@ -153,6 +193,15 @@ information you can't do without.
 
 Per-paper answers:
 {per_paper_answers}"""
+
+
+class InsufficientScopeError(ValueError):
+    """Raised by `ChatAgent.compare` when fewer than 2 papers resolve in scope. A narrow
+    subclass (not a bare `ValueError`) so `chat_turn.run_turn`'s classify-then-send race
+    fallback can catch exactly this guard — not any other `ValueError` that might
+    legitimately propagate out of `compare()` after rows/tokens have already streamed
+    (e.g. a synthesis retry that fails twice), which would otherwise get silently
+    reinterpreted as this race and rerun as a fresh turn on top of what already streamed."""
 
 
 def _flatten_compare_rows(rows: list[dict]) -> tuple[str, list[dict]]:
@@ -185,7 +234,11 @@ class ChatAgent:
         self.faithfulness = faithfulness or build_faithfulness_checker(cfg.faithfulness)
         self.search_tool = _search_tool()
 
-    def _system(self, paper_ids: list[str] | None, search_budget: int) -> str:
+    def _papers_catalog(self, paper_ids: list[str] | None) -> str:
+        """Formats the papers in `paper_ids` (or every manifest paper if `None`) as
+        "paper_id (Title; rarest-first tag hints)", comma-separated — shared by `_system`
+        (the ReAct system prompt) and `classify_mode` (the Auto-mode classifier), so both
+        see the same paper identities rather than duplicating this sorting logic."""
         # Scope the injected catalog to the active filter — otherwise the model can
         # read every paper off the prompt prefix and answer catalog questions
         # ("which models?") without searching, bypassing the filter entirely.
@@ -206,7 +259,10 @@ class ChatAgent:
             tags = sorted(p.get("tags", []), key=lambda t: tag_counts[t])[:3]
             return f"; {', '.join(tags)}" if tags else ""
 
-        papers = ", ".join(f"{p['paper_id']} ({p['title']}{topical(p)})" for p in recs) or "(none)"
+        return ", ".join(f"{p['paper_id']} ({p['title']}{topical(p)})" for p in recs) or "(none)"
+
+    def _system(self, paper_ids: list[str] | None, search_budget: int) -> str:
+        papers = self._papers_catalog(paper_ids)
         # "papers in scope" is the one phrase the prompt uses everywhere it needs to talk
         # about what's searchable — this note is the only place that defines it, so a
         # branch can say "papers in scope" and be correct whether or not a filter is
@@ -243,6 +299,57 @@ class ChatAgent:
         if fallback_to_manifest and paper_ids is None:
             paper_ids = [p["paper_id"] for p in self.manifest.papers()]
         return paper_ids
+
+    def classify_mode(
+        self, messages: list[dict], tags: list[str], papers: list[str]
+    ) -> tuple[Literal["ask", "compare"], int]:
+        """Auto mode's pre-flight decision: returns (mode, scope_size).
+
+        `scope_size` is the resolved paper count (same resolution `compare()` uses) — the
+        caller needs it either way, to size the large-Compare confirm dialog.
+
+        Below 2 resolved papers, Compare is structurally impossible (`compare()` raises
+        otherwise) — skip the LLM call entirely and return "ask", no question worth a
+        completion.
+
+        Otherwise asks a fresh tagging-tier client (not `self.client`, the full chat model —
+        this is a cheap, best-effort classification, exactly what the tagging tier is for,
+        same as `generate_name`) to pick one word. The prompt includes the same papers
+        catalog `_system` injects into the ReAct system prompt (`_papers_catalog`), so the
+        classifier can tell "what's the model size?" needs Compare from the scope alone
+        (several distinct model papers) even when the question never says "each" or
+        "compare" — not just from the question's own wording. On any parse or backend
+        failure, defaults to "ask" — the always-safe, always-cheaper path.
+        """
+        paper_ids = self._resolve_paper_ids(tags, papers, fallback_to_manifest=True)
+        scope_size = len(paper_ids) if paper_ids else 0
+        if scope_size < 2:
+            return "ask", scope_size
+        transcript = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
+        system = CLASSIFY_SYSTEM_PROMPT.format(papers=self._papers_catalog(paper_ids))
+        mode: Literal["ask", "compare"] = "ask"
+        try:
+            # Same 256-token budget generate_name uses: reasoning models spend tokens on a
+            # hidden reasoning channel before the visible answer and return empty content if
+            # capped too low — and since empty/malformed output already parses to "ask"
+            # below, under-budgeting this call wouldn't just misclassify occasionally, it
+            # would make Auto mode always resolve to Ask on a reasoning-model backend.
+            raw = build_llm(self.cfg.llm.tagging).complete(
+                system=system, user=transcript, max_tokens=256
+            )
+            # rstrip punctuation, not substring-match: an otherwise-compliant "COMPARE."
+            # (trailing period is a common habit even from models that mostly follow
+            # "reply with exactly one word") shouldn't fall through to "ask" just because
+            # of trailing punctuation — but a sentence merely containing "compare" still
+            # must not match, which is why this stays an exact-token comparison.
+            first_word = (
+                raw.strip().split()[0].upper().rstrip(string.punctuation) if raw.strip() else ""
+            )
+            if first_word == "COMPARE":
+                mode = "compare"
+        except Exception:
+            mode = "ask"
+        return mode, scope_size
 
     def run(
         self,
@@ -402,13 +509,14 @@ class ChatAgent:
         data; `compare_results` (the second return value) is the accumulated list of every
         row, in scope order.
 
-        `ref_start`/`stop_check` mean the same as in `run`. Raises `ValueError` if fewer
-        than 2 papers resolve in scope — the UI already disables Compare below 2, but this
-        is a contract the backend enforces on its own rather than trusting that alone.
+        `ref_start`/`stop_check` mean the same as in `run`. Raises `InsufficientScopeError`
+        (a `ValueError` subclass) if fewer than 2 papers resolve in scope — the UI already
+        disables Compare below 2, but this is a contract the backend enforces on its own
+        rather than trusting that alone.
         """
         paper_ids = self._resolve_paper_ids(tags, papers, fallback_to_manifest=True)
         if paper_ids is None or len(paper_ids) < 2:
-            raise ValueError("Compare mode needs at least 2 papers in scope.")
+            raise InsufficientScopeError("Compare mode needs at least 2 papers in scope.")
 
         rows: list[dict] = []
         citations: list[dict] = []

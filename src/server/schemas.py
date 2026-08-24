@@ -18,8 +18,25 @@ class ChatRequest(BaseModel):
     papers: list[str] = []  # restrict search to these paper_ids (empty = all)
     per_paper: bool = False  # recall once per paper, pool flat, instead of once over the scope
     compare: bool = False  # Compare mode: guaranteed per-paper search+answer, then synthesized
+    # Auto mode was selected client-side and resolved (ask/compare) via /api/chat/classify
+    # before this request was sent — badge-only, never re-classified server-side: `compare`
+    # above already carries the resolved dispatch decision, this field exists purely so
+    # persistence/reload can show "Auto -> ..." instead of looking like the user picked the
+    # mode manually.
+    auto: bool = False
     chat_id: str | None = None
     edit_index: int | None = None  # if set, truncate stored history to this index first
+
+
+class ClassifyModeRequest(BaseModel):
+    messages: list[ChatMessage]
+    tags: list[str] = []
+    papers: list[str] = []
+
+
+class ClassifyModeResponse(BaseModel):
+    mode: Literal["ask", "compare"]
+    scope_size: int
 
 
 class FeedbackRequest(BaseModel):

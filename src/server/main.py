@@ -31,6 +31,8 @@ from .schemas import (
     AnnotationCreate,
     AnnotationUpdate,
     ChatRequest,
+    ClassifyModeRequest,
+    ClassifyModeResponse,
     FeedbackRequest,
 )
 from .worker import IngestionWorker
@@ -318,6 +320,18 @@ def create_app(cfg: Config) -> FastAPI:
         # No error on a miss (turn already finished, or never started) — the frontend
         # fires this the instant it aborts its own fetch and doesn't wait on the result.
         return {"stopped": chats.request_stop(chat_id)}
+
+    @app.post("/api/chat/classify", response_model=ClassifyModeResponse)
+    async def classify_chat_mode(req: ClassifyModeRequest):
+        agent = get_agent()
+        loop = asyncio.get_running_loop()
+        mode, scope_size = await loop.run_in_executor(
+            None,
+            lambda: agent.classify_mode(
+                [m.model_dump() for m in req.messages], req.tags, req.papers
+            ),
+        )
+        return {"mode": mode, "scope_size": scope_size}
 
     @app.post("/api/chat")
     async def chat(req: ChatRequest):

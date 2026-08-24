@@ -161,8 +161,9 @@ no resolved paper list.
 ### 🆚 Compare mode
 
 An agent-level answer shape, alongside — not replacing — **per-paper retrieval**: the
-primary **Ask**/**Compare** switch in the composer. Ask produces one combined answer over a
-shared retrieval pool, same as before. Compare runs the question once per paper as an
+primary **Auto**/**Ask**/**Compare** switch in the composer (see **Auto mode** below for the
+third option). Ask produces one combined answer over a shared retrieval pool, same as
+before. Compare runs the question once per paper as an
 independent sub-run (`ChatAgent.compare`, reusing `ChatAgent.run` unmodified, scoped to one
 paper at a time), guaranteeing every paper in the resolved scope actually gets asked — a
 guarantee per-paper retrieval's recall-only fix doesn't give, since the shared rerank/elbow
@@ -182,6 +183,33 @@ the **Turn**'s trace already sits above a normal answer.
   layer (harness measurement, not a product feature) that happens to use the adjacent word
   "comparative," not "compare."
 - `_Avoid_:` comparative mode (see naming note above), side-by-side mode, multi-paper mode.
+
+### 🤖 Auto mode
+
+The default option on the primary **Ask**/**Compare** switch — a meta-decision on that same
+axis, not a third peer answer shape. Before the real turn is sent, `ChatAgent.classify_mode`
+asks a small, tool-free LLM completion (`CLASSIFY_SYSTEM_PROMPT`, run on a cheap tagging-tier
+client — same idiom as `generate_name`'s session titling, not the full chat model) whether the
+question needs **Compare**'s per-paper guarantee or a pooled Ask answer is faithful enough. The
+classify prompt includes the same papers catalog `_system` injects into the ReAct system
+prompt (`_papers_catalog`, shared by both), so it can tell "what's the model size?" needs
+Compare from the scope alone (several distinct model papers) even when the question never
+says "each" or "compare" — not from wording alone. Below 2 resolved papers, or on any
+classifier failure, it resolves to Ask deterministically —
+no LLM call needed in the first case, the always-safe default in the second. Classification is
+a separate pre-flight HTTP round trip (`POST /api/chat/classify`) before the real turn, not
+folded into `/api/chat`'s SSE stream — SSE can't pause mid-stream for the large-Compare confirm
+dialog Auto reuses once it knows the resolved mode + scope size. `auto: bool` is a badge-only
+persistence field (`ChatRequest.auto`, stored alongside `compare`/`per_paper`) — it never
+drives dispatch, only lets a reloaded turn show an "Auto" badge and restore the control to Auto
+rather than to whatever mode was resolved.
+
+- Code: `ChatAgent.classify_mode`/`CLASSIFY_SYSTEM_PROMPT` (`src/server/agent.py`);
+  `ClassifyModeRequest`/`ClassifyModeResponse`/`ChatRequest.auto` (`src/server/schemas.py`);
+  `/api/chat/classify` route (`src/server/main.py`); `classifyMode`/`resolveSendMode`
+  (`web/src/api.ts`, `web/src/pages/ChatPage.tsx`).
+- `_Avoid_:` automatic mode, smart mode, AI-picked mode — "Auto" alone is the product-facing
+  name, matching the segmented control's label exactly.
 
 ### 🪜 Elbow cutoff
 

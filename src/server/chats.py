@@ -26,7 +26,10 @@ resetting it to a default that may not match. `compare[i]` is the same pattern f
 Compare-mode toggle; `compare_results[i]` holds that turn's per-paper carousel data
 (`[{paper_id, title, arxiv_id, text, citations, trace}, ...]`, one entry per paper) when
 `compare[i]` is true, `null` otherwise — this is what lets a reloaded conversation restore
-the carousel instead of just the final synthesized answer with no drill-down.
+the carousel instead of just the final synthesized answer with no drill-down. `auto[i]` is
+`true` when the message's answer shape (Ask vs Compare) was resolved by Auto mode's
+classification rather than picked directly by the user — badge-only, doesn't change how
+`compare[i]` is interpreted.
 """
 
 from __future__ import annotations
@@ -122,6 +125,7 @@ class ChatStore:
             "per_paper": [],
             "compare": [],
             "compare_results": [],
+            "auto": [],
         }
         self._write(chat)
         return chat
@@ -138,6 +142,7 @@ class ChatStore:
         per_paper: bool = False,
         compare: bool = False,
         compare_results: list | None = None,
+        auto: bool = False,
     ) -> dict:
         """Append one user+assistant exchange, preserving prior turns."""
         with self._lock:
@@ -154,6 +159,7 @@ class ChatStore:
             chat.setdefault("per_paper", [])
             chat.setdefault("compare", [])
             chat.setdefault("compare_results", [])
+            chat.setdefault("auto", [])
             # Keep parallel arrays aligned even for sessions created before traces/usage.
             while len(chat["traces"]) < len(chat["messages"]):
                 chat["traces"].append(None)
@@ -165,6 +171,8 @@ class ChatStore:
                 chat["compare"].append(None)
             while len(chat["compare_results"]) < len(chat["messages"]):
                 chat["compare_results"].append(None)
+            while len(chat["auto"]) < len(chat["messages"]):
+                chat["auto"].append(None)
             chat["messages"].append({"role": "user", "content": user_content})
             chat["citations"].append(None)
             chat["traces"].append(None)
@@ -172,6 +180,7 @@ class ChatStore:
             chat["per_paper"].append(None)
             chat["compare"].append(None)
             chat["compare_results"].append(None)
+            chat["auto"].append(None)
             chat["messages"].append({"role": "assistant", "content": assistant_content})
             chat["citations"].append(citations)
             chat["traces"].append(trace)
@@ -179,6 +188,7 @@ class ChatStore:
             chat["per_paper"].append(per_paper)
             chat["compare"].append(compare)
             chat["compare_results"].append(compare_results)
+            chat["auto"].append(auto)
             if name is not None:
                 chat["name"] = name
             chat["updated_at"] = _now()
@@ -244,6 +254,7 @@ class ChatStore:
                 "per_paper",
                 "compare",
                 "compare_results",
+                "auto",
             ):
                 chat[key] = chat.get(key, [])[:index]
             chat["updated_at"] = _now()

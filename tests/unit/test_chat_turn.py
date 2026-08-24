@@ -9,6 +9,7 @@ import time
 
 from rag.config import OpenAISpec
 from rag.llm import Usage
+from server.agent import InsufficientScopeError
 from server.chat_turn import _run_in_thread_with_abandon, run_turn
 from server.chats import ChatStore
 from server.schemas import ChatMessage, ChatRequest
@@ -308,6 +309,30 @@ def test_run_turn_persists_per_paper_on_the_saved_turn(tmp_path):
     assert saved["per_paper"][-1] is True
 
 
+def test_run_turn_persists_auto_on_the_saved_turn(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat = store.create()
+    req = ChatRequest(
+        messages=[ChatMessage(role="user", content="hi")], chat_id=chat["id"], auto=True
+    )
+
+    run_turn(lambda: _TwoTokenAgent(), store, req, lambda *a: None, _TAGGING)
+
+    saved = store.get(chat["id"])
+    assert saved["auto"][-1] is True
+
+
+def test_run_turn_defaults_auto_to_false_when_omitted(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat = store.create()
+    req = ChatRequest(messages=[ChatMessage(role="user", content="hi")], chat_id=chat["id"])
+
+    run_turn(lambda: _TwoTokenAgent(), store, req, lambda *a: None, _TAGGING)
+
+    saved = store.get(chat["id"])
+    assert saved["auto"][-1] is False
+
+
 def test_run_turn_persists_usage_and_citations(tmp_path):
     store = ChatStore(str(tmp_path))
     chat = store.create()
@@ -496,6 +521,117 @@ def test_run_turn_never_persists_per_paper_true_when_compare_true(tmp_path):
 
     saved = store.get(chat["id"])
     assert saved["per_paper"][-1] is False
+
+
+class _InsufficientScopeThenAskAgent:
+    """compare() raises InsufficientScopeError, the same way ChatAgent.compare does when
+    fewer than 2 papers resolve in scope — exercises run_turn's classify-then-send race
+    fallback (Auto mode classifies in a separate round trip before this turn is sent; the
+    manifest can change in between) to a plain Ask turn via run()."""
+
+    def compare(
+        self,
+        messages,
+        tags,
+        papers,
+        on_text,
+        on_row,
+        on_trace=None,
+        ref_start=0,
+        stop_check=None,
+    ):
+        raise InsufficientScopeError("Compare mode needs at least 2 papers in scope.")
+
+    def run(
+        self,
+        messages,
+        tags,
+        papers,
+        on_text,
+        on_trace=None,
+        ref_start=0,
+        per_paper=False,
+        stop_check=None,
+    ):
+        on_text("Fallback answer.")
+        return "Fallback answer.", [{"ref": "r1", "paper_id": "p"}], Usage(10, 5)
+
+
+class _UnrelatedValueErrorCompareAgent:
+    """compare() raises a plain ValueError that is *not* InsufficientScopeError — a stand-in
+    for a genuine bug elsewhere in compare() (e.g. a synthesis retry that fails twice) that
+    happens to raise the same builtin type. Must NOT be caught by the scope-race fallback —
+    that would silently mask a real failure and rerun the turn as an unrelated Ask answer."""
+
+    def compare(
+        self,
+        messages,
+        tags,
+        papers,
+        on_text,
+        on_row,
+        on_trace=None,
+        ref_start=0,
+        stop_check=None,
+    ):
+        raise ValueError("synthesis failed twice: malformed request")
+
+    def run(self, *a, **k):
+        raise AssertionError("must not fall back to run() for a non-scope ValueError")
+
+
+def test_run_turn_falls_back_to_ask_when_compare_raises_insufficient_scope(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat = store.create()
+    req = ChatRequest(
+        messages=[ChatMessage(role="user", content="compare them")],
+        chat_id=chat["id"],
+        compare=True,
+        auto=True,
+    )
+
+    events: list[tuple[str, str]] = []
+    run_turn(
+        lambda: _InsufficientScopeThenAskAgent(),
+        store,
+        req,
+        lambda e, d: events.append((e, d)),
+        _TAGGING,
+    )
+
+    assert not any(e == "error" for e, _ in events)
+    assert [e for e, _ in events][-1] == "done"
+    saved = store.get(chat["id"])
+    # Persisted as the mode that actually ran, not the mode that was requested — otherwise
+    # a reloaded turn would look like Compare with no rows.
+    assert saved["compare"][-1] is False
+    assert saved["compare_results"][-1] is None
+    assert saved["messages"][-1] == {"role": "assistant", "content": "Fallback answer."}
+
+
+def test_run_turn_does_not_mask_an_unrelated_value_error_from_compare(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat = store.create()
+    req = ChatRequest(
+        messages=[ChatMessage(role="user", content="compare them")],
+        chat_id=chat["id"],
+        compare=True,
+    )
+
+    events: list[tuple[str, str]] = []
+    run_turn(
+        lambda: _UnrelatedValueErrorCompareAgent(),
+        store,
+        req,
+        lambda e, d: events.append((e, d)),
+        _TAGGING,
+    )
+
+    # Surfaced as a real error, not silently reinterpreted as the scope race and rerun.
+    assert any(e == "error" for e, _ in events)
+    assert [e for e, _ in events][-1] == "done"
+    saved = store.get(chat["id"])
+    assert saved["messages"] == []  # never persisted — the turn never reached append_turn
 
 
 def test_run_turn_abandons_a_compare_agent_that_never_finishes(tmp_path):

@@ -112,6 +112,7 @@ export interface ChatSession {
   per_paper?: (boolean | null)[];
   compare?: (boolean | null)[];
   compare_results?: (CompareRow[] | null)[];
+  auto?: (boolean | null)[];
 }
 
 async function j<T>(r: Response): Promise<T> {
@@ -231,6 +232,22 @@ export interface ChatHandlers {
 
 const isAbortError = (e: unknown) => e instanceof DOMException && e.name === "AbortError";
 
+export interface ClassifyModeResult {
+  mode: "ask" | "compare";
+  scope_size: number;
+}
+
+/** POST /api/chat/classify — Auto mode's pre-flight step. Resolves ask/compare from the
+ *  full conversation (mirrors what the real turn's synthesis step would see) before the
+ *  real chat turn is sent, so the client can gate the large-Compare confirm dialog and send
+ *  the real turn with the decision already made — never re-classified server-side. */
+export const classifyMode = (messages: ChatMessage[], tags: string[], papers: string[]) =>
+  fetch("/api/chat/classify", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages, tags, papers }),
+  }).then(j<ClassifyModeResult>);
+
 /** POST /api/chat and parse the SSE stream (token / citations / trace / usage /
  *  compare_row / meta / error / done). `compare_row` only fires on a Compare turn, once
  *  per completed paper — the carousel's drill-down data filling in progressively.
@@ -248,6 +265,7 @@ export async function chat(
   h: ChatHandlers,
   editIndex?: number,
   signal?: AbortSignal,
+  auto: boolean = false,
 ): Promise<void> {
   let resp: Response;
   try {
@@ -260,6 +278,7 @@ export async function chat(
         papers,
         per_paper: perPaper,
         compare,
+        auto,
         chat_id: chatId,
         edit_index: editIndex ?? null,
       }),

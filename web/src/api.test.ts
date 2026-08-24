@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { addPapers, chat, removePaper, setFeedback, stopChat } from "./api";
+import { addPapers, chat, classifyMode, removePaper, setFeedback, stopChat } from "./api";
 
 function mockStreamResponse(sse: string): Response {
   let sent = false;
@@ -110,6 +110,7 @@ describe("chat", () => {
           papers: [],
           per_paper: false,
           compare: false,
+          auto: false,
           chat_id: "c1",
           edit_index: 2,
         }),
@@ -132,6 +133,7 @@ describe("chat", () => {
           papers: [],
           per_paper: false,
           compare: false,
+          auto: false,
           chat_id: "c1",
           edit_index: null,
         }),
@@ -154,6 +156,7 @@ describe("chat", () => {
           papers: [],
           per_paper: true,
           compare: false,
+          auto: false,
           chat_id: "c1",
           edit_index: null,
         }),
@@ -176,6 +179,41 @@ describe("chat", () => {
           papers: [],
           per_paper: false,
           compare: true,
+          auto: false,
+          chat_id: "c1",
+          edit_index: null,
+        }),
+      }),
+    );
+  });
+
+  it("sends auto: true in the request body when passed", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockStreamResponse("event: done\ndata: \n\n"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await chat(
+      [],
+      [],
+      [],
+      false,
+      true,
+      "c1",
+      { onToken: vi.fn(), onCitations: vi.fn() },
+      undefined,
+      undefined,
+      true,
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/chat",
+      expect.objectContaining({
+        body: JSON.stringify({
+          messages: [],
+          tags: [],
+          papers: [],
+          per_paper: false,
+          compare: true,
+          auto: true,
           chat_id: "c1",
           edit_index: null,
         }),
@@ -269,6 +307,48 @@ describe("chat", () => {
 
     expect(onError).not.toHaveBeenCalled();
     expect(onDone).not.toHaveBeenCalled();
+  });
+});
+
+describe("classifyMode", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("posts messages/tags/papers to /api/chat/classify", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ mode: "compare", scope_size: 5 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await classifyMode([{ role: "user", content: "compare them" }], ["moe"], ["paper-a"]);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/chat/classify",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          messages: [{ role: "user", content: "compare them" }],
+          tags: ["moe"],
+          papers: ["paper-a"],
+        }),
+      }),
+    );
+  });
+
+  it("parses the {mode, scope_size} response", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ mode: "ask", scope_size: 1 }),
+      }),
+    );
+
+    const result = await classifyMode([], [], []);
+
+    expect(result).toEqual({ mode: "ask", scope_size: 1 });
   });
 });
 

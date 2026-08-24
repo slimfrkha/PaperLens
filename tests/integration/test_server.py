@@ -192,6 +192,82 @@ def test_chat_streams_token_citations_done(make_config, patch_agent_seam):
     assert cits[0]["ref"] == "r1"
 
 
+def test_classify_route_returns_ask_for_small_scope(make_config, patch_agent_seam):
+    class FakeAgent:
+        def __init__(self, *a, **k):
+            pass
+
+        def classify_mode(self, messages, tags, papers):
+            return "ask", 1
+
+    patch_agent_seam(chat_agent=FakeAgent)
+
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    client = TestClient(create_app(cfg))
+
+    resp = client.post("/api/chat/classify", json={"messages": [{"role": "user", "content": "hi"}]})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"mode": "ask", "scope_size": 1}
+
+
+def test_classify_route_returns_compare_and_scope_size(make_config, patch_agent_seam):
+    class FakeAgent:
+        def __init__(self, *a, **k):
+            pass
+
+        def classify_mode(self, messages, tags, papers):
+            return "compare", 5
+
+    patch_agent_seam(chat_agent=FakeAgent)
+
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    client = TestClient(create_app(cfg))
+
+    resp = client.post(
+        "/api/chat/classify", json={"messages": [{"role": "user", "content": "compare them"}]}
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"mode": "compare", "scope_size": 5}
+
+
+def test_classify_route_passes_messages_tags_papers_to_the_agent(make_config, patch_agent_seam):
+    received: dict = {}
+
+    class RecordingAgent:
+        def __init__(self, *a, **k):
+            pass
+
+        def classify_mode(self, messages, tags, papers):
+            received["messages"] = messages
+            received["tags"] = tags
+            received["papers"] = papers
+            return "ask", 0
+
+    patch_agent_seam(chat_agent=RecordingAgent)
+
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    client = TestClient(create_app(cfg))
+
+    resp = client.post(
+        "/api/chat/classify",
+        json={
+            "messages": [{"role": "user", "content": "hi"}],
+            "tags": ["moe"],
+            "papers": ["paper-a"],
+        },
+    )
+
+    assert resp.status_code == 200
+    assert received["messages"] == [{"role": "user", "content": "hi"}]
+    assert received["tags"] == ["moe"]
+    assert received["papers"] == ["paper-a"]
+
+
 def test_chat_per_paper_true_reaches_the_agent(make_config, patch_agent_seam):
     received: dict = {}
 

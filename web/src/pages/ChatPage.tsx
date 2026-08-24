@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   ActionIcon,
   Alert,
+  Badge,
   Box,
   Chip,
   Group,
@@ -18,6 +19,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { IconCheck, IconEdit, IconSend, IconSidebar, IconStop, IconX } from "../components/Icons";
 import {
   chat,
+  classifyMode,
   createChat,
   deleteChat,
   getChat,
@@ -63,6 +65,7 @@ interface Turn {
   compare?: boolean;
   compareResults?: CompareRow[];
   compareTotal?: number; // resolved scope size at send time — only set while streaming live
+  auto?: boolean; // this turn's Ask/Compare shape was resolved by Auto mode, not picked directly
 }
 
 export default function ChatPage() {
@@ -78,7 +81,8 @@ export default function ChatPage() {
   const [paperOptions, setPaperOptions] = useState<{ value: string; label: string }[]>([]);
   const [allPapers, setAllPapers] = useState<Paper[]>([]); // for resolveScopeSize — carries tags
   const [perPaper, setPerPaper] = useState(false);
-  const [mode, setMode] = useState<"ask" | "compare">("ask");
+  const [mode, setMode] = useState<"auto" | "ask" | "compare">("auto");
+  const [deciding, setDeciding] = useState(false); // Auto's classifyMode() pre-flight in flight
   const [busy, setBusy] = useState(false);
   const [empty, setEmpty] = useState(false);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
@@ -120,7 +124,7 @@ export default function ChatPage() {
       setTags([]);
       setPapers([]);
       setPerPaper(false);
-      setMode("ask");
+      setMode("auto");
     }
   }
 
@@ -145,6 +149,7 @@ export default function ChatPage() {
             usage: s.usage?.[i] ?? undefined,
             compare: s.compare?.[i] ?? undefined,
             compareResults: s.compare_results?.[i] ?? undefined,
+            auto: s.auto?.[i] ?? undefined,
           })),
         );
         // Filters aren't persisted per chat; reset so a reopened chat never shows
@@ -159,7 +164,13 @@ export default function ChatPage() {
         const lastPerPaper = s.per_paper?.length ? s.per_paper[s.per_paper.length - 1] : null;
         setPerPaper(lastPerPaper ?? false);
         const lastCompare = s.compare?.length ? s.compare[s.compare.length - 1] : null;
-        setMode(lastCompare ? "compare" : "ask");
+        const lastAuto = s.auto?.length ? s.auto[s.auto.length - 1] : null;
+        // Once Auto exists, compare[last] alone no longer says who picked the mode — it
+        // can mean "Auto picked Compare." Restore to Auto whenever the last turn was
+        // auto-decided, not to its resolved mode, so the control shows what it actually
+        // was (same "reflect what the conversation actually used" principle as per_paper's
+        // restore above).
+        setMode(lastAuto ? "auto" : lastCompare ? "compare" : "ask");
         loadedId.current = chatId;
       })
       .catch(() => setTurns([]));
@@ -207,8 +218,14 @@ export default function ChatPage() {
   // `prefix` must be captured fresh by the caller right before this call — it's applied
   // directly (not via a setTurns functional updater), so an await between capturing it
   // and calling runTurn could hand it a stale snapshot.
-  async function runTurn(prefix: Turn[], question: string, id: string, editIndex?: number) {
-    const sendCompare = mode === "compare";
+  async function runTurn(
+    prefix: Turn[],
+    question: string,
+    id: string,
+    editIndex: number | undefined,
+    sendCompare: boolean,
+    sendAuto: boolean,
+  ) {
     const scopeSize = sendCompare ? resolveScopeSize(allPapers, tags, papers) : 0;
     const history: ChatMessage[] = [
       ...prefix.map((t) => ({ role: t.role, content: t.content })),
@@ -222,6 +239,7 @@ export default function ChatPage() {
         content: "",
         streaming: true,
         compare: sendCompare,
+        auto: sendAuto,
         compareResults: sendCompare ? [] : undefined,
         compareTotal: sendCompare ? scopeSize : undefined,
       },
@@ -262,6 +280,7 @@ export default function ChatPage() {
         },
         editIndex,
         controller.signal,
+        sendAuto,
       );
     } finally {
       setBusy(false);
@@ -272,14 +291,55 @@ export default function ChatPage() {
   // Compare is N sequential search+answer sub-runs plus a synthesis pass — materially
   // slower than Ask on a large scope. Checked (and, if declined, bailed out of) before
   // send()/sendEdit() touch any state, so a cancel leaves the composer/edit box untouched
-  // instead of silently discarding what the user typed.
-  function confirmLargeCompareIfNeeded(): boolean {
-    if (mode !== "compare") return true;
-    const n = resolveScopeSize(allPapers, tags, papers);
+  // instead of silently discarding what the user typed. Takes explicit args (not read from
+  // `mode`/scopeSize via closure) so both the manually-selected-Compare path and Auto's
+  // resolved-to-Compare path share this one threshold check.
+  function confirmLargeCompareIfNeeded(isCompare: boolean, n: number): boolean {
+    if (!isCompare) return true;
     if (n <= COMPARE_CONFIRM_THRESHOLD) return true;
     return window.confirm(
       `Compare will run ${n} separate paper searches plus a synthesis pass — this can take a while. Continue?`,
     );
+  }
+
+  // Resolves what a send should actually do. For explicit Ask/Compare: just the existing
+  // confirm gate against the client-computed scopeSize — unchanged behavior, zero added
+  // latency. For Auto: first calls classifyMode() (full conversation history) to learn the
+  // resolved mode + its own scope_size — a separate pre-flight round trip, since SSE can't
+  // pause mid-stream for a confirm — then runs the same gate against that. Bounded by a
+  // client-side timeout (no Stop/abort wiring for this single, fast pre-flight call): a
+  // classify failure or timeout falls back to sending as Ask, matching the backend's own
+  // default-to-ask-on-any-failure rule for classify_mode itself. A decline from the confirm
+  // dialog itself still blocks the send either way.
+  async function resolveSendMode(
+    history: ChatMessage[],
+  ): Promise<{ send: boolean; compare: boolean; auto: boolean }> {
+    if (mode !== "auto") {
+      const isCompare = mode === "compare";
+      if (!confirmLargeCompareIfNeeded(isCompare, scopeSize)) {
+        return { send: false, compare: false, auto: false };
+      }
+      return { send: true, compare: isCompare, auto: false };
+    }
+    setDeciding(true);
+    try {
+      const timeout = new Promise<never>((_resolve, reject) =>
+        setTimeout(() => reject(new Error("classify timed out")), 10000),
+      );
+      const { mode: resolved, scope_size } = await Promise.race([
+        classifyMode(history, tags, papers),
+        timeout,
+      ]);
+      const isCompare = resolved === "compare";
+      if (!confirmLargeCompareIfNeeded(isCompare, scope_size)) {
+        return { send: false, compare: false, auto: false };
+      }
+      return { send: true, compare: isCompare, auto: true };
+    } catch {
+      return { send: true, compare: false, auto: true };
+    } finally {
+      setDeciding(false);
+    }
   }
 
   // Stops the in-flight turn: aborts our side of the SSE fetch immediately (so the
@@ -297,8 +357,13 @@ export default function ChatPage() {
 
   async function send() {
     const q = input.trim();
-    if (!q || busy) return;
-    if (!confirmLargeCompareIfNeeded()) return;
+    if (!q || busy || deciding) return;
+    const history: ChatMessage[] = [
+      ...turns.map((t) => ({ role: t.role, content: t.content })),
+      { role: "user", content: q },
+    ];
+    const resolved = await resolveSendMode(history);
+    if (!resolved.send) return;
     setInput("");
     // A stale open edit box shouldn't survive an unrelated normal send — otherwise its
     // Save button becomes a silent no-op once `busy` flips true for this turn instead.
@@ -312,7 +377,7 @@ export default function ChatPage() {
       navigate(`/c/${id}`, { replace: true });
     }
 
-    await runTurn(turns, q, id);
+    await runTurn(turns, q, id, undefined, resolved.compare, resolved.auto);
   }
 
   function startEdit(i: number, content: string) {
@@ -327,12 +392,13 @@ export default function ChatPage() {
 
   async function sendEdit(index: number, newContent: string) {
     const q = newContent.trim();
-    if (!q || busy || !chatId) return;
-    if (!confirmLargeCompareIfNeeded()) return;
+    if (!q || busy || deciding || !chatId) return;
 
     // Exchanges strictly after this one (own reply + any full user/assistant pairs
     // beyond it) that editing here would discard — confirm only when it's more than
-    // just regenerating the immediate reply.
+    // just regenerating the immediate reply. Cheap and synchronous, so it's checked
+    // before resolveSendMode's possible classifyMode() round trip below — declining it
+    // shouldn't have already paid for that call.
     const turnsAfter = turns.length - index - 1;
     if (turnsAfter > 1) {
       const exchanges = Math.floor((turnsAfter - 1) / 2);
@@ -346,8 +412,16 @@ export default function ChatPage() {
       }
     }
 
+    const prefix = turns.slice(0, index);
+    const history: ChatMessage[] = [
+      ...prefix.map((t) => ({ role: t.role, content: t.content })),
+      { role: "user", content: q },
+    ];
+    const resolved = await resolveSendMode(history);
+    if (!resolved.send) return;
+
     setEditingIndex(null);
-    await runTurn(turns.slice(0, index), q, chatId, index);
+    await runTurn(prefix, q, chatId, index, resolved.compare, resolved.auto);
   }
 
   async function onDelete(id: string) {
@@ -362,7 +436,7 @@ export default function ChatPage() {
     setTags([]);
     setPapers([]);
     setPerPaper(false);
-    setMode("ask");
+    setMode("auto");
     navigate("/");
   }
 
@@ -378,7 +452,7 @@ export default function ChatPage() {
           label={
             scopeSize < 2
               ? "Compare needs at least 2 papers in scope"
-              : `Runs one guaranteed search+answer per paper (${scopeSize} in scope), then synthesizes them into one comparative answer — slower than Ask on a large scope.`
+              : `Auto decides Ask vs Compare per question. Compare runs one guaranteed search+answer per paper (${scopeSize} in scope), then synthesizes them into one comparative answer — slower than Ask on a large scope.`
           }
           multiline
           w={260}
@@ -389,8 +463,9 @@ export default function ChatPage() {
             <SegmentedControl
               size="xs"
               value={mode}
-              onChange={(v) => setMode(v as "ask" | "compare")}
+              onChange={(v) => setMode(v as "auto" | "ask" | "compare")}
               data={[
+                { label: "Auto", value: "auto" },
                 { label: "Ask", value: "ask" },
                 { label: "Compare", value: "compare", disabled: scopeSize < 2 },
               ]}
@@ -425,10 +500,16 @@ export default function ChatPage() {
           minRows={1}
           maxRows={8}
           value={input}
+          // Greyed out during Auto's classify round trip: send()/sendEdit() already
+          // captured this question before the pre-flight call started, so further edits
+          // here would silently have no effect on the in-flight decision.
+          disabled={deciding}
           placeholder={
             mode === "compare"
               ? `Ask one thing to compare across ${scopeSize} papers…`
-              : "Ask about a paper or a concept…"
+              : mode === "auto"
+                ? "Ask about a paper or a concept — Auto will pick how to search…"
+                : "Ask about a paper or a concept…"
           }
           styles={{ input: { paddingInline: 10, fontSize: "0.95rem" } }}
           onChange={(e) => setInput(e.currentTarget.value)}
@@ -439,6 +520,14 @@ export default function ChatPage() {
             }
           }}
         />
+        {deciding && (
+          <Group gap={4} wrap="nowrap" style={{ alignSelf: "center" }}>
+            <Loader size="xs" type="dots" color="accent" />
+            <Text size="xs" c="dimmed">
+              Deciding…
+            </Text>
+          </Group>
+        )}
         {busy ? (
           <ActionIcon size={38} radius="md" onClick={stop} aria-label="Stop generating">
             <IconStop size={16} />
@@ -448,7 +537,7 @@ export default function ChatPage() {
             size={38}
             radius="md"
             onClick={() => send()}
-            disabled={!input.trim()}
+            disabled={!input.trim() || deciding}
             aria-label="Send"
           >
             <IconSend size={18} />
@@ -601,6 +690,11 @@ export default function ChatPage() {
                 </Group>
               ) : (
                 <Box key={i}>
+                  {t.auto && (
+                    <Badge size="xs" variant="outline" color="gray" mb={4}>
+                      Auto
+                    </Badge>
+                  )}
                   {t.compare ? (
                     <ComparePanel
                       rows={t.compareResults ?? []}

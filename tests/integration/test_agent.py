@@ -7,7 +7,7 @@ import pytest
 from rag.config import HFFaithfulnessCfg
 from rag.llm import Usage
 from rag.manifest import Manifest
-from server.agent import ChatAgent
+from server.agent import CLASSIFY_SYSTEM_PROMPT, ChatAgent
 
 
 @pytest.fixture
@@ -749,3 +749,108 @@ def test_faithfulness_all_entailment_does_not_log(
         on_text=lambda _t: None,
     )
     assert "[faithfulness]" not in capsys.readouterr().out
+
+
+def test_classify_mode_short_circuits_to_ask_below_2_papers_without_an_llm_call(
+    make_agent, fake_llm, monkeypatch
+):
+    agent = make_agent(fake_llm(answer="ok"))
+    build_calls: list = []
+    monkeypatch.setattr(
+        "server.agent.build_llm",
+        lambda spec: build_calls.append(spec) or fake_llm(answer="COMPARE"),
+    )
+    mode, scope_size = agent.classify_mode(
+        [{"role": "user", "content": "x"}], tags=[], papers=["paper-a"]
+    )
+    assert (mode, scope_size) == ("ask", 1)
+    assert build_calls == []
+
+
+def test_classify_mode_returns_compare_when_llm_says_compare(make_agent, fake_llm, monkeypatch):
+    agent = make_agent(fake_llm(answer="ok"))
+    classifier = fake_llm(answer="COMPARE")
+    monkeypatch.setattr("server.agent.build_llm", lambda spec: classifier)
+    mode, scope_size = agent.classify_mode(
+        [{"role": "user", "content": "compare them"}], tags=[], papers=[]
+    )
+    assert (mode, scope_size) == ("compare", 2)
+    assert len(classifier.complete_calls) == 1
+    call = classifier.complete_calls[0]
+    # CLASSIFY_SYSTEM_PROMPT is a template (`{papers}`) filled in per call, not sent verbatim.
+    assert call["system"] == CLASSIFY_SYSTEM_PROMPT.format(
+        papers="paper-a (Paper A; moe), paper-b (Paper B; rl)"
+    )
+    assert call["max_tokens"] == 256
+    assert "compare them" in call["user"]
+
+
+def test_classify_mode_lists_the_resolved_papers_in_the_classify_prompt(
+    make_agent, fake_llm, monkeypatch
+):
+    # So the classifier can tell a question needs Compare from the scope alone (e.g. "what's
+    # the model size?" over several distinct model papers) even when the question itself
+    # never says "each" or "compare".
+    agent = make_agent(fake_llm(answer="ok"))
+    classifier = fake_llm(answer="ASK")
+    monkeypatch.setattr("server.agent.build_llm", lambda spec: classifier)
+    agent.classify_mode([{"role": "user", "content": "what's the model size?"}], tags=[], papers=[])
+    system = classifier.complete_calls[0]["system"]
+    assert "Paper A" in system
+    assert "Paper B" in system
+
+
+def test_classify_mode_returns_ask_when_llm_says_ask(make_agent, fake_llm, monkeypatch):
+    agent = make_agent(fake_llm(answer="ok"))
+    classifier = fake_llm(answer="ASK")
+    monkeypatch.setattr("server.agent.build_llm", lambda spec: classifier)
+    mode, scope_size = agent.classify_mode(
+        [{"role": "user", "content": "what is MLA?"}], tags=[], papers=[]
+    )
+    assert (mode, scope_size) == ("ask", 2)
+
+
+def test_classify_mode_defaults_to_ask_on_malformed_llm_output(make_agent, fake_llm, monkeypatch):
+    agent = make_agent(fake_llm(answer="ok"))
+    classifier = fake_llm(answer="I'm not sure, maybe compare them?")
+    monkeypatch.setattr("server.agent.build_llm", lambda spec: classifier)
+    mode, _scope = agent.classify_mode([{"role": "user", "content": "x"}], tags=[], papers=[])
+    assert mode == "ask"
+
+
+def test_classify_mode_tolerates_trailing_punctuation_on_compare(make_agent, fake_llm, monkeypatch):
+    # An otherwise-compliant "COMPARE." (trailing period) must still classify as compare —
+    # only substring-style false positives (a sentence merely containing "compare") should
+    # fall through to ask, not trivial trailing punctuation on an exact one-word reply.
+    agent = make_agent(fake_llm(answer="ok"))
+    classifier = fake_llm(answer="COMPARE.")
+    monkeypatch.setattr("server.agent.build_llm", lambda spec: classifier)
+    mode, _scope = agent.classify_mode([{"role": "user", "content": "x"}], tags=[], papers=[])
+    assert mode == "compare"
+
+
+def test_classify_mode_defaults_to_ask_on_llm_exception(make_agent, fake_llm, monkeypatch):
+    agent = make_agent(fake_llm(answer="ok"))
+
+    class _RaisingLLM:
+        def complete(self, system, user, max_tokens=None):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr("server.agent.build_llm", lambda spec: _RaisingLLM())
+    mode, scope_size = agent.classify_mode([{"role": "user", "content": "x"}], tags=[], papers=[])
+    assert (mode, scope_size) == ("ask", 2)
+
+
+def test_classify_mode_sees_full_conversation_history(make_agent, fake_llm, monkeypatch):
+    agent = make_agent(fake_llm(answer="ok"))
+    classifier = fake_llm(answer="ASK")
+    monkeypatch.setattr("server.agent.build_llm", lambda spec: classifier)
+    messages = [
+        {"role": "user", "content": "What optimizer does paper-a use?"},
+        {"role": "assistant", "content": "AdamW [r1]."},
+        {"role": "user", "content": "and paper-b?"},
+    ]
+    agent.classify_mode(messages, tags=[], papers=[])
+    transcript = classifier.complete_calls[0]["user"]
+    for m in messages:
+        assert m["content"] in transcript

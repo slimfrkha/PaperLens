@@ -10,7 +10,7 @@ from collections.abc import Callable
 from rag.config import LLMSpec
 from rag.llm import Usage
 
-from .agent import ChatAgent, _flatten_compare_rows
+from .agent import ChatAgent, InsufficientScopeError, _flatten_compare_rows
 from .chats import ChatStore, generate_name
 from .schemas import ChatRequest
 
@@ -213,10 +213,30 @@ def run_turn(
         # Spans the whole turn (retrieval + rerank + LLM + faithfulness check), not just LLM
         # think time — that's the wait the user actually feels.
         t0 = time.perf_counter()
+        # Tracks what actually ran, which may differ from req.compare on the fallback below —
+        # used for persistence instead of req.compare so a degraded turn isn't saved as if it
+        # were a real Compare turn with no rows.
+        ran_compare = req.compare
         if req.compare:
-            text, compare_results, citations, usage = _run_agent_compare(
-                agent, req, on_trace, emit, ref_start, stop_check
-            )
+            try:
+                text, compare_results, citations, usage = _run_agent_compare(
+                    agent, req, on_trace, emit, ref_start, stop_check
+                )
+            except InsufficientScopeError:
+                # Classification (Auto mode's own pre-flight round trip) or the user's click
+                # can both race a manifest change between "compare was decided" and this turn
+                # actually running — a paper removed mid-flight can drop resolved scope below
+                # 2 and trip compare()'s own guard. Fall back to a plain Ask turn instead of
+                # surfacing that race as a 500; the guard raises before any streaming starts,
+                # so nothing has been emitted yet. Narrowed to this specific exception (not a
+                # bare ValueError) so a genuine failure elsewhere in compare() — e.g. a
+                # synthesis retry that fails twice, after rows have already streamed — surfaces
+                # as a real error instead of being silently rerun as an unrelated Ask turn.
+                text, citations, usage = _run_agent(
+                    agent, req, on_trace, emit, ref_start, stop_check
+                )
+                compare_results = None
+                ran_compare = False
         else:
             text, citations, usage = _run_agent(agent, req, on_trace, emit, ref_start, stop_check)
             compare_results = None
@@ -243,9 +263,10 @@ def run_turn(
                 name=name,
                 # The secondary knob is hidden/unsendable under Compare (see ChatPage), but
                 # the backend doesn't trust the client alone: never persist both as true.
-                per_paper=req.per_paper and not req.compare,
-                compare=req.compare,
+                per_paper=req.per_paper and not ran_compare,
+                compare=ran_compare,
                 compare_results=compare_results,
+                auto=req.auto,
             )
             emit("meta", json.dumps({"chat_id": saved["id"], "name": saved["name"]}))
     except Exception as e:  # surface errors to the client

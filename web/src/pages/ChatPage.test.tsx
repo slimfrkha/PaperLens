@@ -476,7 +476,14 @@ describe("ChatPage secondary 'Broaden recall per paper' knob (Ask mode)", () => 
 
     fireEvent.click(screen.getByRole("button", { name: /New chat/i }));
 
-    expect(await screen.findByLabelText("Broaden recall per paper")).not.toBeChecked();
+    // New chat defaults to Auto, which hides the Ask-only knob entirely — not just
+    // unchecked, gone from the document (same "hide, don't disable" treatment Compare gets).
+    await waitFor(() =>
+      expect(screen.queryByLabelText("Broaden recall per paper")).not.toBeInTheDocument(),
+    );
+    // Switching explicitly to Ask reveals it, reset to off — not carried over from before.
+    fireEvent.click(screen.getByRole("radio", { name: "Ask" }));
+    expect(screen.getByLabelText("Broaden recall per paper")).not.toBeChecked();
   });
 
   it("restores the target conversation's own per_paper state when switching (not a blind reset)", async () => {
@@ -607,6 +614,21 @@ describe("ChatPage Ask/Compare mode", () => {
     });
   }
 
+  it("defaults to Auto when starting a fresh conversation", async () => {
+    vi.stubGlobal("fetch", mockFetch());
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/"]}>
+          <Routes>
+            <Route path="/" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+
+    expect(screen.getByRole("radio", { name: "Auto" })).toBeChecked();
+  });
+
   it("Ask is selected by default and Compare is disabled below 2 resolved papers", async () => {
     vi.stubGlobal("fetch", mockFetch()); // default mock: 0 papers
     render(
@@ -692,7 +714,7 @@ describe("ChatPage Ask/Compare mode", () => {
     expect(sent.per_paper).toBe(false);
   });
 
-  it("resets to Ask on New chat", async () => {
+  it("resets to Auto on New chat", async () => {
     vi.stubGlobal("fetch", twoPapersFetch());
     render(
       <MantineProvider>
@@ -711,7 +733,7 @@ describe("ChatPage Ask/Compare mode", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /New chat/i }));
 
-    expect(await screen.findByRole("radio", { name: "Ask" })).toBeChecked();
+    expect(await screen.findByRole("radio", { name: "Auto" })).toBeChecked();
   });
 
   it("restores Compare when switching to a conversation whose latest turn used it (not a blind reset)", async () => {
@@ -809,6 +831,323 @@ describe("ChatPage Ask/Compare mode", () => {
     expect(confirmSpy).toHaveBeenCalled();
     expect(fetchMock.mock.calls.some(([u]) => String(u) === "/api/chat")).toBe(false);
     confirmSpy.mockRestore();
+  });
+
+  it("Broaden recall stays hidden under Auto, same as under Compare", async () => {
+    vi.stubGlobal("fetch", twoPapersFetch());
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+    await screen.findByText(/regression marker text/i);
+    fireEvent.click(screen.getByRole("radio", { name: "Ask" }));
+    expect(screen.getByLabelText("Broaden recall per paper")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: "Auto" }));
+    expect(screen.queryByLabelText("Broaden recall per paper")).not.toBeInTheDocument();
+  });
+
+  it("Auto with a small resolved scope sends without a classify-confirm dialog, and shows the Auto badge", async () => {
+    const sse = "event: citations\ndata: []\n\nevent: done\ndata: \n\n";
+    const classifyMock = vi.fn();
+    const fetchMock = twoPapersFetch((url) => {
+      if (url === "/api/chat") return mockStreamResponse(sse);
+      if (url === "/api/chat/classify") {
+        classifyMock();
+        return {
+          ok: true,
+          json: () => Promise.resolve({ mode: "ask", scope_size: 2 }),
+        } as Response;
+      }
+      return null;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const confirmSpy = vi.spyOn(window, "confirm");
+
+    const { container } = render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+    await screen.findByText(/regression marker text/i);
+    fireEvent.click(screen.getByRole("radio", { name: "Auto" }));
+
+    fireEvent.change(screen.getByPlaceholderText(/Auto will pick how to search/i), {
+      target: { value: "a question" },
+    });
+    fireEvent.click(screen.getByLabelText("Send"));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/chat", expect.anything()));
+    expect(classifyMock).toHaveBeenCalled();
+    expect(confirmSpy).not.toHaveBeenCalled();
+    const call = fetchMock.mock.calls.find(([u]) => String(u) === "/api/chat")!;
+    const sent = JSON.parse((call[1] as RequestInit).body as string);
+    expect(sent.compare).toBe(false);
+    expect(sent.auto).toBe(true);
+
+    const badge = container.querySelector(".mantine-Badge-root");
+    expect(badge).toHaveTextContent("Auto");
+    confirmSpy.mockRestore();
+  });
+
+  it("greys out the composer while Auto's classify call is in flight", async () => {
+    const sse = "event: citations\ndata: []\n\nevent: done\ndata: \n\n";
+    let resolveClassify!: (value: Response) => void;
+    const classifyPromise = new Promise<Response>((resolve) => {
+      resolveClassify = resolve;
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/chat/classify") return classifyPromise;
+      if (url === "/api/chat") return Promise.resolve(mockStreamResponse(sse));
+      const body =
+        url === "/api/chats/test-id"
+          ? chatSession
+          : url === "/api/papers"
+            ? twoPapers
+            : url.startsWith("/api/tags") || url.startsWith("/api/chats")
+              ? []
+              : {};
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+    await screen.findByText(/regression marker text/i);
+    fireEvent.click(screen.getByRole("radio", { name: "Auto" }));
+
+    const textarea = screen.getByPlaceholderText(/Auto will pick how to search/i);
+    fireEvent.change(textarea, { target: { value: "a question" } });
+    expect(textarea).not.toBeDisabled();
+    fireEvent.click(screen.getByLabelText("Send"));
+
+    // Still captured in the request that's about to be classified — further typing here
+    // wouldn't do anything, so the composer greys out for the duration of the pre-flight call.
+    await waitFor(() => expect(textarea).toBeDisabled());
+
+    resolveClassify({
+      ok: true,
+      json: () => Promise.resolve({ mode: "ask", scope_size: 2 }),
+    } as Response);
+
+    await waitFor(() => expect(textarea).not.toBeDisabled());
+    // Let the real turn settle too, so no request from this test is still in flight
+    // when the next test's fetch mock takes over.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/chat", expect.anything()));
+  });
+
+  it("Auto resolved to Compare over a large scope shows the confirm dialog before sending", async () => {
+    const manyPapers = Array.from({ length: 13 }, (_, i) => ({
+      paper_id: `p${i}`,
+      title: `Paper ${i}`,
+      tags: [],
+    }));
+    const sse = "event: citations\ndata: []\n\nevent: done\ndata: \n\n";
+    // `init` is unused but kept in the signature so fetchMock.mock.calls types as a 2-tuple
+    // below (call[1]) instead of narrowing to just [input].
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      void init;
+      const url = String(input);
+      if (url === "/api/chat") return Promise.resolve(mockStreamResponse(sse));
+      if (url === "/api/chat/classify") {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ mode: "compare", scope_size: 13 }),
+        } as Response);
+      }
+      const body =
+        url === "/api/chats/test-id"
+          ? chatSession
+          : url === "/api/papers"
+            ? manyPapers
+            : url.startsWith("/api/tags") || url.startsWith("/api/chats")
+              ? []
+              : {};
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+    await screen.findByText(/regression marker text/i);
+    fireEvent.click(screen.getByRole("radio", { name: "Auto" }));
+
+    fireEvent.change(screen.getByPlaceholderText(/Auto will pick how to search/i), {
+      target: { value: "compare them" },
+    });
+    fireEvent.click(screen.getByLabelText("Send"));
+
+    await waitFor(() => expect(confirmSpy).toHaveBeenCalled());
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/chat", expect.anything()));
+    const call = fetchMock.mock.calls.find(([u]) => String(u) === "/api/chat")!;
+    const sent = JSON.parse((call[1] as RequestInit).body as string);
+    expect(sent.compare).toBe(true);
+    expect(sent.auto).toBe(true);
+    confirmSpy.mockRestore();
+  });
+
+  it("canceling the Auto confirm dialog sends nothing", async () => {
+    const manyPapers = Array.from({ length: 13 }, (_, i) => ({
+      paper_id: `p${i}`,
+      title: `Paper ${i}`,
+      tags: [],
+    }));
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/chat/classify") {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ mode: "compare", scope_size: 13 }),
+        } as Response);
+      }
+      const body =
+        url === "/api/chats/test-id"
+          ? chatSession
+          : url === "/api/papers"
+            ? manyPapers
+            : url.startsWith("/api/tags") || url.startsWith("/api/chats")
+              ? []
+              : {};
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+    await screen.findByText(/regression marker text/i);
+    fireEvent.click(screen.getByRole("radio", { name: "Auto" }));
+
+    fireEvent.change(screen.getByPlaceholderText(/Auto will pick how to search/i), {
+      target: { value: "compare them" },
+    });
+    fireEvent.click(screen.getByLabelText("Send"));
+
+    await waitFor(() => expect(confirmSpy).toHaveBeenCalled());
+    expect(fetchMock.mock.calls.some(([u]) => String(u) === "/api/chat")).toBe(false);
+    confirmSpy.mockRestore();
+  });
+
+  it("a classifyMode failure falls back to sending as Ask", async () => {
+    const sse = "event: citations\ndata: []\n\nevent: done\ndata: \n\n";
+    const fetchMock = twoPapersFetch((url) => {
+      if (url === "/api/chat") return mockStreamResponse(sse);
+      if (url === "/api/chat/classify") {
+        return { ok: false, status: 500, statusText: "Internal Server Error" } as Response;
+      }
+      return null;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+    await screen.findByText(/regression marker text/i);
+    fireEvent.click(screen.getByRole("radio", { name: "Auto" }));
+
+    fireEvent.change(screen.getByPlaceholderText(/Auto will pick how to search/i), {
+      target: { value: "a question" },
+    });
+    fireEvent.click(screen.getByLabelText("Send"));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/chat", expect.anything()));
+    const call = fetchMock.mock.calls.find(([u]) => String(u) === "/api/chat")!;
+    const sent = JSON.parse((call[1] as RequestInit).body as string);
+    expect(sent.compare).toBe(false);
+    expect(sent.auto).toBe(true);
+  });
+
+  it("restores Auto (not the resolved mode) when switching to a conversation whose latest turn was auto-decided", async () => {
+    const otherSession = {
+      id: "other-id",
+      name: "Other",
+      messages: [
+        { role: "user", content: "other question" },
+        { role: "assistant", content: "other answer" },
+      ],
+      citations: [null, []],
+      compare: [null, true],
+      auto: [null, true],
+    };
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/chats") {
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve([
+              { id: "test-id", name: "Test", updated_at: "" },
+              { id: "other-id", name: "Other", updated_at: "" },
+            ]),
+        } as Response);
+      }
+      const body =
+        url === "/api/chats/test-id"
+          ? chatSession
+          : url === "/api/chats/other-id"
+            ? otherSession
+            : url === "/api/papers"
+              ? twoPapers
+              : url.startsWith("/api/tags")
+                ? []
+                : {};
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+    await screen.findByText(/regression marker text/i);
+    expect(screen.getByRole("radio", { name: "Ask" })).toBeChecked();
+
+    fireEvent.click(await screen.findByText("Other"));
+
+    expect(await screen.findByRole("radio", { name: "Auto" })).toBeChecked();
   });
 });
 
@@ -983,6 +1322,39 @@ describe("ChatPage edit-and-resume", () => {
     // Declining the confirm must not touch the server or the conversation.
     expect(fetchMock).not.toHaveBeenCalledWith("/api/chat", expect.anything());
     expect(await screen.findByText("second question")).toBeInTheDocument();
+  });
+
+  it("under Auto mode, declining the discard-exchanges confirm never calls classifyMode", async () => {
+    // vi.spyOn reuses window.confirm's existing spy (if the preceding test left one behind
+    // without restoring it) rather than resetting its call history — mockClear() makes this
+    // test's own call count assertion robust to that regardless of test order.
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    confirmSpy.mockClear();
+    const classifyMock = vi.fn();
+    const fetchMock = baseFetchMock((url) => {
+      if (url === "/api/chat/classify") {
+        classifyMock();
+        return {
+          ok: true,
+          json: () => Promise.resolve({ mode: "ask", scope_size: 0 }),
+        } as Response;
+      }
+      return undefined;
+    });
+    renderTwoTurnChat(fetchMock);
+    await screen.findByText("first question");
+    fireEvent.click(screen.getByRole("radio", { name: "Auto" }));
+
+    fireEvent.click(screen.getAllByLabelText("Edit message")[0]);
+    const textarea = await screen.findByDisplayValue("first question");
+    fireEvent.change(textarea, { target: { value: "first question, edited" } });
+    fireEvent.click(screen.getByLabelText("Save and resend"));
+
+    await waitFor(() => expect(confirmSpy).toHaveBeenCalledOnce());
+    // The cheap, synchronous discard confirm is checked before the async classifyMode
+    // round trip — declining it means classifyMode is never called at all.
+    expect(classifyMock).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalledWith("/api/chat", expect.anything());
   });
 
   it("proceeds with the edit once the confirmation is accepted", async () => {
