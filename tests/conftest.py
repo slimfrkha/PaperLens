@@ -265,3 +265,44 @@ def _stop_chroma_systems():
     for system in list(SharedSystemClient._identifier_to_system.values()):
         system.stop()
     SharedSystemClient.clear_system_cache()
+
+
+# --- THROWAWAY: diagnosing the post-suite CI hang (exit code 143). Not for merge. ---
+def pytest_configure(config):
+    import traceback
+
+    from docling.document_converter import DocumentConverter
+
+    orig_init = DocumentConverter.__init__
+
+    def traced_init(self, *a, **k):
+        print("\n=== [diag] REAL DocumentConverter() constructed from: ===", flush=True)
+        traceback.print_stack()
+        return orig_init(self, *a, **k)
+
+    DocumentConverter.__init__ = traced_init
+
+
+def pytest_sessionfinish(session, exitstatus):
+    import atexit
+    import threading
+
+    print(f"\n[diag] pytest_sessionfinish reached, exitstatus={exitstatus}", flush=True)
+    print(f"[diag] live threads: {[t.name for t in threading.enumerate()]}", flush=True)
+
+    def _diag_children():
+        try:
+            import psutil
+        except ImportError:
+            print("[diag] psutil not available", flush=True)
+            return
+        proc = psutil.Process()
+        kids = proc.children(recursive=True)
+        print(f"[diag] {len(kids)} live child processes at atexit", flush=True)
+        for k in kids:
+            try:
+                print("[diag] pid", k.pid, "cmdline", k.cmdline(), flush=True)
+            except Exception as e:
+                print("[diag] pid", k.pid, "err", e, flush=True)
+
+    atexit.register(_diag_children)
