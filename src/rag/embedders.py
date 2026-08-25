@@ -6,9 +6,15 @@ One backend per config ``embedding.type`` variant (see ``EmbeddingCfg`` in
 * ``hf``     — any sentence-transformers / HuggingFace model, run locally
                (default; uses Apple MPS when available).
 * ``openai`` — any OpenAI-compatible embeddings endpoint (OpenAI itself, or
-               a local/other server via ``api_base``).
-* ``gemini`` — Google GenAI embeddings (asymmetric: document vs query task type).
-* ``ollama`` — Ollama's native ``/api/embed`` endpoint.
+               a local/other server via ``api_base``), via LiteLLM.
+* ``gemini`` — Google GenAI embeddings (asymmetric: document vs query task type),
+               via LiteLLM.
+* ``voyage`` — Voyage AI embeddings (asymmetric), Anthropic's recommended
+               embedding partner — Anthropic has no embeddings API of its own.
+               Called directly, not via LiteLLM: LiteLLM's Voyage integration
+               doesn't forward the `input_type` param, which would silently
+               drop the asymmetric query/document distinction.
+* ``ollama`` — Ollama's native ``/api/embed`` endpoint, via LiteLLM.
 
 All expose the Chroma ``EmbeddingFunction`` protocol: ``__call__(input) -> list[list[float]]``.
 Add a backend by registering an ``EmbeddingCfg`` variant in ``config.py`` and adding
@@ -20,12 +26,15 @@ from __future__ import annotations
 import os
 from abc import ABC, abstractmethod
 
+import litellm
+
 from .config import (
     EmbeddingCfg,
     GeminiEmbeddingCfg,
     HFEmbeddingCfg,
     OllamaEmbeddingCfg,
     OpenAIEmbeddingCfg,
+    VoyageEmbeddingCfg,
 )
 
 
@@ -46,7 +55,7 @@ class Embedder(ABC):
 
     def embed_query(self, input: list[str]) -> list[list[float]]:
         """Embed search queries. Symmetric models reuse ``__call__``; asymmetric
-        ones (e.g. Gemini/Cohere/Voyage, which want a query-vs-document hint)
+        ones (e.g. Gemini/Voyage, which want a query-vs-document hint)
         override this. Kept off the Chroma protocol, so ``Searcher`` calls it
         only when present."""
         return self(input)
@@ -108,7 +117,7 @@ class HFEmbedder(Embedder):
 
 
 class OpenAIEmbedder(Embedder):
-    """OpenAI-compatible API embedder (OpenAI, or any compatible base_url)."""
+    """OpenAI-compatible API embedder (OpenAI, or any compatible base_url), via LiteLLM."""
 
     def __init__(
         self,
@@ -117,8 +126,6 @@ class OpenAIEmbedder(Embedder):
         api_key_env: str = "OPENAI_API_KEY",
         batch_size: int = 128,
     ):
-        from openai import OpenAI
-
         api_key = os.environ.get(api_key_env)
         if not api_key:
             raise RuntimeError(
@@ -127,7 +134,10 @@ class OpenAIEmbedder(Embedder):
             )
         self.model_name = model_name
         self.batch_size = batch_size
-        self.client = OpenAI(api_key=api_key, base_url=api_base)
+        self._kwargs: dict = {"model": f"openai/{model_name}", "api_key": api_key}
+        if api_base:
+            self._kwargs["api_base"] = api_base
+            self._kwargs["custom_llm_provider"] = "openai"
 
     def name(self) -> str:
         return f"openai:{self.model_name}"
@@ -136,17 +146,20 @@ class OpenAIEmbedder(Embedder):
         out: list[list[float]] = []
         for i in range(0, len(input), self.batch_size):
             batch = input[i : i + self.batch_size]
-            resp = self.client.embeddings.create(model=self.model_name, input=batch)
-            out.extend(d.embedding for d in resp.data)
+            resp = litellm.embedding(input=batch, **self._kwargs)
+            out.extend(d["embedding"] for d in resp.data)
         return out
 
 
 class GeminiEmbedder(Embedder):
-    """Google GenAI embeddings (e.g. ``text-embedding-004``, ``gemini-embedding-001``).
+    """Google GenAI embeddings (e.g. ``text-embedding-004``, ``gemini-embedding-001``), via LiteLLM.
 
     Asymmetric: documents are embedded with ``RETRIEVAL_DOCUMENT`` and queries with
     ``RETRIEVAL_QUERY`` (via :meth:`embed_query`), which the model uses to place a
-    query near the passages that answer it.
+    query near the passages that answer it. LiteLLM forwards this via its
+    provider-agnostic `input_type` param (Vertex/Gemini's `map_openai_params` reads
+    it straight off the raw call kwargs, unlike most providers' `non_default_params`
+    path — verified against the installed litellm's source).
     """
 
     def __init__(
@@ -155,8 +168,6 @@ class GeminiEmbedder(Embedder):
         api_key_env: str = "GEMINI_API_KEY",
         batch_size: int = 100,
     ):
-        from google import genai
-
         api_key = os.environ.get(api_key_env)
         if not api_key:
             raise RuntimeError(
@@ -164,23 +175,17 @@ class GeminiEmbedder(Embedder):
             )
         self.model_name = model_name
         self.batch_size = batch_size
-        self.client = genai.Client(api_key=api_key)
+        self._kwargs: dict = {"model": f"gemini/{model_name}", "api_key": api_key}
 
     def name(self) -> str:
         return f"gemini:{self.model_name}"
 
     def _embed(self, input: list[str], task_type: str) -> list[list[float]]:
-        from google.genai import types
-
         out: list[list[float]] = []
         for i in range(0, len(input), self.batch_size):
             batch = input[i : i + self.batch_size]
-            resp = self.client.models.embed_content(
-                model=self.model_name,
-                contents=batch,  # ty: ignore[invalid-argument-type]  # SDK accepts list[str] at runtime; stub union omits it
-                config=types.EmbedContentConfig(task_type=task_type),
-            )
-            out.extend(e.values for e in (resp.embeddings or []) if e.values)
+            resp = litellm.embedding(input=batch, input_type=task_type, **self._kwargs)
+            out.extend(d["embedding"] for d in resp.data)
         return out
 
     def __call__(self, input: list[str]) -> list[list[float]]:
@@ -190,8 +195,63 @@ class GeminiEmbedder(Embedder):
         return self._embed(input, "RETRIEVAL_QUERY")
 
 
+class VoyageEmbedder(Embedder):
+    """Voyage AI embeddings (e.g. ``voyage-3.5``) — Anthropic's recommended embedding
+    partner; Anthropic has no embeddings API of its own.
+
+    Asymmetric like Gemini's, via Voyage's own `input_type: "query" | "document"`.
+    Called directly over HTTP rather than through LiteLLM: LiteLLM's
+    `VoyageEmbeddingConfig.map_openai_params` doesn't read `input_type` at all (unlike
+    Gemini's, it only receives the pre-filtered `non_default_params`, and `input_type`
+    isn't an OpenAI-standard embedding param — verified against the installed
+    litellm's source), which would silently drop the asymmetric distinction.
+    """
+
+    def __init__(
+        self,
+        model_name: str,
+        api_key_env: str = "VOYAGE_API_KEY",
+        batch_size: int = 100,
+    ):
+        import httpx
+
+        api_key = os.environ.get(api_key_env)
+        if not api_key:
+            raise RuntimeError(
+                f"No API key found in ${api_key_env}. Export it (or add it to .env)."
+            )
+        self.model_name = model_name
+        self.batch_size = batch_size
+        self.client = httpx.Client(
+            base_url="https://api.voyageai.com/v1",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=60,
+        )
+
+    def name(self) -> str:
+        return f"voyage:{self.model_name}"
+
+    def _embed(self, input: list[str], input_type: str) -> list[list[float]]:
+        out: list[list[float]] = []
+        for i in range(0, len(input), self.batch_size):
+            batch = input[i : i + self.batch_size]
+            resp = self.client.post(
+                "/embeddings",
+                json={"model": self.model_name, "input": batch, "input_type": input_type},
+            )
+            resp.raise_for_status()
+            out.extend(d["embedding"] for d in resp.json()["data"])
+        return out
+
+    def __call__(self, input: list[str]) -> list[list[float]]:
+        return self._embed(input, "document")
+
+    def embed_query(self, input: list[str]) -> list[list[float]]:
+        return self._embed(input, "query")
+
+
 class OllamaEmbedder(Embedder):
-    """Ollama's native ``/api/embed`` endpoint (batched). Needs no API key."""
+    """Ollama's native ``/api/embed`` endpoint (batched), via LiteLLM. Needs no API key."""
 
     def __init__(
         self,
@@ -199,12 +259,9 @@ class OllamaEmbedder(Embedder):
         api_base: str | None = None,
         batch_size: int = 64,
     ):
-        import httpx
-
         self.model_name = model_name
         self.api_base = (api_base or "http://localhost:11434").rstrip("/")
         self.batch_size = batch_size
-        self.client = httpx.Client(timeout=120)
 
     def name(self) -> str:
         return f"ollama:{self.model_name}"
@@ -213,12 +270,10 @@ class OllamaEmbedder(Embedder):
         out: list[list[float]] = []
         for i in range(0, len(input), self.batch_size):
             batch = input[i : i + self.batch_size]
-            resp = self.client.post(
-                f"{self.api_base}/api/embed",
-                json={"model": self.model_name, "input": batch},
+            resp = litellm.embedding(
+                model=f"ollama/{self.model_name}", input=batch, api_base=self.api_base
             )
-            resp.raise_for_status()
-            out.extend(resp.json()["embeddings"])
+            out.extend(d["embedding"] for d in resp.data)
         return out
 
 
@@ -242,6 +297,8 @@ def build_embedder(cfg: EmbeddingCfg) -> Embedder:
             )
         case GeminiEmbeddingCfg():
             return GeminiEmbedder(cfg.model, api_key_env=cfg.api_key_env, batch_size=cfg.batch_size)
+        case VoyageEmbeddingCfg():
+            return VoyageEmbedder(cfg.model, api_key_env=cfg.api_key_env, batch_size=cfg.batch_size)
         case OllamaEmbeddingCfg():
             return OllamaEmbedder(
                 cfg.model, api_base=cfg.api_base or None, batch_size=cfg.batch_size

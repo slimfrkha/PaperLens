@@ -5,10 +5,13 @@ A reranker rescores the ``(query, chunk)`` candidates the dense search returned;
 ``reranker.type`` variant (see ``RerankerCfg`` in ``config.py``), each exposing a
 uniform ``score(query, docs) -> list[float]`` (one score per doc, in input order):
 
-* ``hf``  — a local sentence-transformers cross-encoder (default
-            ``BAAI/bge-reranker-v2-m3``); the original in-``Searcher`` behavior.
-* ``llm`` — reuses the chat LLM to rate relevance pointwise (no new dependency;
-            works offline against a local server).
+* ``hf``     — a local sentence-transformers cross-encoder (default
+               ``BAAI/bge-reranker-v2-m3``); the original in-``Searcher`` behavior.
+* ``llm``    — reuses the chat LLM to rate relevance pointwise (no new dependency;
+               works offline against a local server).
+* ``voyage`` — a dedicated rerank API (default ``rerank-2.5``), via LiteLLM's
+               ``rerank()``; purpose-built for this, unlike ``llm``'s prompt-and-parse
+               workaround.
 
 Add a backend by registering a ``RerankerCfg`` variant in ``config.py`` and adding
 a match arm to ``build_reranker`` below.
@@ -17,10 +20,13 @@ a match arm to ``build_reranker`` below.
 from __future__ import annotations
 
 import json
+import os
 import re
 from abc import ABC, abstractmethod
 
-from .config import HFRerankerCfg, LLMRerankerCfg, RerankerCfg
+import litellm
+
+from .config import HFRerankerCfg, LLMRerankerCfg, RerankerCfg, VoyageRerankerCfg
 from .llm import LLMBackend
 
 
@@ -113,6 +119,42 @@ class LLMReranker(Reranker):
         return _parse_scores(text, len(docs))
 
 
+class VoyageReranker(Reranker):
+    """Voyage AI's dedicated rerank API, via LiteLLM — purpose-built for scoring
+    (query, passage) relevance, unlike ``LLMReranker``'s prompt-and-parse workaround.
+    """
+
+    def __init__(self, model_name: str, api_key_env: str = "VOYAGE_API_KEY"):
+        api_key = os.environ.get(api_key_env)
+        if not api_key:
+            raise RuntimeError(
+                f"No API key found in ${api_key_env}. Export it (or add it to .env)."
+            )
+        self.model_name = model_name
+        self._api_key = api_key
+
+    def score(self, query: str, docs: list[str]) -> list[float]:
+        if not docs:
+            return []
+        resp = litellm.rerank(
+            model=f"voyage/{self.model_name}",
+            query=query,
+            documents=docs,
+            top_n=len(docs),  # score every doc, not just the API's top matches
+            api_key=self._api_key,
+        )
+        # Results come back sorted by relevance, not input order — `index` maps
+        # each result back to its position in `docs` (see Reranker.score's contract).
+        # A contract-violating index degrades that one doc to 0.0 (dense-retrieval
+        # order) rather than raising — same failure philosophy as LLMReranker's
+        # _parse_scores, just for an external API's response instead of an LLM's.
+        scores = [0.0] * len(docs)
+        for r in resp.results:
+            if 0 <= r["index"] < len(docs):
+                scores[r["index"]] = r["relevance_score"]
+        return scores
+
+
 def build_reranker(
     cfg: RerankerCfg, *, device: str | None = None, llm: LLMBackend | None = None
 ) -> Reranker:
@@ -126,5 +168,7 @@ def build_reranker(
                     "The 'llm' reranker needs an LLM; pass build_reranker(..., llm=...)."
                 )
             return LLMReranker(llm, max_chars=cfg.max_chars)
+        case VoyageRerankerCfg():
+            return VoyageReranker(cfg.model, api_key_env=cfg.api_key_env)
         case _:
             raise ValueError(f"Unknown reranker config: {type(cfg).__name__}")

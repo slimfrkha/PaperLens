@@ -1,13 +1,11 @@
-"""Provider-agnostic LLM clients with a tool-use loop.
+"""Provider-agnostic LLM clients with a tool-use loop, backed by LiteLLM.
 
 One neutral tool schema (`{name, description, input_schema}`) drives every backend.
-There are only two real wire formats among the supported providers:
-
-* Anthropic Messages API              -> AnthropicBackend        (type: anthropic)
-* OpenAI Chat Completions API         -> OpenAICompatBackend     (type: openai)
-    ...which vLLM and SGLang also speak, so they are thin subclasses:
-      VLLMBackend  (type: vllm)   /  SGLangBackend (type: sglang)
-    The same class also covers LM Studio, Ollama's /v1, llama.cpp, Azure, etc.
+LiteLLM (https://docs.litellm.ai/) normalizes the wire-format differences between
+Anthropic, OpenAI-compatible servers (vLLM, SGLang, LM Studio, Ollama's /v1,
+llama.cpp, Azure, Mistral, Together, ...), and Gemini, so PaperLens only needs one
+`LiteLLMBackend` regardless of provider — adding a LiteLLM-supported provider is a
+new `LLMSpec` subclass + one arm in `_litellm_provider()`, not a new backend class.
 
 Use `build_llm(spec)` to get the right backend for a config `LLMSpec`.
 """
@@ -20,9 +18,10 @@ import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
 
-from .config import AnthropicSpec, GeminiSpec, LLMSpec, OpenAISpec, SGLangSpec, VLLMSpec
+import litellm
+
+from .config import AnthropicSpec, GeminiSpec, LLMSpec, OpenAISpec
 
 # A tool the model may call. `input_schema` is a JSON Schema object.
 Tool = dict  # {"name": str, "description": str, "input_schema": dict}
@@ -69,11 +68,6 @@ class LLMBackend(ABC):
 
     def __init__(self, spec: LLMSpec):
         self.spec = spec
-        # Build the SDK client once and reuse it: each client holds an httpx
-        # connection pool (open sockets/fds), so constructing one per call leaks
-        # descriptors and eventually raises OSError [too many open files] under a
-        # high-volume caller like the eval harness (one call per section).
-        self._client_cache: Any = None
 
     @abstractmethod
     def complete(self, system: str, user: str, max_tokens: int | None = None) -> str: ...
@@ -90,106 +84,6 @@ class LLMBackend(ABC):
         max_rounds: int = 8,
         stop_check: StopCheck | None = None,
     ) -> tuple[str, Usage]: ...
-
-
-class AnthropicBackend(LLMBackend):
-    """Anthropic Messages API (tool_use / tool_result blocks, streaming)."""
-
-    def _client(self):
-        if self._client_cache is not None:
-            return self._client_cache
-        from anthropic import Anthropic
-
-        kwargs: dict = {"api_key": _api_key(self.spec)}
-        if self.spec.timeout > 0:
-            kwargs["timeout"] = self.spec.timeout
-        if self.spec.max_retries >= 0:
-            kwargs["max_retries"] = self.spec.max_retries
-        self._client_cache = Anthropic(**kwargs)
-        return self._client_cache
-
-    def complete(self, system, user, max_tokens=None):
-        msg = self._client().messages.create(
-            model=self.spec.model,
-            max_tokens=max_tokens or self.spec.max_tokens,
-            temperature=self.spec.temperature,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-        )
-        return "".join(b.text for b in msg.content if b.type == "text")
-
-    def run_tools(
-        self,
-        system,
-        messages,
-        tools,
-        execute,
-        on_text=None,
-        on_reasoning=None,
-        max_rounds=8,
-        stop_check=None,
-    ):
-        client = self._client()
-        convo = [dict(m) for m in messages]
-        final_text = ""
-        total_in = 0
-        total_out = 0
-        for _ in range(max_rounds):
-            if stop_check and stop_check():
-                return final_text, Usage(total_in, total_out)
-            text_parts: list[str] = []
-            stopped = False
-            with client.messages.stream(
-                model=self.spec.model,
-                max_tokens=self.spec.max_tokens,
-                temperature=self.spec.temperature,
-                system=system,
-                tools=tools,
-                messages=convo,
-            ) as stream:
-                for event in stream:
-                    if (
-                        event.type == "content_block_delta"
-                        and getattr(event.delta, "type", None) == "text_delta"
-                    ):
-                        text_parts.append(event.delta.text)
-                        if on_text:
-                            on_text(event.delta.text)
-                    if stop_check and stop_check():
-                        stopped = True
-                        break
-                if stopped:
-                    # Return without get_final_message() — it drains the rest of the
-                    # response, which would defeat the point of stopping early. Leaving
-                    # the `with` block below closes the stream instead. This only catches
-                    # a stop observed between chunks that actually arrived — a call stuck
-                    # producing nothing (e.g. a local model's prefill) isn't interrupted
-                    # here; `chat_turn._run_agent` is what bounds that case, by giving up
-                    # *waiting* on this call rather than depending on it to return.
-                    return "".join(text_parts), Usage(total_in, total_out)
-                msg = stream.get_final_message()
-
-            total_in += msg.usage.input_tokens
-            total_out += msg.usage.output_tokens
-            final_text = "".join(text_parts)
-            tool_uses = [b for b in msg.content if b.type == "tool_use"]
-            if not tool_uses:
-                return final_text, Usage(total_in, total_out)
-            convo.append({"role": "assistant", "content": msg.content})
-            convo.append(
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": tu.id,
-                            "content": execute(tu.name, tu.input or {}),
-                        }
-                        for tu in tool_uses
-                    ],
-                }
-            )
-        return final_text, Usage(total_in, total_out)
 
 
 _THINK_OPEN = "<think>"
@@ -254,41 +148,51 @@ class _ThinkTagStripper:
         return tail
 
 
-class OpenAICompatBackend(LLMBackend):
-    """OpenAI Chat Completions wire format.
+def _litellm_provider(spec: LLMSpec) -> str:
+    """Map an `LLMSpec` variant to its LiteLLM provider prefix."""
+    match spec:
+        case AnthropicSpec():
+            return "anthropic"
+        case GeminiSpec():
+            return "gemini"
+        case OpenAISpec():  # also covers VLLMSpec/SGLangSpec, which subclass it
+            return "openai"
+        case _:
+            raise ValueError(f"Unknown LLM spec: {type(spec).__name__}")
 
-    Works for OpenAI and any server that implements it (vLLM, SGLang, LM Studio,
-    Ollama /v1, llama.cpp, Azure, Mistral, Together, ...). Set `api_base` to point
-    at the server; local servers need no real key.
+
+class LiteLLMBackend(LLMBackend):
+    """Every provider via LiteLLM's normalized `completion()` interface.
+
+    LiteLLM speaks each provider's native wire format internally and normalizes the
+    response to one OpenAI-shaped `ModelResponse`/streamed-chunk surface, so a single
+    implementation covers Anthropic, OpenAI-compatible servers, and Gemini alike.
     """
 
-    spec: OpenAISpec  # always built from an OpenAISpec variant (api_base, ...)
+    def __init__(self, spec: LLMSpec):
+        super().__init__(spec)
+        self._model = f"{_litellm_provider(spec)}/{spec.model}"
 
-    def _client(self):
-        if self._client_cache is not None:
-            return self._client_cache
-        from openai import OpenAI
-
-        kwargs: dict = {
-            "api_key": _api_key(self.spec),
-            "base_url": self.spec.api_base or None,
-        }
+    def _kwargs(self) -> dict:
+        kwargs: dict = {"model": self._model, "api_key": _api_key(self.spec)}
+        if isinstance(self.spec, OpenAISpec) and self.spec.api_base:
+            kwargs["api_base"] = self.spec.api_base
+            kwargs["custom_llm_provider"] = "openai"
         if self.spec.timeout > 0:
             kwargs["timeout"] = self.spec.timeout
         if self.spec.max_retries >= 0:
-            kwargs["max_retries"] = self.spec.max_retries
-        self._client_cache = OpenAI(**kwargs)
-        return self._client_cache
+            kwargs["num_retries"] = self.spec.max_retries
+        return kwargs
 
     def complete(self, system, user, max_tokens=None):
-        resp = self._client().chat.completions.create(
-            model=self.spec.model,
-            max_tokens=max_tokens or self.spec.max_tokens,
-            temperature=self.spec.temperature,
+        resp = litellm.completion(
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
+            max_tokens=max_tokens or self.spec.max_tokens,
+            temperature=self.spec.temperature,
+            **self._kwargs(),
         )
         return resp.choices[0].message.content or ""
 
@@ -303,7 +207,6 @@ class OpenAICompatBackend(LLMBackend):
         max_rounds=8,
         stop_check=None,
     ):
-        client = self._client()
         oai_tools = [
             {
                 "type": "function",
@@ -327,14 +230,14 @@ class OpenAICompatBackend(LLMBackend):
         for _ in range(max_rounds):
             if stop_check and stop_check():
                 return final_text, usage()
-            stream = client.chat.completions.create(
-                model=self.spec.model,
+            stream = litellm.completion(
+                messages=convo,
+                tools=oai_tools,
                 max_tokens=self.spec.max_tokens,
                 temperature=self.spec.temperature,
-                tools=oai_tools,
-                messages=convo,
                 stream=True,
                 stream_options={"include_usage": True},
+                **self._kwargs(),
             )
             content = ""
             reasoning = ""
@@ -436,209 +339,10 @@ class OpenAICompatBackend(LLMBackend):
         return final_text, usage()
 
 
-class VLLMBackend(OpenAICompatBackend):
-    """vLLM's OpenAI-compatible server — same wire format as OpenAI."""
-
-
-class SGLangBackend(OpenAICompatBackend):
-    """SGLang's OpenAI-compatible server — same wire format as OpenAI."""
-
-
-# ---- Gemini (Google Generative Language API — its own wire format) ---------
-
-
-def _gemini_type(t: str):
-    from google.genai import types
-
-    return {
-        "string": types.Type.STRING,
-        "integer": types.Type.INTEGER,
-        "number": types.Type.NUMBER,
-        "boolean": types.Type.BOOLEAN,
-        "object": types.Type.OBJECT,
-        "array": types.Type.ARRAY,
-    }.get((t or "string").lower(), types.Type.STRING)
-
-
-def _gemini_schema(js: dict):
-    """Convert a JSON-schema fragment to a Gemini types.Schema."""
-    from google.genai import types
-
-    t = (js.get("type") or "object").lower()
-    if t == "object":
-        props = {k: _gemini_schema(v) for k, v in (js.get("properties") or {}).items()}
-        return types.Schema(
-            type=types.Type.OBJECT,
-            properties=props or None,
-            required=js.get("required") or None,
-            description=js.get("description"),
-        )
-    if t == "array":
-        return types.Schema(
-            type=types.Type.ARRAY,
-            items=_gemini_schema(js.get("items") or {"type": "string"}),
-            description=js.get("description"),
-        )
-    return types.Schema(type=_gemini_type(t), description=js.get("description"))
-
-
-def _gemini_fn(tool: Tool):
-    from google.genai import types
-
-    return types.FunctionDeclaration(
-        name=tool["name"],
-        description=tool.get("description", ""),
-        parameters=_gemini_schema(tool["input_schema"]),
-    )
-
-
-class GeminiBackend(LLMBackend):
-    """Google Gemini via the google-genai SDK.
-
-    Needs a real key in the configured api_key_env (e.g. GEMINI_API_KEY).
-    Supports function calling; on 2.5 models it exposes thinking via
-    include_thoughts, surfaced through on_reasoning.
-    """
-
-    def _client(self):
-        if self._client_cache is not None:
-            return self._client_cache
-        from google import genai
-        from google.genai import types
-
-        http_options = None
-        if self.spec.timeout > 0 or self.spec.max_retries >= 0:
-            retry_options = None
-            if self.spec.max_retries >= 0:
-                # Gemini counts total attempts; max_retries counts retries after the first.
-                retry_options = types.HttpRetryOptions(attempts=self.spec.max_retries + 1)
-            http_options = types.HttpOptions(
-                timeout=int(self.spec.timeout * 1000) if self.spec.timeout > 0 else None,
-                retry_options=retry_options,
-            )
-        self._client_cache = genai.Client(api_key=_api_key(self.spec), http_options=http_options)
-        return self._client_cache
-
-    def complete(self, system, user, max_tokens=None):
-        from google.genai import types
-
-        cfg = types.GenerateContentConfig(
-            system_instruction=system,
-            temperature=self.spec.temperature,
-            max_output_tokens=max_tokens or self.spec.max_tokens,
-        )
-        resp = self._client().models.generate_content(
-            model=self.spec.model, contents=user, config=cfg
-        )
-        return resp.text or ""
-
-    def run_tools(
-        self,
-        system,
-        messages,
-        tools,
-        execute,
-        on_text=None,
-        on_reasoning=None,
-        max_rounds=8,
-        stop_check=None,
-    ):
-        from google.genai import types
-
-        client = self._client()
-        cfg = types.GenerateContentConfig(
-            system_instruction=system,
-            temperature=self.spec.temperature,
-            max_output_tokens=self.spec.max_tokens,
-            tools=[types.Tool(function_declarations=[_gemini_fn(t) for t in tools])],
-            thinking_config=types.ThinkingConfig(include_thoughts=True),
-        )
-        contents = [
-            types.Content(
-                role="user" if m["role"] == "user" else "model",
-                parts=[types.Part(text=m["content"])],
-            )
-            for m in messages
-        ]
-        final_text = ""
-        total_in = 0
-        total_out = 0
-        for _ in range(max_rounds):
-            if stop_check and stop_check():
-                return final_text, Usage(total_in, total_out)
-            text, reasoning, calls = "", "", []
-            round_usage = None
-            stopped = False
-            for chunk in client.models.generate_content_stream(
-                model=self.spec.model, contents=contents, config=cfg
-            ):
-                if getattr(chunk, "usage_metadata", None):
-                    round_usage = chunk.usage_metadata
-                for cand in chunk.candidates or []:
-                    parts = (cand.content.parts if cand.content else None) or []
-                    for part in parts:
-                        if getattr(part, "function_call", None):
-                            calls.append(part.function_call)
-                        elif getattr(part, "thought", False) and getattr(part, "text", None):
-                            reasoning += part.text
-                        elif getattr(part, "text", None):
-                            text += part.text
-                            if on_text:
-                                on_text(part.text)
-                if stop_check and stop_check():
-                    stopped = True
-                    break
-            if reasoning and on_reasoning:
-                on_reasoning(reasoning)
-            if stopped:
-                # This only catches a stop observed between chunks that actually
-                # arrived — a call stuck producing nothing isn't interrupted here;
-                # `chat_turn._run_agent` is what bounds that case, by giving up
-                # *waiting* on this call rather than depending on it to return.
-                return text, Usage(total_in, total_out)
-            if round_usage:
-                total_in += round_usage.prompt_token_count or 0
-                # Thinking tokens are billed but reported separately from
-                # candidates_token_count (thinking_config.include_thoughts=True above).
-                total_out += (round_usage.candidates_token_count or 0) + (
-                    getattr(round_usage, "thoughts_token_count", None) or 0
-                )
-            final_text = text
-            if not calls:
-                return final_text, Usage(total_in, total_out)
-            contents.append(
-                types.Content(role="model", parts=[types.Part(function_call=fc) for fc in calls])
-            )
-            contents.append(
-                types.Content(
-                    role="user",
-                    parts=[
-                        types.Part.from_function_response(
-                            name=fc.name,
-                            response={"result": execute(fc.name, dict(fc.args or {}))},
-                        )
-                        for fc in calls
-                    ],
-                )
-            )
-        return final_text, Usage(total_in, total_out)
-
-
 def build_llm(spec: LLMSpec) -> LLMBackend:
-    """Instantiate the backend for a config LLMSpec variant."""
-    match spec:
-        case AnthropicSpec():
-            return AnthropicBackend(spec)
-        case VLLMSpec():  # before OpenAISpec: vllm/sglang subclass it
-            return VLLMBackend(spec)
-        case SGLangSpec():
-            return SGLangBackend(spec)
-        case OpenAISpec():
-            return OpenAICompatBackend(spec)
-        case GeminiSpec():
-            return GeminiBackend(spec)
-        case _:
-            raise ValueError(f"Unknown LLM spec: {type(spec).__name__}")
+    """Instantiate the LiteLLM-backed backend for a config LLMSpec variant."""
+    _litellm_provider(spec)  # eager validation — fail fast on an unknown spec, as before
+    return LiteLLMBackend(spec)
 
 
 def _selftest() -> None:

@@ -166,7 +166,7 @@ A working inventory of what PaperLens does today, organized into four sections:
 - **Single tool: `search_papers`** — `query` (required), optional `paper`; decomposes multi-part questions into several focused calls (`src/server/agent.py`)
 - **Filter-scoped system prompt** — injected paper catalog restricted to the active tag/paper filter so the model can't bypass it via the prompt prefix (`src/server/agent.py`)
 - **Ref/citation registry** — each returned passage gets a `ref` (`r1`, `r2`, ...) the model must cite; numbering continues across turns in the same chat (`src/server/agent.py`)
-- **Provider-agnostic tool-use loop** — one neutral tool schema drives every LLM backend's own wire format (`src/rag/llm.py`)
+- **Provider-agnostic tool-use loop** — one neutral tool schema, normalized to every provider's wire format by LiteLLM (`src/rag/llm.py`)
 - **Streaming reasoning/trace surfacing** — `on_text`/`on_reasoning` callbacks stream tokens and reasoning (including `<think>` tag stripping) for the live trace (`src/rag/llm.py`, `src/server/agent.py`)
 - **`retrieval.max_rounds`** — caps ReAct search/answer cycles before the agent must answer (`src/rag/config.py`)
 
@@ -231,7 +231,7 @@ A working inventory of what PaperLens does today, organized into four sections:
 
 - **Instant startup, background model warmup** — worker starts and a daemon thread eagerly builds the searcher (+ faithfulness checker if enabled) via a dummy search, so routes are servable immediately while the ~20-30s model load happens in the background; warmup failures are non-fatal (`src/server/main.py`)
 - **MPS tensor-cap guard** — `embedding.max_seq_length` caps `bge-m3`'s sequence length to avoid overflowing Metal's per-tensor limit on Apple Silicon (`src/rag/embedders.py`)
-- **Cloud clients imported lazily** — OpenAI/Gemini/Anthropic SDKs imported inside methods, not at module load (`src/rag/llm.py`, `src/rag/embedders.py`)
+- **Only `hf` and `voyage` import lazily** — `sentence_transformers`/`torch` (`hf`) and `httpx` (`voyage`) imported inside methods, not at module load; `openai`/`gemini`/`ollama` embedding and every LLM backend go through LiteLLM, a hard top-level dependency (`src/rag/embedders.py`, `src/rag/llm.py`)
 
 ### SSE streaming plumbing
 
@@ -255,9 +255,9 @@ A working inventory of what PaperLens does today, organized into four sections:
 ### ChoiceRegistry extensibility pattern
 
 - **Pattern shape** — one `@Base.register_subclass("name")` dataclass + one `match` arm in the corresponding `build_*` function; unknown `type` or stray field fails loudly at decode time, no `if/elif` dispatch (`src/rag/config.py`)
-- **Embedder backends** — `hf`, `openai`, `gemini`, `ollama` (`src/rag/embedders.py`, `src/rag/config.py`)
-- **Reranker backends** — `hf` cross-encoder, `llm` (`src/rag/reranker.py`, `src/rag/config.py`)
-- **LLM backends** — `anthropic`, `openai`/`vllm`/`sglang` (OpenAI-compatible wire format), `gemini` (`src/rag/llm.py`, `src/rag/config.py`)
+- **Embedder backends** — `hf`, `openai`, `gemini`, `voyage`, `ollama`; `openai`/`gemini`/`ollama` via LiteLLM, `voyage` called directly (LiteLLM's Voyage support drops the asymmetric `input_type` param) (`src/rag/embedders.py`, `src/rag/config.py`)
+- **Reranker backends** — `hf` cross-encoder, `llm` (chat model as judge), `voyage` (dedicated rerank API, via LiteLLM) (`src/rag/reranker.py`, `src/rag/config.py`)
+- **LLM backends** — `anthropic`, `openai`/`vllm`/`sglang` (OpenAI-compatible wire format), `gemini`; all one `LiteLLMBackend` under the hood, so a LiteLLM-supported provider is a config variant + one provider-prefix mapping, not a new backend class (`src/rag/llm.py`, `src/rag/config.py`)
 - **Sparse backend** — `bm25` today, structured for future lexical-backend additions (`src/rag/config.py`)
 - **Faithfulness backend** — `hf` today, same pattern (`src/rag/config.py`, `src/rag/faithfulness.py`)
 - **Documented add-a-backend workflow** — `docs/how-to.md#add-a-new-llm-backend`, codified as the `add-llm-backend` skill
@@ -274,7 +274,7 @@ A working inventory of what PaperLens does today, organized into four sections:
 
 ### CI pipeline
 
-- **GitHub Actions, two parallel jobs** (`python`, `web`) — `uv sync --all-extras` so `ty` resolves lazy imports and backend tests run; web job builds the frontend after its gate (`.github/workflows/ci.yaml`)
+- **GitHub Actions, two parallel jobs** (`python`, `web`) — plain `uv sync` (no extras to install); web job builds the frontend after its gate (`.github/workflows/ci.yaml`)
 
 ### Pre-commit hooks
 
@@ -286,7 +286,7 @@ A working inventory of what PaperLens does today, organized into four sections:
 - **Factory fixtures in `tests/conftest.py`** — `make_config`, `make_searcher`, `seed_chunks`, `fake_embedder` (deterministic bag-of-words hashing embedder), `fake_llm` (scripted `FakeLLM`), `fake_faithfulness_checker` (scripted verdicts) — every test runs fully offline, no network or model downloads
 - **`tests/unit/` + `tests/integration/` + `tests/data/` split**, no `__init__.py` (`--import-mode=importlib`)
 - **Coverage config** — branch coverage over `rag`, `server`, `eval` (`pyproject.toml`)
-- **Optional-extra test skipping** — `pytest.importorskip(...)` for anthropic/gemini when extras aren't installed
+- **`sentence_transformers` test skipping** — `pytest.importorskip("sentence_transformers")` for the `hf` embedder's tests (`tests/unit/test_embedders.py`); every other backend goes through LiteLLM or plain `httpx`, both hard dependencies, so nothing else needs to skip
 - **Web test setup** — jsdom environment, shared setup file (`web/vite.config.ts`, `web/src/test/setup.ts`)
 
 ### Config-driven design as a DevX feature
@@ -317,7 +317,3 @@ A working inventory of what PaperLens does today, organized into four sections:
 ### CLI entry points
 
 - **`paperlens-serve`**, **`paperlens-ingest`** (`--retag`, `--reindex`), **`paperlens-eval`** (`gen`/`run`/`screen`/`sweep`/`confirm`) — all take `--config_path` and per-field overrides (`pyproject.toml`)
-
-### Optional dependency extras
-
-- **Lazy LLM backend extras** — `anthropic`, `gemini`, `all` — only installed when needed (`pyproject.toml`)

@@ -124,6 +124,14 @@ class GeminiEmbeddingCfg(EmbeddingCfg):
     api_key_env: str = "GEMINI_API_KEY"
 
 
+@EmbeddingCfg.register_subclass("voyage")
+@dataclass
+class VoyageEmbeddingCfg(EmbeddingCfg):
+    # Anthropic doesn't offer its own embeddings API and recommends Voyage AI instead.
+    model: str = "voyage-3.5"
+    api_key_env: str = "VOYAGE_API_KEY"
+
+
 @EmbeddingCfg.register_subclass("ollama")
 @dataclass
 class OllamaEmbeddingCfg(EmbeddingCfg):
@@ -152,6 +160,15 @@ class HFRerankerCfg(RerankerCfg):
 @dataclass
 class LLMRerankerCfg(RerankerCfg):
     max_chars: int = 600  # per-passage excerpt sent to the judge LLM
+
+
+@RerankerCfg.register_subclass("voyage")
+@dataclass
+class VoyageRerankerCfg(RerankerCfg):
+    # A dedicated rerank API (via LiteLLM), not an LLM asked to emit a JSON score
+    # array like the `llm` type above.
+    model: str = "rerank-2.5"
+    api_key_env: str = "VOYAGE_API_KEY"
 
 
 # --- Sparse: opt-in lexical retrieval, fused with dense recall via RRF ---

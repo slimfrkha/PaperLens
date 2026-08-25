@@ -19,10 +19,8 @@ jobs:
         with:
           enable-cache: true
 
-      # --all-extras installs the optional LLM backends so ty resolves their lazy
-      # imports and the backend tests (anthropic/gemini) actually run.
       - name: Install
-        run: uv sync --all-extras
+        run: uv sync
 
       - name: ruff format --check
         run: uv run ruff format --check

@@ -445,8 +445,9 @@ pluggable the same way.
 - **Lazy heavy models, warmed at startup.** The cross-encoder and embedder are built once
   on first use, but the server also warms them in a background thread at startup (a tiny
   dummy search) so the first `/api/chat` doesn't pay the 20-30s load; startup itself stays
-  instant. Cloud clients are optional extras imported lazily — so an OpenAI-compatible or
-  cloud setup never pays for local model downloads it won't use.
+  instant. Cloud embedder SDKs are optional extras imported lazily — so an
+  OpenAI-compatible or cloud setup never pays for local model downloads it won't use. The
+  LLM backend goes through LiteLLM, a hard top-level dependency covering every provider.
 - **Config anchoring.** All relative paths resolve against the **project root** — the
   nearest `pyproject.toml` ancestor of the config file — so `data_path: data` lands at the
   repo root even when the config lives in `configs/`, and every entry point is

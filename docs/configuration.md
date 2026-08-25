@@ -89,24 +89,25 @@ one. (Changing the embedder alone likewise invalidates the index; see the embedd
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `type` | string | `hf` | Backend variant: `hf` · `openai` · `gemini` · `ollama`. Selects which keys below apply. |
+| `type` | string | `hf` | Backend variant: `hf` · `openai` · `gemini` · `voyage` · `ollama`. Selects which keys below apply. `openai`/`gemini`/`ollama` go through LiteLLM; `voyage` calls Voyage's API directly (LiteLLM's Voyage support drops the asymmetric `input_type` param). |
 | `model` | string | `BAAI/bge-m3` | HF model id, or the API model name for API types (common to all). |
 | `batch_size` | int | `32` | Embedding batch size (common to all). |
 | `max_seq_length` | int | `1024` | **`hf` only.** Token cap guarding the MPS `2**32` per-tensor limit on Apple Silicon. |
 | `query_prefix` | string | `""` | **`hf` only.** Prepended to each query before embedding (e.g. e5's `"query: "`, or a bge instruction string). Empty = symmetric (current default). |
 | `document_prefix` | string | `""` | **`hf` only.** Prepended to each chunk before embedding at index time (e.g. e5's `"passage: "`). Empty = symmetric. Not part of `Embedder.name()` — changing it (like `max_seq_length`) requires manually re-ingesting or using a fresh `collection` name, since old vectors in the index won't reflect the new prefix. |
 | `api_base` | string | `""` | **`openai`/`ollama` only.** Base URL (`""` → provider default). |
-| `api_key_env` | string | per type | **`openai` (`OPENAI_API_KEY`) / `gemini` (`GEMINI_API_KEY`) only.** Env var holding the key. |
+| `api_key_env` | string | per type | **`openai` (`OPENAI_API_KEY`) / `gemini` (`GEMINI_API_KEY`) / `voyage` (`VOYAGE_API_KEY`) only.** Env var holding the key. |
 
 ### 🎯 `reranker`
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `type` | string | `hf` | `hf` (local cross-encoder) or `llm` (reuses the chat model, no extra deps). |
-| `model` | string | `BAAI/bge-reranker-v2-m3` | Cross-encoder model id (`hf` type). |
+| `type` | string | `hf` | `hf` (local cross-encoder), `llm` (reuses the chat model, no extra deps), or `voyage` (dedicated rerank API, via LiteLLM). |
+| `model` | string | `BAAI/bge-reranker-v2-m3` | Cross-encoder model id (`hf` type), or the API model name (`voyage` type, default `rerank-2.5`). |
 | `enabled` | bool | `true` | Turn the whole rerank stage on/off. |
 | `max_length` | int | `512` | **`hf` only.** Cross-encoder input token cap — raise it if `chunking.max_tokens` grows, or passages get silently truncated before scoring. |
 | `max_chars` | int | `600` | **`llm` only.** Per-passage excerpt length sent to the judge LLM. |
+| `api_key_env` | string | `VOYAGE_API_KEY` | **`voyage` only.** Env var holding the key. |
 
 ### 🔀 `sparse`
 
@@ -270,6 +271,7 @@ Loaded from a local `.env` (via `python-dotenv`) or the shell.
 | `ANTHROPIC_API_KEY` | Default key env for the `anthropic` provider. |
 | `GEMINI_API_KEY` | Default key env for the `gemini` provider/embedder. |
 | `OPENAI_API_KEY` | Default key env for the `openai` embedder. |
+| `VOYAGE_API_KEY` | Default key env for the `voyage` embedder. |
 | *(custom)* | Whatever you set a spec's `api_key_env` to (e.g. `LOCAL_LLM_KEY`). |
 
 ## 💻 Commands

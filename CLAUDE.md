@@ -53,8 +53,8 @@ uv run paperlens-eval gen        # per-pool eval set + config tuning (see docs/h
 make dev CONFIG=<path>           # backend + Vite dev server together
 ```
 
-Cloud LLM backends are lazy extras: `uv sync --extra anthropic` / `--extra gemini` /
-`--all-extras`. Keys go in `.env`.
+Every LLM backend and most embedder backends go through LiteLLM — no lazy extras to
+install for any provider. Keys go in `.env`.
 
 ## 🧱 Layout
 

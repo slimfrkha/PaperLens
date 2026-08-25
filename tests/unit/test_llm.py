@@ -1,4 +1,4 @@
-"""Provider dispatch, api-key resolution, and the OpenAI tool-use loop."""
+"""Provider dispatch, api-key resolution, and the LiteLLM-backed tool-use loop."""
 
 from __future__ import annotations
 
@@ -8,30 +8,21 @@ from types import SimpleNamespace
 import pytest
 
 from rag.config import AnthropicSpec, GeminiSpec, LLMSpec, OpenAISpec, SGLangSpec, VLLMSpec
-from rag.llm import (
-    AnthropicBackend,
-    GeminiBackend,
-    OpenAICompatBackend,
-    SGLangBackend,
-    VLLMBackend,
-    _api_key,
-    _ThinkTagStripper,
-    build_llm,
-)
+from rag.llm import LiteLLMBackend, _api_key, _ThinkTagStripper, build_llm
 
 
 @pytest.mark.parametrize(
-    "spec,cls",
+    "spec",
     [
-        (OpenAISpec(api_base="http://x"), OpenAICompatBackend),
-        (VLLMSpec(api_base="http://x"), VLLMBackend),
-        (SGLangSpec(api_base="http://x"), SGLangBackend),
-        (AnthropicSpec(), AnthropicBackend),
-        (GeminiSpec(), GeminiBackend),
+        OpenAISpec(api_base="http://x"),
+        VLLMSpec(api_base="http://x"),
+        SGLangSpec(api_base="http://x"),
+        AnthropicSpec(),
+        GeminiSpec(),
     ],
 )
-def test_build_llm_dispatch(spec, cls):
-    assert isinstance(build_llm(spec), cls)
+def test_build_llm_dispatch(spec):
+    assert isinstance(build_llm(spec), LiteLLMBackend)
 
 
 def test_build_llm_unknown_spec_raises():
@@ -58,11 +49,61 @@ def test_api_key_reads_env(monkeypatch):
     assert _api_key(AnthropicSpec(api_key_env="MY_KEY")) == "secret"
 
 
-# ---- OpenAI tool-use loop against a fake streaming client -------------------
+# ---- model-string / completion() kwargs construction -------------------------
 
 
-def _chunk(*, content=None, tool_call=None):
-    delta = SimpleNamespace(content=content, tool_calls=tool_call, reasoning_content=None)
+@pytest.mark.parametrize(
+    "spec,expected_model",
+    [
+        (AnthropicSpec(model="claude-x"), "anthropic/claude-x"),
+        (OpenAISpec(model="gpt-x"), "openai/gpt-x"),
+        (VLLMSpec(model="local-x", api_base="http://x"), "openai/local-x"),
+        (SGLangSpec(model="local-y", api_base="http://x"), "openai/local-y"),
+        (GeminiSpec(model="gemini-x"), "gemini/gemini-x"),
+    ],
+)
+def test_model_string_per_spec_variant(spec, expected_model):
+    # VLLMSpec/SGLangSpec route through the same "openai" LiteLLM provider prefix
+    # as OpenAISpec — they're OpenAI-wire-format servers, just a different registry key.
+    assert LiteLLMBackend(spec)._model == expected_model
+
+
+def test_kwargs_local_server_sets_api_base_and_custom_provider():
+    spec = OpenAISpec(api_base="http://localhost:1234/v1", api_key_env="UNUSED_KEY")
+    kwargs = LiteLLMBackend(spec)._kwargs()
+    assert kwargs["api_base"] == "http://localhost:1234/v1"
+    assert kwargs["custom_llm_provider"] == "openai"
+    assert kwargs["api_key"] == "local-no-key"
+
+
+def test_kwargs_omits_api_base_for_cloud_provider(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    kwargs = LiteLLMBackend(AnthropicSpec())._kwargs()
+    assert "api_base" not in kwargs
+    assert "custom_llm_provider" not in kwargs
+
+
+def test_kwargs_includes_timeout_and_num_retries_when_set(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    kwargs = LiteLLMBackend(AnthropicSpec(timeout=30.0, max_retries=5))._kwargs()
+    assert kwargs["timeout"] == 30.0
+    assert kwargs["num_retries"] == 5
+
+
+def test_kwargs_omits_timeout_and_num_retries_when_sentinel(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    kwargs = LiteLLMBackend(AnthropicSpec())._kwargs()
+    assert "timeout" not in kwargs
+    assert "num_retries" not in kwargs
+
+
+# ---- run_tools loop against a fake litellm.completion() ----------------------
+
+
+def _chunk(*, content=None, tool_call=None, reasoning_content=None):
+    delta = SimpleNamespace(
+        content=content, tool_calls=tool_call, reasoning_content=reasoning_content
+    )
     return SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
 
 
@@ -71,29 +112,40 @@ def _tool_call(index, cid, name, args):
     return [SimpleNamespace(index=index, id=cid, function=fn)]
 
 
-class _FakeCompletions:
-    """Two rounds: first streams a tool call, then streams the final answer."""
+def _usage_chunk(prompt_tokens, completion_tokens):
+    # The usage-only terminal chunk sent when `stream_options.include_usage` is
+    # honored: no choices, just a cumulative-for-that-call usage object.
+    usage = SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
+    return SimpleNamespace(choices=[], usage=usage)
 
-    def __init__(self):
+
+class _FakeCompletionSeq:
+    """Fake `litellm.completion`: one chunk-list per round, records each call's kwargs."""
+
+    def __init__(self, rounds):
+        self._rounds = list(rounds)
         self.calls = 0
+        self.kwargs_seen: list[dict] = []
 
-    def create(self, **kwargs):
+    def __call__(self, **kwargs):
+        self.kwargs_seen.append(kwargs)
         self.calls += 1
-        if self.calls == 1:
-            return iter(
-                [_chunk(tool_call=_tool_call(0, "call_1", "search_papers", '{"query": "mla"}'))]
-            )
-        return iter([_chunk(content="MLA shrinks the KV cache [r1].")])
+        return iter(self._rounds[self.calls - 1])
 
 
-class _FakeClient:
-    def __init__(self):
-        self.chat = SimpleNamespace(completions=_FakeCompletions())
+def _backend(monkeypatch, fake):
+    monkeypatch.setattr("rag.llm.litellm.completion", fake)
+    return LiteLLMBackend(OpenAISpec(api_base="http://x"))
 
 
-def test_openai_run_tools_executes_then_answers(monkeypatch):
-    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
-    monkeypatch.setattr(backend, "_client", lambda: _FakeClient())
+def test_run_tools_executes_then_answers(monkeypatch):
+    fake = _FakeCompletionSeq(
+        [
+            [_chunk(tool_call=_tool_call(0, "call_1", "search_papers", '{"query": "mla"}'))],
+            [_chunk(content="MLA shrinks the KV cache [r1].")],
+        ]
+    )
+    backend = _backend(monkeypatch, fake)
 
     executed = []
     texts = []
@@ -115,15 +167,8 @@ def test_openai_run_tools_executes_then_answers(monkeypatch):
     assert "".join(texts) == out
 
 
-def _usage_chunk(prompt_tokens, completion_tokens):
-    # The usage-only terminal chunk sent when `stream_options.include_usage` is
-    # honored: no choices, just a cumulative-for-that-call usage object.
-    usage = SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
-    return SimpleNamespace(choices=[], usage=usage)
-
-
-def test_openai_run_tools_sums_usage_across_rounds(monkeypatch):
-    client = _FakeClientSeq(
+def test_run_tools_sums_usage_across_rounds(monkeypatch):
+    fake = _FakeCompletionSeq(
         [
             [
                 _chunk(tool_call=_tool_call(0, "call_1", "search_papers", '{"query": "mla"}')),
@@ -135,8 +180,7 @@ def test_openai_run_tools_sums_usage_across_rounds(monkeypatch):
             ],
         ]
     )
-    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
-    monkeypatch.setattr(backend, "_client", lambda: client)
+    backend = _backend(monkeypatch, fake)
 
     out, usage = backend.run_tools(
         system="sys",
@@ -150,17 +194,16 @@ def test_openai_run_tools_sums_usage_across_rounds(monkeypatch):
     assert usage.output_tokens == 10 + 20
 
 
-def test_openai_run_tools_usage_unknown_when_any_round_omits_it(monkeypatch):
+def test_run_tools_usage_unknown_when_any_round_omits_it(monkeypatch):
     # A local server that ignores stream_options never sends the usage chunk —
     # report the whole call's usage as unknown rather than under-counting.
-    client = _FakeClientSeq(
+    fake = _FakeCompletionSeq(
         [
             [_chunk(tool_call=_tool_call(0, "call_1", "search_papers", '{"query": "mla"}'))],
             [_chunk(content="Final answer [r1]."), _usage_chunk(150, 20)],
         ]
     )
-    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
-    monkeypatch.setattr(backend, "_client", lambda: client)
+    backend = _backend(monkeypatch, fake)
 
     _out, usage = backend.run_tools(
         system="sys",
@@ -173,16 +216,15 @@ def test_openai_run_tools_usage_unknown_when_any_round_omits_it(monkeypatch):
     assert usage.output_tokens is None
 
 
-def test_openai_run_tools_stops_at_max_rounds_without_a_final_answer(monkeypatch):
+def test_run_tools_stops_at_max_rounds_without_a_final_answer(monkeypatch):
     # If the LLM keeps calling tools every round (a stuck ReAct loop, or a misbehaving
     # client), the loop must not spin forever — it should stop after exactly `max_rounds`
     # rounds and return whatever text the last round produced, not raise or keep querying.
     def tool_only_round():
         return [_chunk(tool_call=_tool_call(0, "call_1", "search_papers", '{"query": "mla"}'))]
 
-    client = _FakeClientSeq([tool_only_round() for _ in range(3)])
-    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
-    monkeypatch.setattr(backend, "_client", lambda: client)
+    fake = _FakeCompletionSeq([tool_only_round() for _ in range(3)])
+    backend = _backend(monkeypatch, fake)
 
     executed = []
     out, _usage = backend.run_tools(
@@ -193,22 +235,72 @@ def test_openai_run_tools_stops_at_max_rounds_without_a_final_answer(monkeypatch
         max_rounds=3,
     )
 
-    assert client.completions.calls == 3  # queried exactly max_rounds times, not more
+    assert fake.calls == 3  # queried exactly max_rounds times, not more
     assert len(executed) == 3  # every round's tool call still ran
     assert out == ""  # no round ever produced visible text — nothing to fabricate as an answer
+
+
+# ---- malformed tool-call JSON: now one guarded site for every provider ------
+
+
+def test_run_tools_malformed_tool_call_json_falls_back_to_empty_args(monkeypatch):
+    # Every provider's tool-call arguments arrive through the same normalized
+    # `delta.function.arguments` string now, so one guard covers all of them —
+    # this used to only exist for the OpenAI-compat backend.
+    fake = _FakeCompletionSeq(
+        [
+            [_chunk(tool_call=_tool_call(0, "call_1", "search_papers", "not json"))],
+            [_chunk(content="done")],
+        ]
+    )
+    backend = _backend(monkeypatch, fake)
+
+    executed = []
+    out, _usage = backend.run_tools(
+        system="sys",
+        messages=[{"role": "user", "content": "q"}],
+        tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
+        execute=lambda name, args: executed.append((name, args)) or "ok",
+    )
+
+    assert executed == [("search_papers", {})]
+    assert out == "done"
+
+
+def test_run_tools_empty_tool_call_arguments_call_with_no_args(monkeypatch):
+    # BerriAI/litellm#5063: a zero-arg tool call under stream=True can send
+    # "arguments": "" instead of "{}" — must resolve to {}, same as malformed JSON,
+    # not raise, since a zero-arg tool's correct call is `{}`.
+    fake = _FakeCompletionSeq(
+        [
+            [_chunk(tool_call=_tool_call(0, "call_1", "ping", ""))],
+            [_chunk(content="done")],
+        ]
+    )
+    backend = _backend(monkeypatch, fake)
+
+    executed = []
+    out, _usage = backend.run_tools(
+        system="sys",
+        messages=[{"role": "user", "content": "q"}],
+        tools=[{"name": "ping", "description": "d", "input_schema": {"type": "object"}}],
+        execute=lambda name, args: executed.append((name, args)) or "ok",
+    )
+
+    assert executed == [("ping", {})]
+    assert out == "done"
 
 
 # ---- stop_check: interrupt a streaming turn early (chat "stop" button) ------
 
 
-def test_openai_run_tools_stop_check_cuts_the_stream_short(monkeypatch):
+def test_run_tools_stop_check_cuts_the_stream_short(monkeypatch):
     # A stop mid-round returns whatever text streamed before the check fired, and never
     # processes the chunks after it.
-    client = _FakeClientSeq(
+    fake = _FakeCompletionSeq(
         [[_chunk(content="Hello "), _chunk(content="world"), _chunk(content="!")]]
     )
-    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
-    monkeypatch.setattr(backend, "_client", lambda: client)
+    backend = _backend(monkeypatch, fake)
 
     seen = {"n": 0}
 
@@ -230,17 +322,16 @@ def test_openai_run_tools_stop_check_cuts_the_stream_short(monkeypatch):
     assert texts == ["Hello "]
 
 
-def test_openai_run_tools_stop_check_skips_the_next_round(monkeypatch):
+def test_run_tools_stop_check_skips_the_next_round(monkeypatch):
     # A stop that fires after a tool-call round finishes must not start another round,
     # even though the model would keep going.
-    client = _FakeClientSeq(
+    fake = _FakeCompletionSeq(
         [
             [_chunk(tool_call=_tool_call(0, "call_1", "search_papers", '{"query": "mla"}'))],
             [_chunk(content="unreachable")],
         ]
     )
-    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
-    monkeypatch.setattr(backend, "_client", lambda: client)
+    backend = _backend(monkeypatch, fake)
 
     # A real Event, not a call-counting fake — is_set() is idempotent, so it doesn't
     # matter exactly how many times (or when within a round) run_tools happens to poll
@@ -262,104 +353,8 @@ def test_openai_run_tools_stop_check_skips_the_next_round(monkeypatch):
     )
 
     assert executed == [("search_papers", {"query": "mla"})]  # round 1's tool call still ran
-    assert client.completions.calls == 1  # round 2 never fired
+    assert fake.calls == 1  # round 2 never fired
     assert out == ""  # round 1 produced no visible text
-
-
-def test_anthropic_run_tools_stop_check_cuts_the_stream_short(monkeypatch):
-    # Stopping mid-stream must not call get_final_message() — it would block until the
-    # rest of the (now-abandoned) response finishes, defeating the point of stopping.
-    class _Delta:
-        def __init__(self, text):
-            self.type = "text_delta"
-            self.text = text
-
-    class _Event:
-        def __init__(self, text):
-            self.type = "content_block_delta"
-            self.delta = _Delta(text)
-
-    class _Stream:
-        def __init__(self, events):
-            self._events = events
-
-        def __iter__(self):
-            return iter(self._events)
-
-        def get_final_message(self):
-            raise AssertionError("get_final_message() must not be called when stopped early")
-
-    class _StreamCM:
-        def __enter__(self):
-            return _Stream([_Event("Hello "), _Event("world"), _Event("!")])
-
-        def __exit__(self, *exc):
-            return False
-
-    class _Messages:
-        def stream(self, **kwargs):
-            return _StreamCM()
-
-    class _Client:
-        messages = _Messages()
-
-    backend = AnthropicBackend(AnthropicSpec())
-    monkeypatch.setattr(backend, "_client", lambda: _Client())
-
-    seen = {"n": 0}
-
-    def stop_check():
-        seen["n"] += 1
-        return seen["n"] > 1  # let the round start, stop right after the first delta
-
-    texts = []
-    out, _usage = backend.run_tools(
-        system="sys",
-        messages=[{"role": "user", "content": "hi"}],
-        tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
-        execute=lambda name, args: "result",
-        on_text=texts.append,
-        stop_check=stop_check,
-    )
-
-    assert out == "Hello "
-    assert texts == ["Hello "]
-
-
-def test_gemini_run_tools_stop_check_cuts_the_stream_short(monkeypatch):
-    pytest.importorskip("google.genai")
-    monkeypatch.setenv("GEMINI_API_KEY", "k")
-
-    def _text_chunk(text):
-        part = SimpleNamespace(function_call=None, thought=False, text=text)
-        candidate = SimpleNamespace(content=SimpleNamespace(parts=[part]))
-        return SimpleNamespace(candidates=[candidate], usage_metadata=None)
-
-    class _FakeModels:
-        def generate_content_stream(self, **kwargs):
-            return iter([_text_chunk("Hello "), _text_chunk("world"), _text_chunk("!")])
-
-    backend = GeminiBackend(GeminiSpec())
-    monkeypatch.setattr(backend, "_client", lambda: SimpleNamespace(models=_FakeModels()))
-
-    seen = {"n": 0}
-
-    def stop_check():
-        seen["n"] += 1
-        return seen["n"] > 1  # let the round start, stop right after the first chunk
-
-    texts = []
-    out, _usage = backend.run_tools(
-        system="sys",
-        messages=[{"role": "user", "content": "q"}],
-        tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
-        execute=lambda name, args: "result",
-        on_text=texts.append,
-        stop_check=stop_check,
-    )
-
-    assert out == "Hello "
-    assert texts == ["Hello "]
 
 
 # ---- _ThinkTagStripper: direct unit tests (no fake LLM client needed) -------
@@ -398,36 +393,14 @@ def test_think_tag_stripper_finish_folds_unterminated_tail_into_reasoning():
     assert f.reasoning == "lost"
 
 
-# ---- inline <think> tag stripping (OpenAI-compatible streaming) -------------
-
-
-class _FakeCompletionsSeq:
-    """Fake streaming client yielding a fixed sequence of chunk-lists, one list per
-    `create()` call (round), and recording the `messages` kwarg of each call."""
-
-    def __init__(self, rounds):
-        self._rounds = list(rounds)
-        self.calls = 0
-        self.messages_seen: list = []
-
-    def create(self, **kwargs):
-        self.messages_seen.append(kwargs.get("messages"))
-        self.calls += 1
-        return iter(self._rounds[self.calls - 1])
-
-
-class _FakeClientSeq:
-    def __init__(self, rounds):
-        self.completions = _FakeCompletionsSeq(rounds)
-        self.chat = SimpleNamespace(completions=self.completions)
+# ---- inline <think> tag stripping (LiteLLM streaming) -------------------------
 
 
 def test_think_tag_in_one_chunk(monkeypatch):
-    client = _FakeClientSeq(
+    fake = _FakeCompletionSeq(
         [[_chunk(content="<think>should check X</think>The answer is 42 [r1].")]]
     )
-    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
-    monkeypatch.setattr(backend, "_client", lambda: client)
+    backend = _backend(monkeypatch, fake)
     texts, reasonings = [], []
     out, _usage = backend.run_tools(
         system="sys",
@@ -443,7 +416,7 @@ def test_think_tag_in_one_chunk(monkeypatch):
 
 
 def test_think_tag_split_across_chunks(monkeypatch):
-    client = _FakeClientSeq(
+    fake = _FakeCompletionSeq(
         [
             [
                 _chunk(content="<th"),
@@ -453,8 +426,7 @@ def test_think_tag_split_across_chunks(monkeypatch):
             ]
         ]
     )
-    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
-    monkeypatch.setattr(backend, "_client", lambda: client)
+    backend = _backend(monkeypatch, fake)
     texts, reasonings = [], []
     out, _usage = backend.run_tools(
         system="sys",
@@ -473,9 +445,8 @@ def test_think_tag_split_across_chunks(monkeypatch):
 
 
 def test_think_tag_unterminated_at_stream_end(monkeypatch):
-    client = _FakeClientSeq([[_chunk(content="<think>lost reasoning")]])
-    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
-    monkeypatch.setattr(backend, "_client", lambda: client)
+    fake = _FakeCompletionSeq([[_chunk(content="<think>lost reasoning")]])
+    backend = _backend(monkeypatch, fake)
     texts, reasonings = [], []
     out, _usage = backend.run_tools(
         system="sys",
@@ -493,9 +464,8 @@ def test_think_tag_unterminated_at_stream_end(monkeypatch):
 
 
 def test_think_tag_mixed_text_before_and_after(monkeypatch):
-    client = _FakeClientSeq([[_chunk(content="Intro. <think>plan</think> Conclusion [r1].")]])
-    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
-    monkeypatch.setattr(backend, "_client", lambda: client)
+    fake = _FakeCompletionSeq([[_chunk(content="Intro. <think>plan</think> Conclusion [r1].")]])
+    backend = _backend(monkeypatch, fake)
     texts, reasonings = [], []
     out, _usage = backend.run_tools(
         system="sys",
@@ -510,9 +480,8 @@ def test_think_tag_mixed_text_before_and_after(monkeypatch):
 
 
 def test_no_think_tags_stray_angle_brackets_unaffected(monkeypatch):
-    client = _FakeClientSeq([[_chunk(content="Value < 5 and > 3 [r1].")]])
-    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
-    monkeypatch.setattr(backend, "_client", lambda: client)
+    fake = _FakeCompletionSeq([[_chunk(content="Value < 5 and > 3 [r1].")]])
+    backend = _backend(monkeypatch, fake)
     texts, reasonings = [], []
     out, _usage = backend.run_tools(
         system="sys",
@@ -527,7 +496,7 @@ def test_no_think_tags_stray_angle_brackets_unaffected(monkeypatch):
 
 
 def test_think_tag_in_tool_call_round_not_leaked_into_convo(monkeypatch):
-    client = _FakeClientSeq(
+    fake = _FakeCompletionSeq(
         [
             [
                 _chunk(content="<think>deciding to search</think>"),
@@ -536,8 +505,7 @@ def test_think_tag_in_tool_call_round_not_leaked_into_convo(monkeypatch):
             [_chunk(content="Final answer [r1].")],
         ]
     )
-    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
-    monkeypatch.setattr(backend, "_client", lambda: client)
+    backend = _backend(monkeypatch, fake)
     executed = []
     texts, reasonings = [], []
 
@@ -558,158 +526,35 @@ def test_think_tag_in_tool_call_round_not_leaked_into_convo(monkeypatch):
     assert out == "Final answer [r1]."
     assert reasonings == ["deciding to search"]
 
-    second_call_messages = client.completions.messages_seen[1]
+    second_call_messages = fake.kwargs_seen[1]["messages"]
     assistant_msgs = [m for m in second_call_messages if m.get("role") == "assistant"]
     assert len(assistant_msgs) == 1
     assert assistant_msgs[0]["content"] == "THINK_TAG"
 
 
-def test_anthropic_client_built_lazily(monkeypatch):
-    # Only runs when the optional `anthropic` extra is installed.
-    pytest.importorskip("anthropic")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-    client = AnthropicBackend(AnthropicSpec())._client()
-    assert client is not None
+# ---- reasoning_content: structured reasoning, not just inline <think> -------
 
 
-def test_gemini_client_built_lazily(monkeypatch):
-    # Only runs when the optional `gemini` extra is installed.
-    pytest.importorskip("google.genai")
-    monkeypatch.setenv("GEMINI_API_KEY", "k")
-    client = GeminiBackend(GeminiSpec())._client()
-    assert client is not None
-
-
-def test_gemini_run_tools_folds_thinking_tokens_into_output(monkeypatch):
-    # thinking_config.include_thoughts=True (always on) bills thinking tokens
-    # separately from candidates_token_count — they must still land in output_tokens,
-    # or the one backend with visible chain-of-thought would under-report the most.
-    pytest.importorskip("google.genai")
-    monkeypatch.setenv("GEMINI_API_KEY", "k")
-
-    part = SimpleNamespace(function_call=None, thought=False, text="42.")
-    candidate = SimpleNamespace(content=SimpleNamespace(parts=[part]))
-    usage_metadata = SimpleNamespace(
-        prompt_token_count=100, candidates_token_count=5, thoughts_token_count=40
+def test_reasoning_content_field_is_forwarded_to_on_reasoning(monkeypatch):
+    # LiteLLM normalizes structured chain-of-thought (from any provider that has it)
+    # into `delta.reasoning_content` — separate from the inline-<think>-tag path above,
+    # which only matters for models that don't use the structured field.
+    fake = _FakeCompletionSeq(
+        [
+            [
+                _chunk(reasoning_content="thinking it through"),
+                _chunk(content="42."),
+            ]
+        ]
     )
-    chunk = SimpleNamespace(candidates=[candidate], usage_metadata=usage_metadata)
-
-    class _FakeModels:
-        def generate_content_stream(self, **kwargs):
-            return iter([chunk])
-
-    backend = GeminiBackend(GeminiSpec())
-    monkeypatch.setattr(backend, "_client", lambda: SimpleNamespace(models=_FakeModels()))
-
-    _text, usage = backend.run_tools(
+    backend = _backend(monkeypatch, fake)
+    reasonings = []
+    out, _usage = backend.run_tools(
         system="sys",
         messages=[{"role": "user", "content": "q"}],
         tools=[{"name": "search_papers", "description": "d", "input_schema": {"type": "object"}}],
         execute=lambda name, args: "result",
+        on_reasoning=reasonings.append,
     )
-
-    assert usage.input_tokens == 100
-    assert usage.output_tokens == 5 + 40
-
-
-def test_client_built_once_and_reused(monkeypatch):
-    # Regression: a fresh SDK client per call leaks httpx sockets/fds and blows the
-    # open-file limit under a high-volume caller (eval harness: one call per section).
-    pytest.importorskip("anthropic")
-    import anthropic
-
-    builds = {"n": 0}
-
-    def _fake(**kw):
-        builds["n"] += 1
-        return SimpleNamespace(kw=kw)
-
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-    monkeypatch.setattr(anthropic, "Anthropic", _fake)
-
-    backend = AnthropicBackend(AnthropicSpec())
-    first = backend._client()
-    for _ in range(20):
-        backend._client()
-    assert builds["n"] == 1  # built once, not 21 times
-    assert backend._client() is first
-
-
-def test_openai_client_built_once_and_reused(monkeypatch):
-    # The path the eval harness actually exercised (local OpenAI-compatible server).
-    pytest.importorskip("openai")
-    import openai
-
-    builds = {"n": 0}
-
-    def _fake(**kw):
-        builds["n"] += 1
-        return SimpleNamespace(kw=kw)
-
-    monkeypatch.setattr(openai, "OpenAI", _fake)
-
-    backend = OpenAICompatBackend(OpenAISpec(api_base="http://x"))
-    first = backend._client()
-    for _ in range(20):
-        backend._client()
-    assert builds["n"] == 1
-    assert backend._client() is first
-
-
-# ---- timeout / max_retries: 0 / -1 sentinels omit the kwarg (SDK default) ---
-
-
-def test_anthropic_client_honors_timeout_and_retries(monkeypatch):
-    pytest.importorskip("anthropic")
-    import anthropic
-
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-    captured: dict = {}
-    monkeypatch.setattr(anthropic, "Anthropic", lambda **kw: captured.update(kw))
-    AnthropicBackend(AnthropicSpec(timeout=30.0, max_retries=5))._client()
-    assert captured["timeout"] == 30.0
-    assert captured["max_retries"] == 5
-
-
-def test_anthropic_client_omits_unset_timeout_and_retries(monkeypatch):
-    pytest.importorskip("anthropic")
-    import anthropic
-
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-    captured: dict = {}
-    monkeypatch.setattr(anthropic, "Anthropic", lambda **kw: captured.update(kw))
-    AnthropicBackend(AnthropicSpec())._client()
-    assert "timeout" not in captured
-    assert "max_retries" not in captured
-
-
-def test_openai_client_honors_timeout_and_retries(monkeypatch):
-    pytest.importorskip("openai")
-    import openai
-
-    captured: dict = {}
-    monkeypatch.setattr(openai, "OpenAI", lambda **kw: captured.update(kw))
-    OpenAICompatBackend(OpenAISpec(api_base="http://x", timeout=10.0, max_retries=1))._client()
-    assert captured["timeout"] == 10.0
-    assert captured["max_retries"] == 1
-
-
-def test_gemini_client_converts_timeout_to_ms_and_sets_retry(monkeypatch):
-    genai = pytest.importorskip("google.genai")
-    monkeypatch.setenv("GEMINI_API_KEY", "k")
-    captured: dict = {}
-    monkeypatch.setattr(genai, "Client", lambda **kw: captured.update(kw))
-    GeminiBackend(GeminiSpec(timeout=2.5, max_retries=3))._client()
-    http_options = captured["http_options"]
-    assert http_options.timeout == 2500
-    # Gemini's `attempts` is total attempts; max_retries=3 means 1 + 3 = 4.
-    assert http_options.retry_options.attempts == 4
-
-
-def test_gemini_zero_retries_still_makes_one_attempt(monkeypatch):
-    genai = pytest.importorskip("google.genai")
-    monkeypatch.setenv("GEMINI_API_KEY", "k")
-    captured: dict = {}
-    monkeypatch.setattr(genai, "Client", lambda **kw: captured.update(kw))
-    GeminiBackend(GeminiSpec(max_retries=0))._client()
-    assert captured["http_options"].retry_options.attempts == 1
+    assert out == "42."
+    assert reasonings == ["thinking it through"]

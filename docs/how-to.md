@@ -209,10 +209,6 @@ model **must support tool/function calling**.
 
 ☁️ **A cloud provider (Anthropic):**
 
-```bash
-uv sync --extra anthropic   # installs the anthropic client (lazy extra)
-```
-
 ```yaml
 llm:
   chat:
@@ -221,8 +217,9 @@ llm:
     api_key_env: ANTHROPIC_API_KEY
 ```
 
-Put the key in `.env`: `ANTHROPIC_API_KEY=sk-...`. Use `uv sync --extra gemini` and
-`type: gemini` (key `GEMINI_API_KEY`) for Google.
+Put the key in `.env`: `ANTHROPIC_API_KEY=sk-...`. Use `type: gemini` (key
+`GEMINI_API_KEY`) for Google — every provider goes through LiteLLM, so there's no
+extra to install either way.
 
 🏠 **Any OpenAI-compatible server** (LM Studio, Ollama `/v1`, vLLM, SGLang, llama.cpp):
 
@@ -242,8 +239,8 @@ cites. If it never calls the tool, the served model likely lacks tool-calling su
 
 ## Switch the embedder
 
-Set `embedding.type` in your config to `hf`, `openai`, `gemini`, or `ollama`, and set
-`model` (plus `api_base`/`api_key_env` for API types). Examples:
+Set `embedding.type` in your config to `hf`, `openai`, `gemini`, `voyage`, or `ollama`,
+and set `model` (plus `api_base`/`api_key_env` for API types). Examples:
 
 ```yaml
 embedding:
@@ -256,7 +253,14 @@ embedding:
 embedding:
   type: gemini
   model: text-embedding-004
-  api_key_env: GEMINI_API_KEY   # uv sync --extra gemini
+  api_key_env: GEMINI_API_KEY
+```
+
+```yaml
+embedding:
+  type: voyage       # Anthropic's recommended embedding partner — no embeddings API of its own
+  model: voyage-3.5
+  api_key_env: VOYAGE_API_KEY
 ```
 
 > ⚠️ **Changing the embedder changes the vectors.** The embedder name is baked into the Chroma
@@ -282,12 +286,25 @@ The `llm` reranker reuses `llm.chat`. ✅ Verify: search still returns results; 
 scoring response can't be parsed, it degrades to the dense-retrieval order rather than
 erroring.
 
+A dedicated rerank API is usually a better fit than `llm` — purpose-built for this instead
+of a prompt-and-parse workaround:
+
+```yaml
+reranker:
+  type: voyage
+  enabled: true
+  model: rerank-2.5       # default
+  api_key_env: VOYAGE_API_KEY
+```
+
 ---
 
 ## Add a new LLM backend
 
-Backends are selected through a `draccus.ChoiceRegistry` 🗂️ — one config variant + one
-concrete backend + one `match` arm.
+Every provider goes through one `LiteLLMBackend`, backed by
+[LiteLLM](https://docs.litellm.ai/)'s multi-provider `completion()` — adding a
+LiteLLM-supported provider (Bedrock, Vertex, Cohere, ...) is a config variant + one
+`_litellm_provider()` arm, not a new backend class:
 
 1. In `src/rag/config.py`, register an `LLMSpec` variant carrying that provider's fields:
 
@@ -298,36 +315,34 @@ concrete backend + one `match` arm.
        api_base: str = ""          # only the keys this provider needs
    ```
 
-2. In `src/rag/llm.py`, subclass `LLMBackend` and add a `build_llm` arm:
+2. In `src/rag/llm.py`, add one arm to `_litellm_provider()` mapping the spec to
+   LiteLLM's provider prefix (the `provider` half of its `"provider/model"` model
+   string — see [LiteLLM's provider docs](https://docs.litellm.ai/docs/providers)):
 
    ```python
-   class MyBackend(LLMBackend):
-       def __init__(self, spec: LLMSpec): ...
-       def complete(self, system: str, user: str, *, max_tokens: int) -> str: ...
-       def run_tools(
-           self, *, system, messages, tools, execute, on_text, on_reasoning
-       ) -> tuple[str, Usage]: ...
-
-   # in build_llm(spec):
-   #     case MySpec(): return MyBackend(spec)
+   # in _litellm_provider(spec):
+   #     case MySpec(): return "myprovider"
    ```
 
-   Match the method signatures of the existing backends (`AnthropicBackend`,
-   `OpenAICompatBackend`). `run_tools` returns `(text, Usage)` — sum token usage
-   across every ReAct round before returning; `Usage(None, None)` if the provider
-   never reports usage. If the provider speaks the OpenAI wire format, subclass
-   `OpenAISpec` / `OpenAICompatBackend` instead (see `VLLMSpec` / `VLLMBackend`).
+   If the provider speaks the OpenAI wire format already, subclass `OpenAISpec`
+   instead (see `VLLMSpec`/`SGLangSpec`) — it already routes through
+   `_litellm_provider`'s `OpenAISpec()` arm, no new arm needed.
 
 3. Set `type: myprovider` in a config LLM spec. `build_llm` dispatches on the variant.
 
-4. ✅ Verify: add a unit test alongside `tests/unit/test_llm.py` (use the `fake_llm` pattern
-   where possible). Run the [gate](../CONTRIBUTING.md).
+4. ✅ Verify: add a unit test alongside `tests/unit/test_llm.py` (mock
+   `litellm.completion` — see the existing `_FakeCompletionSeq` pattern there). Run the
+   [gate](../CONTRIBUTING.md).
 
 ---
 
 ## Add a new embedder backend
 
-Same ChoiceRegistry pattern across `config.py` + `embedders.py`:
+Same ChoiceRegistry pattern across `config.py` + `embedders.py`. If the provider is one
+LiteLLM already supports and doesn't need a provider-only param LiteLLM drops (see the
+Voyage caveat below), route through `litellm.embedding()` like `OpenAIEmbedder`/
+`GeminiEmbedder`/`OllamaEmbedder` do — otherwise call the API directly, like
+`VoyageEmbedder`.
 
 1. In `src/rag/config.py`, register an `EmbeddingCfg` variant with the fields it needs:
 
@@ -350,7 +365,12 @@ Same ChoiceRegistry pattern across `config.py` + `embedders.py`:
    ```
 
    Implement `embed_query` too if queries embed differently from documents (see the Gemini
-   embedder).
+   embedder). Before wiring a provider through `litellm.embedding()`, check its
+   `map_openai_params` in the installed litellm's source for any param (like Gemini/Voyage's
+   asymmetric `input_type`) your embedder needs — some providers only forward
+   OpenAI-standard params (`dimensions`/`encoding_format`/`user`), silently dropping
+   provider-specific ones. If it would drop a param you need, call the API directly instead
+   (see `VoyageEmbedder`).
 
 3. Set `embedding.type: myembedder`. `build_embedder` dispatches on the variant.
 

@@ -15,7 +15,7 @@ dependencies = [
     "chromadb>=1.5",
     "sentence-transformers>=3.0",   # default `hf` embedder + reranker
     "rank-bm25>=0.2",       # sparse (BM25) retrieval for hybrid dense+sparse search
-    "openai>=1.0",          # OpenAI-compatible embedding + LLM backend
+    "litellm>=1.98",        # multi-provider LLM + embedding backend (rag/llm.py, rag/embedders.py); pulls in openai transitively
     "tiktoken>=0.7",
     # App backend (FastAPI server + ingestion worker)
     "fastapi>=0.115",
@@ -29,12 +29,6 @@ dependencies = [
     "omegaconf>=2.3",       # ${...} interpolation in config.yaml
     "tqdm>=4.68.3",
 ]
-
-[project.optional-dependencies]
-# Lazy LLM backends — only installed when that provider is used.
-anthropic = ["anthropic>=0.40"]   # anthropic LLM backend
-gemini = ["google-genai>=1.0"]    # gemini LLM backend
-all = ["paperlens[anthropic,gemini]"]
 
 [project.scripts]
 paperlens-serve = "server.main:main"

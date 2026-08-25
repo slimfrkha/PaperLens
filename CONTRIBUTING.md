@@ -12,9 +12,8 @@ npm --prefix web install      # frontend deps
 uv run pre-commit install     # fast auto-fixing hooks on every commit (see below)
 ```
 
-Optional cloud LLM backends install as extras: `uv sync --extra anthropic`,
-`uv sync --extra gemini`, or `uv sync --all-extras`. Run everything through uv
-(`uv run <cmd>`) or activate `.venv`.
+Every LLM backend goes through LiteLLM — no extras to install for any provider. Run
+everything through uv (`uv run <cmd>`) or activate `.venv`.
 
 ## ✅ The gate
 
