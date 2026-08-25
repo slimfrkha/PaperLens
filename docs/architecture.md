@@ -59,7 +59,9 @@ via `stop_on_error`. Both the headless CLI and the background **worker** call
 3. **Chunk** the markdown (below).
 4. **Index**: embed each chunk and upsert into the Chroma **collection**.
 5. **Tag**: an LLM generates topic tags (degrades gracefully to no tags if it fails).
-6. **Manifest**: write the paper record to `papers.json`.
+6. **Manifest**: write the paper record to `papers.json` — atomically (temp file +
+   rename) and behind a cross-process file lock, so a concurrent `paperlens-ingest`
+   CLI run and the server's `IngestionWorker` can't corrupt or lose each other's writes.
 
 Steps 4 (index) and 5 (tag) run **concurrently** — tags live in the manifest, not in
 chunk metadata, so neither needs the other's output; they meet at the manifest write. The

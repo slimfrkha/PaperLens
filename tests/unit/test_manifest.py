@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 from rag.manifest import Manifest
 
 
@@ -78,3 +80,29 @@ def test_paper_ids_for_tags_is_or_semantics(tmp_path):
     got = set(m.paper_ids_for_tags(["moe", "rl"]))
     assert got == {"a", "b"}
     assert m.paper_ids_for_tags(["missing"]) == []
+
+
+def test_upsert_and_remove_leave_no_stray_tmp_file(tmp_path):
+    m = Manifest(str(tmp_path))
+    m.upsert(_rec("a", ["moe"]))
+    m.remove("a")
+    # filelock unlinks its own lock file on release, so only papers.json should remain.
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["papers.json"]
+
+
+def test_concurrent_upserts_from_separate_manifest_instances(tmp_path):
+    # Each thread gets its own Manifest instance (own object, same papers.json/lock
+    # path) to exercise the cross-process-style FileLock guard, not a shared instance.
+    n = 20
+
+    def upsert_one(i: int) -> None:
+        Manifest(str(tmp_path)).upsert(_rec(f"p{i}", ["moe"]))
+
+    threads = [threading.Thread(target=upsert_one, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    m = Manifest(str(tmp_path))
+    assert {p["paper_id"] for p in m.papers()} == {f"p{i}" for i in range(n)}

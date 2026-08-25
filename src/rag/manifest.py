@@ -2,25 +2,37 @@
 
 Source of truth for the papers list, tags, and ingestion bookkeeping. Read on
 every access (no in-memory cache) so the API always sees the worker's latest
-writes; writes are serialized with a lock.
+writes. Writes are serialized across both threads and processes by a
+`filelock.FileLock` on a sibling `papers.json.lock` file — this also guards the
+server's `IngestionWorker` against a concurrently-running `paperlens-ingest` CLI
+invocation, since both get independent `Manifest` instances over the same file.
+Each write is atomic (temp file + rename, like `extract.py`'s display-markdown
+write), so reads never need the lock: they only ever see a fully-old or
+fully-new file, never a partial one.
 """
 
 from __future__ import annotations
 
 import json
-import threading
 from pathlib import Path
+
+from filelock import FileLock
 
 
 class Manifest:
     def __init__(self, rag_db: str):
         self.path = Path(rag_db) / "papers.json"
-        self._lock = threading.Lock()
+        self._file_lock = FileLock(str(self.path.parent / (self.path.name + ".lock")))
 
     def _load(self) -> dict[str, dict]:
         if self.path.exists():
             return json.loads(self.path.read_text())
         return {}
+
+    def _atomic_write(self, data: dict[str, dict]) -> None:
+        tmp_path = self.path.with_name(self.path.name + ".tmp")
+        tmp_path.write_text(json.dumps(data, indent=2))
+        tmp_path.replace(self.path)  # atomic on the same filesystem
 
     def papers(self) -> list[dict]:
         return list(self._load().values())
@@ -32,19 +44,20 @@ class Manifest:
         return paper_id in self._load()
 
     def upsert(self, record: dict) -> None:
-        with self._lock:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self._file_lock:
             data = self._load()
             data[record["paper_id"]] = record
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps(data, indent=2))
+            self._atomic_write(data)
 
     def remove(self, paper_id: str) -> bool:
-        with self._lock:
+        with self._file_lock:
             data = self._load()
             if paper_id not in data:
                 return False
             del data[paper_id]
-            self.path.write_text(json.dumps(data, indent=2))
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._atomic_write(data)
             return True
 
     def all_tags(self) -> list[dict]:
