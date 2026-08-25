@@ -448,6 +448,19 @@ pluggable the same way.
   instant. Cloud embedder SDKs are optional extras imported lazily — so an
   OpenAI-compatible or cloud setup never pays for local model downloads it won't use. The
   LLM backend goes through LiteLLM, a hard top-level dependency covering every provider.
+- **Structured LLM output is validated and retried, not regex-parsed.** Tag generation,
+  tag normalization, and query paraphrasing (`src/rag/tagger.py`,
+  `src/rag/query_expansion.py`) all go through `LLMBackend.complete_structured`, which
+  layers `instructor` on top of the same LiteLLM call to validate the reply against a
+  Pydantic model and re-prompt the LLM with its own validation error on a bad one (two
+  retries, hardcoded). A reply that still fails raises: tagging lets that propagate to
+  its callers' existing `[warn]`-and-degrade handlers (`pipeline.py`, `ingest.py`), while
+  query expansion — which has no such handler upstream — catches and logs it locally,
+  both ending at the same "empty tags/paraphrases, not a crash" outcome as before.
+  `complete_structured` pins `instructor.Mode.JSON_SCHEMA`, not the library's default
+  (`TOOLS`) — confirmed live that local OpenAI-compatible servers (LM Studio, ...) reject
+  `TOOLS`' object-shaped `tool_choice` outright, so the default silently breaks the
+  project's own normal local dev setup.
 - **Config anchoring.** All relative paths resolve against the **project root** — the
   nearest `pyproject.toml` ancestor of the config file — so `data_path: data` lands at the
   repo root even when the config lives in `configs/`, and every entry point is

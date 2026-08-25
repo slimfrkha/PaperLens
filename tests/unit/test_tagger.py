@@ -1,18 +1,12 @@
-"""Tag parsing / normalization + generate_tags over a fake LLM."""
+"""Tag normalization + generate_tags/normalize_tags over a fake LLM."""
 
 from __future__ import annotations
 
+import pytest
+
 from rag import tagger
 from rag.config import AnthropicSpec
-from rag.tagger import _excerpt, _normalize, _parse, _parse_map, generate_tags
-
-
-def test_parse_json_array():
-    assert _parse('Here: ["moe", "rl"] done') == ["moe", "rl"]
-
-
-def test_parse_falls_back_to_comma_and_newline():
-    assert _parse("- moe\n- rl, quant") == ["moe", "rl", "quant"]
+from rag.tagger import _excerpt, _filter_remap, _normalize, _RemapOut, _TagsOut, generate_tags
 
 
 def test_normalize_kebab_dedupe_and_cap():
@@ -30,8 +24,8 @@ def test_excerpt_pulls_title_and_headings():
 
 def test_generate_tags_uses_llm_and_normalizes(monkeypatch):
     class _Fake:
-        def complete(self, system, user, max_tokens=None):
-            return '["Multi-Head Latent Attention", "MLA", "mla"]'
+        def complete_structured(self, system, user, response_model, max_tokens=None, max_retries=2):
+            return _TagsOut(tags=["Multi-Head Latent Attention", "MLA", "mla"])
 
     monkeypatch.setattr(tagger, "build_llm", lambda spec: _Fake())
     tags = generate_tags("## Paper\n\n## Abstract\nx", AnthropicSpec(), max_tags=5)
@@ -43,9 +37,9 @@ def test_generate_tags_honors_min_tags_and_excerpt_chars(monkeypatch):
     prompts: list[str] = []
 
     class _Fake:
-        def complete(self, system, user, max_tokens=None):
+        def complete_structured(self, system, user, response_model, max_tokens=None, max_retries=2):
             prompts.append(user)
-            return "[]"
+            return _TagsOut(tags=[])
 
     monkeypatch.setattr(tagger, "build_llm", lambda spec: _Fake())
     generate_tags(
@@ -60,24 +54,32 @@ def test_generate_tags_honors_min_tags_and_excerpt_chars(monkeypatch):
     assert "x" * 100 not in prompts[0]
 
 
-def test_parse_map_keeps_real_remaps_and_canonicalizes_values():
+def test_generate_tags_propagates_when_structured_parse_fails(monkeypatch):
+    """No local try/except in generate_tags — an exhausted-retry failure raises, and
+    it's up to the caller (pipeline.py, ingest.py) to catch and degrade to `[]`."""
+
+    class _Fake:
+        def complete_structured(self, system, user, response_model, max_tokens=None, max_retries=2):
+            raise ValueError("instructor gave up after retries")
+
+    monkeypatch.setattr(tagger, "build_llm", lambda spec: _Fake())
+    with pytest.raises(ValueError):
+        generate_tags("## Paper\n\n## Abstract\nx", AnthropicSpec())
+
+
+def test_filter_remap_keeps_real_remaps_and_canonicalizes_values():
     # Identity ("rl"->"rl") and unknown source ("ghost") dropped; value kebab-cased.
-    m = _parse_map(
-        '{"moe": "mixture-of-experts", "rl": "rl", "ghost": "x", "cot": "Chain Of Thought"}',
+    m = _filter_remap(
+        {"moe": "mixture-of-experts", "rl": "rl", "ghost": "x", "cot": "Chain Of Thought"},
         valid={"moe", "rl", "cot"},
     )
     assert m == {"moe": "mixture-of-experts", "cot": "chain-of-thought"}
 
 
-def test_parse_map_empty_on_non_object():
-    assert _parse_map("no json here", valid={"moe"}) == {}
-    assert _parse_map('["moe", "rl"]', valid={"moe"}) == {}
-
-
 def test_normalize_tags_uses_llm_over_the_vocabulary(monkeypatch):
     class _Fake:
-        def complete(self, system, user, max_tokens=None):
-            return '{"moe": "mixture-of-experts"}'
+        def complete_structured(self, system, user, response_model, max_tokens=None, max_retries=2):
+            return _RemapOut(remap={"moe": "mixture-of-experts"})
 
     monkeypatch.setattr(tagger, "build_llm", lambda spec: _Fake())
     m = tagger.normalize_tags(["moe", "mixture-of-experts", "rl"], AnthropicSpec())

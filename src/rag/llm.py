@@ -6,6 +6,8 @@ Anthropic, OpenAI-compatible servers (vLLM, SGLang, LM Studio, Ollama's /v1,
 llama.cpp, Azure, Mistral, Together, ...), and Gemini, so PaperLens only needs one
 `LiteLLMBackend` regardless of provider — adding a LiteLLM-supported provider is a
 new `LLMSpec` subclass + one arm in `_litellm_provider()`, not a new backend class.
+`complete_structured` layers `instructor` (https://python.useinstructor.com/) on top
+of the same LiteLLM call for validated, retrying structured output.
 
 Use `build_llm(spec)` to get the right backend for a config `LLMSpec`.
 """
@@ -18,10 +20,15 @@ import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TypeVar
 
+import instructor
 import litellm
+from pydantic import BaseModel
 
 from .config import AnthropicSpec, GeminiSpec, LLMSpec, OpenAISpec
+
+T = TypeVar("T", bound=BaseModel)
 
 # A tool the model may call. `input_schema` is a JSON Schema object.
 Tool = dict  # {"name": str, "description": str, "input_schema": dict}
@@ -64,13 +71,27 @@ def _api_key(spec: LLMSpec) -> str:
 
 
 class LLMBackend(ABC):
-    """Common interface: a plain completion (tagging) and a tool-use loop (chat)."""
+    """Common interface: a plain completion (tagging), structured output (tagging /
+    query expansion), and a tool-use loop (chat)."""
 
     def __init__(self, spec: LLMSpec):
         self.spec = spec
 
     @abstractmethod
     def complete(self, system: str, user: str, max_tokens: int | None = None) -> str: ...
+
+    @abstractmethod
+    def complete_structured(
+        self,
+        system: str,
+        user: str,
+        response_model: type[T],
+        max_tokens: int | None = None,
+        max_retries: int = 2,
+    ) -> T:
+        """Like `complete`, but validated against `response_model` with `max_retries`
+        re-prompts (feeding the LLM its own validation error) on a bad reply."""
+        ...
 
     @abstractmethod
     def run_tools(
@@ -172,6 +193,13 @@ class LiteLLMBackend(LLMBackend):
     def __init__(self, spec: LLMSpec):
         super().__init__(spec)
         self._model = f"{_litellm_provider(spec)}/{spec.model}"
+        # JSON_SCHEMA, not the from_litellm default (TOOLS): local OpenAI-compatible
+        # servers (LM Studio, vLLM, ...) reject TOOLS' object-shaped `tool_choice` and
+        # JSON mode's `response_format` outright — JSON_SCHEMA is the one confirmed to
+        # work against a local server, not just against Anthropic/OpenAI proper.
+        self._instructor = instructor.from_litellm(
+            litellm.completion, mode=instructor.Mode.JSON_SCHEMA
+        )
 
     def _kwargs(self) -> dict:
         kwargs: dict = {"model": self._model, "api_key": _api_key(self.spec)}
@@ -195,6 +223,19 @@ class LiteLLMBackend(LLMBackend):
             **self._kwargs(),
         )
         return resp.choices[0].message.content or ""
+
+    def complete_structured(self, system, user, response_model, max_tokens=None, max_retries=2):
+        return self._instructor.chat.completions.create(
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            response_model=response_model,
+            max_tokens=max_tokens or self.spec.max_tokens,
+            temperature=self.spec.temperature,
+            max_retries=max_retries,
+            **self._kwargs(),
+        )
 
     def run_tools(
         self,

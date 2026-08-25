@@ -16,6 +16,8 @@ dependencies = [
     "sentence-transformers>=3.0",   # default `hf` embedder + reranker
     "rank-bm25>=0.2",       # sparse (BM25) retrieval for hybrid dense+sparse search
     "litellm>=1.98",        # multi-provider LLM + embedding backend (rag/llm.py, rag/embedders.py); pulls in openai transitively
+    "instructor>=1.15",     # validated, retrying structured output on top of litellm (rag/llm.py)
+    "pydantic>=2.13",       # response models for instructor; was already transitive, now imported directly
     "tiktoken>=0.7",
     # App backend (FastAPI server + ingestion worker)
     "fastapi>=0.115",

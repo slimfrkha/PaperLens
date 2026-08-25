@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 
 import pytest
+from pydantic import BaseModel
 
 from rag.config import (
     AnthropicSpec,
@@ -64,31 +65,53 @@ class FakeEmbedder:
 class FakeLLM(LLMBackend):
     """Scripted, call-recording LLM backend.
 
-    ``complete`` returns ``answer``. ``run_tools`` optionally emits reasoning,
-    executes each scripted ``(tool_name, args)`` call (driving the real tool),
-    then streams ``answer`` through ``on_text``.
+    ``complete`` returns ``answer``. ``complete_structured`` returns ``structured``
+    (or raises ``structured_exception``, if set — to script a validation failure that
+    exhausts instructor's retries). ``run_tools`` optionally emits reasoning, executes
+    each scripted ``(tool_name, args)`` call (driving the real tool), then streams
+    ``answer`` through ``on_text``.
     """
 
     def __init__(
         self,
         spec: LLMSpec | None = None,
         answer: str = "ok",
+        structured: BaseModel | None = None,
+        structured_exception: Exception | None = None,
         tool_calls: list[tuple[str, dict]] | None = None,
         reasoning: str | None = None,
         usage: Usage | None = None,
     ) -> None:
         super().__init__(spec or AnthropicSpec())
         self.answer = answer
+        self.structured = structured
+        self.structured_exception = structured_exception
         self.tool_calls = tool_calls or []
         self.reasoning = reasoning
         self.usage = usage or Usage(input_tokens=10, output_tokens=5)
         self.complete_calls: list[dict] = []
+        self.complete_structured_calls: list[dict] = []
         self.run_tools_calls: list[dict] = []
         self.executed: list[tuple[str, dict]] = []
 
     def complete(self, system, user, max_tokens=None):
         self.complete_calls.append({"system": system, "user": user, "max_tokens": max_tokens})
         return self.answer
+
+    def complete_structured(self, system, user, response_model, max_tokens=None, max_retries=2):
+        self.complete_structured_calls.append(
+            {
+                "system": system,
+                "user": user,
+                "response_model": response_model,
+                "max_tokens": max_tokens,
+                "max_retries": max_retries,
+            }
+        )
+        if self.structured_exception is not None:
+            raise self.structured_exception
+        assert self.structured is not None, "FakeLLM(structured=...) required for this call"
+        return self.structured
 
     def run_tools(
         self,

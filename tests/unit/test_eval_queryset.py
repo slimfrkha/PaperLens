@@ -83,6 +83,9 @@ class _BoomLLM(LLMBackend):
     def complete(self, system, user, max_tokens=None):
         raise RuntimeError("server down")
 
+    def complete_structured(self, system, user, response_model, max_tokens=None, max_retries=2):
+        raise RuntimeError("server down")
+
     def run_tools(self, *args, **kwargs):
         return ""
 

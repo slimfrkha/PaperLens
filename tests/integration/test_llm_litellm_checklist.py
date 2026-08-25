@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 
 import pytest
+from pydantic import BaseModel
 
 from rag.config import AnthropicSpec, OpenAISpec
 from rag.llm import LiteLLMBackend
@@ -109,6 +110,27 @@ def test_usage_reporting_is_well_formed():
     if usage.input_tokens is not None:
         assert usage.input_tokens > 0
         assert usage.output_tokens > 0
+
+
+class _TagsOut(BaseModel):
+    tags: list[str]
+
+
+def test_complete_structured_end_to_end():
+    # Regression: instructor's default mode (TOOLS) sends an object-shaped `tool_choice`
+    # that local OpenAI-compatible servers (LM Studio, and others) reject outright —
+    # confirmed live against this exact setup before switching LiteLLMBackend to
+    # instructor.Mode.JSON_SCHEMA. Mocks alone won't catch a wire-format rejection like
+    # this; it needs a real server, same reasoning as every other test in this file.
+    backend = _local_backend()
+    out = backend.complete_structured(
+        system="You tag research papers for a search index.",
+        user="Paper: a technical report about mixture-of-experts routing and "
+        "reinforcement learning fine-tuning.\n\nReturn 3-5 lowercase kebab-case tags.",
+        response_model=_TagsOut,
+    )
+    assert isinstance(out, _TagsOut)
+    assert out.tags  # the model actually returned something, not an empty list
 
 
 @pytest.mark.skipif(

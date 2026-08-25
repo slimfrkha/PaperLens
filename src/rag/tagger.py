@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import re
+
+from pydantic import BaseModel
 
 from .config import LLMSpec
 from .llm import build_llm
@@ -47,17 +48,8 @@ def _normalize(tags: list[str], max_tags: int) -> list[str]:
     return out[:max_tags]
 
 
-def _parse(text: str) -> list[str]:
-    m = re.search(r"\[.*\]", text, re.DOTALL)
-    if m:
-        try:
-            val = json.loads(m.group(0))
-            if isinstance(val, list):
-                return [str(x) for x in val]
-        except json.JSONDecodeError:
-            pass
-    # Fallback: comma/newline separated.
-    return [p.strip("-*• \t") for p in re.split(r"[,\n]", text) if p.strip()]
+class _TagsOut(BaseModel):
+    tags: list[str]
 
 
 def generate_tags(
@@ -73,10 +65,13 @@ def generate_tags(
         f"Existing tags in the library (reuse these when they fit, to avoid "
         f"near-duplicates): {existing}\n\n"
         f"Paper:\n{_excerpt(md, max_chars=max_excerpt_chars)}\n\n"
-        f"Return ONLY a JSON array of {min_tags}-{max_tags} lowercase kebab-case tags."
+        f"Return {min_tags}-{max_tags} lowercase kebab-case tags."
     )
-    raw = build_llm(spec).complete(system=_SYSTEM, user=prompt)
-    return _normalize(_parse(raw), max_tags)
+    # No local try/except: a malformed reply that exhausts instructor's retries
+    # propagates to the caller — pipeline.py's `except Exception` around both
+    # call sites already logs a `[warn]` and degrades to `[]`.
+    out = build_llm(spec).complete_structured(system=_SYSTEM, user=prompt, response_model=_TagsOut)
+    return _normalize(out.tags, max_tags)
 
 
 _NORMALIZE_SYSTEM = (
@@ -87,19 +82,14 @@ _NORMALIZE_SYSTEM = (
 )
 
 
-def _parse_map(text: str, valid: set[str]) -> dict[str, str]:
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    if not m:
-        return {}
-    try:
-        obj = json.loads(m.group(0))
-    except json.JSONDecodeError:
-        return {}
-    if not isinstance(obj, dict):
-        return {}
+class _RemapOut(BaseModel):
+    remap: dict[str, str]
+
+
+def _filter_remap(remap: dict[str, str], valid: set[str]) -> dict[str, str]:
     out: dict[str, str] = {}
-    for k, v in obj.items():
-        src, dst = _canon(str(k)), _canon(str(v))
+    for k, v in remap.items():
+        src, dst = _canon(k), _canon(v)
         # Keep only real remaps: a known tag mapped to a different canonical form.
         if src in valid and dst and src != dst:
             out[src] = dst
@@ -110,8 +100,9 @@ def normalize_tags(tags: list[str], spec: LLMSpec) -> dict[str, str]:
     """Ask the LLM for a ``{tag -> canonical}`` map that merges only near-duplicates.
 
     Returns only the tags that should change; any tag absent from the map keeps its
-    current form. Empty on empty input or an unparsable reply, so callers leave the
-    vocabulary untouched rather than corrupt it.
+    current form. Empty on empty input, so callers leave the vocabulary untouched
+    rather than corrupt it. A malformed reply that exhausts retries raises — see
+    `generate_tags` above for why that's left to the caller.
     """
     if not tags:
         return {}
@@ -122,8 +113,10 @@ def normalize_tags(tags: list[str], spec: LLMSpec) -> dict[str, str]:
         "form per concept — prefer the clearest, most widely-used term already in the "
         "list — and map the near-duplicates onto it. Keep distinct concepts separate; "
         "never merge tags that mean different things.\n\n"
-        "Return ONLY a JSON object mapping each tag that should change to its canonical "
-        "form (omit tags that stay as they are)."
+        "Map each tag that should change to its canonical form (omit tags that stay "
+        "as they are)."
     )
-    raw = build_llm(spec).complete(system=_NORMALIZE_SYSTEM, user=prompt)
-    return _parse_map(raw, valid={_canon(t) for t in tags})
+    out = build_llm(spec).complete_structured(
+        system=_NORMALIZE_SYSTEM, user=prompt, response_model=_RemapOut
+    )
+    return _filter_remap(out.remap, valid={_canon(t) for t in tags})

@@ -26,14 +26,18 @@ def retag(cfg: IngestConfig, manifest: Manifest) -> None:
         md_path = Path(cfg.paths.markdown_dir) / f"{rec['paper_id']}.md"
         if not md_path.exists():
             continue
-        tags = generate_tags(
-            md_path.read_text(),
-            cfg.tagging,
-            existing_tags=[t["tag"] for t in manifest.all_tags()],
-            max_tags=cfg.tagger.max_tags,
-            min_tags=cfg.tagger.min_tags,
-            max_excerpt_chars=cfg.tagger.max_excerpt_chars,
-        )
+        try:
+            tags = generate_tags(
+                md_path.read_text(),
+                cfg.tagging,
+                existing_tags=[t["tag"] for t in manifest.all_tags()],
+                max_tags=cfg.tagger.max_tags,
+                min_tags=cfg.tagger.min_tags,
+                max_excerpt_chars=cfg.tagger.max_excerpt_chars,
+            )
+        except Exception as e:
+            print(f"  [warn] tag generation failed for {rec['paper_id']}: {e}")
+            tags = []
         rec["tags"] = tags
         manifest.upsert(rec)
         print(f"  {rec['paper_id']}: {', '.join(tags) or '(none)'}")

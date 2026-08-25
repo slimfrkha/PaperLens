@@ -12,6 +12,7 @@ from eval.harness import score_items
 from eval.optimizer import _arms, _delta_cell, build_cache, score_from_cache, screen_retrieval
 from eval.queryset import QAItem
 from eval.stats import DeltaResult
+from rag.query_expansion import _ParaphrasesOut
 from rag.sparse import build_sparse_index
 
 
@@ -344,7 +345,7 @@ def test_build_cache_with_multi_query_preserves_default_arm_exactness(
         _item("latent attention compresses the cache", "p1", "Method"),
         _item("fp8 mixed precision schedule", "p1", "Training"),
     ]
-    llm = fake_llm(answer='["a paraphrase of the query"]')
+    llm = fake_llm(structured=_ParaphrasesOut(paraphrases=["a paraphrase of the query"]))
     plain = build_cache(ctx.searcher, items, max_candidates=2, reranker=FakeReranker(set()))
     widened = build_cache(
         ctx.searcher,
@@ -372,7 +373,7 @@ def test_build_cache_multi_query_uses_its_own_fetch_multiplier(
     # catch any cross-talk between the two knobs.
     docs = [seed_chunks("p1", "Method", "alpha beta gamma", doc_id="p1-m")]
     ctx = make_searcher(docs)
-    llm = fake_llm(answer='["a paraphrase"]')
+    llm = fake_llm(structured=_ParaphrasesOut(paraphrases=["a paraphrase"]))
     seen_n_results: list[int] = []
     original_query = ctx.searcher.collection.query
 
@@ -434,7 +435,8 @@ def test_score_from_cache_multi_query_fuses_variant_pools(make_config, seed_chun
     searcher = Searcher(db_dir=cfg.paths.rag_db, collection=cfg.collection, embedder=embedder)
     ctx = SimpleNamespace(searcher=searcher, cfg=cfg, collection=collection)
     items = [_item("zzflorble", "target", "S")]
-    llm = fake_llm(answer='["FAR_MARKER zzflorble variant"]')  # embeds toward "target" only
+    # embeds toward "target" only
+    llm = fake_llm(structured=_ParaphrasesOut(paraphrases=["FAR_MARKER zzflorble variant"]))
 
     cache = build_cache(
         ctx.searcher,
@@ -489,7 +491,7 @@ def test_screen_retrieval_multi_query_arm_plumbs_through_paired_delta(
 
     # screen_retrieval builds its own LLM client from cfg.llm.chat (`build_llm`) — swap the
     # import site so the paraphrase call is scripted, not a real network call.
-    llm = fake_llm(answer='["FAR_MARKER zzflorble variant"]')
+    llm = fake_llm(structured=_ParaphrasesOut(paraphrases=["FAR_MARKER zzflorble variant"]))
     monkeypatch.setattr("eval.optimizer.build_llm", lambda spec: llm)
 
     cfg.retrieval.candidates = 3

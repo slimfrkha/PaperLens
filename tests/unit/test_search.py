@@ -6,6 +6,7 @@ from __future__ import annotations
 import pytest
 
 from rag.index import open_collection
+from rag.query_expansion import _ParaphrasesOut
 from rag.search import Searcher, find_cutoff
 
 
@@ -177,7 +178,7 @@ def test_multi_query_surfaces_chunk_single_query_misses(make_config, fake_llm):
     cfg = make_config()
     embedder = _VecEmbedder()
     _seed_vec_docs(cfg, embedder)
-    llm = fake_llm(answer='["paraphrase_text"]')
+    llm = fake_llm(structured=_ParaphrasesOut(paraphrases=["paraphrase_text"]))
     searcher = Searcher(
         db_dir=cfg.paths.rag_db,
         collection=cfg.collection,
@@ -262,7 +263,7 @@ def test_multi_query_with_sparse_returns_sane_fused_set(make_config, fake_llm):
         sparse_enabled=True,
         multi_query_enabled=True,
         multi_query_n=1,
-        llm=fake_llm(answer='["para456"]'),
+        llm=fake_llm(structured=_ParaphrasesOut(paraphrases=["para456"])),
     )
     results = searcher.search("orig123", max_k=3, candidates=3, rerank=False).results
 
@@ -280,7 +281,7 @@ def test_multi_query_llm_failure_falls_back_to_single_query(make_config, fake_ll
     _seed_vec_docs(cfg, embedder)
 
     class RaisingLLM(fake_llm):
-        def complete(self, system, user, max_tokens=None):
+        def complete_structured(self, system, user, response_model, max_tokens=None, max_retries=2):
             raise RuntimeError("backend down")
 
     searcher = Searcher(
@@ -300,7 +301,7 @@ def test_multi_query_widens_fetch_independent_of_sparse(make_config, fake_llm, m
     cfg = make_config()
     embedder = _VecEmbedder()
     _seed_vec_docs(cfg, embedder)
-    llm = fake_llm(answer='["paraphrase_text"]')
+    llm = fake_llm(structured=_ParaphrasesOut(paraphrases=["paraphrase_text"]))
     searcher = Searcher(
         db_dir=cfg.paths.rag_db,
         collection=cfg.collection,
@@ -367,7 +368,7 @@ def test_multi_query_source_unions_dense_and_sparse_across_variants(
         sparse_enabled=True,
         multi_query_enabled=True,
         multi_query_n=1,
-        llm=fake_llm(answer='["zzflorble"]'),
+        llm=fake_llm(structured=_ParaphrasesOut(paraphrases=["zzflorble"])),
     )
 
     results = searcher.search("orig", max_k=3, candidates=3, rerank=False).results
@@ -815,7 +816,7 @@ def test_per_paper_generates_paraphrases_once_not_per_paper(
         seed_chunks("paper-c", "S", "gamma content"),
     ]
     ctx = make_searcher(docs)
-    llm = fake_llm(answer='["alternate phrasing"]')
+    llm = fake_llm(structured=_ParaphrasesOut(paraphrases=["alternate phrasing"]))
     searcher = Searcher(
         db_dir=ctx.cfg.paths.rag_db,
         collection=ctx.cfg.collection,
@@ -836,7 +837,7 @@ def test_per_paper_generates_paraphrases_once_not_per_paper(
     )
 
     # One paraphrase call for the whole search() call, not one per paper.
-    assert len(llm.complete_calls) == 1
+    assert len(llm.complete_structured_calls) == 1
 
 
 def test_per_paper_composes_with_hybrid_and_multi_query(make_config, fake_llm):
@@ -875,7 +876,7 @@ def test_per_paper_composes_with_hybrid_and_multi_query(make_config, fake_llm):
         sparse_enabled=True,
         multi_query_enabled=True,
         multi_query_n=1,
-        llm=fake_llm(answer='["zzflorble"]'),
+        llm=fake_llm(structured=_ParaphrasesOut(paraphrases=["zzflorble"])),
     )
 
     results = searcher.search(
