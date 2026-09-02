@@ -25,7 +25,7 @@ class ChatRequest(BaseModel):
     # mode manually.
     auto: bool = False
     chat_id: str | None = None
-    edit_index: int | None = None  # if set, truncate stored history to this index first
+    edit_turn: int | None = None  # if set, replace this stored turn and its successors
 
 
 class ClassifyModeRequest(BaseModel):
@@ -40,7 +40,7 @@ class ClassifyModeResponse(BaseModel):
 
 
 class FeedbackRequest(BaseModel):
-    index: int  # position in the session's messages/citations/traces arrays
+    turn_index: int
     vote: Literal["up", "down"] | None = None
     note: str | None = None
 

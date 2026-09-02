@@ -15,6 +15,7 @@ about and gets a fresh, temp-backed object.
 from __future__ import annotations
 
 import hashlib
+from contextlib import suppress
 
 import pytest
 from pydantic import BaseModel
@@ -271,20 +272,26 @@ def seed_chunks():
     return _make
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _stop_chroma_systems():
-    """Stop every chromadb System opened during the session before interpreter exit.
+def _stop_chroma_systems() -> None:
+    """Release Chroma's process-global clients created by one test.
 
-    Tests open a fresh temp Chroma DB per ``make_searcher``/``open_collection`` call
-    and never close the client. chromadb caches each one as a live ``System`` in a
-    process-global registry, so by the end of the suite dozens of them sit around
-    to be torn down implicitly at interpreter shutdown — slow enough to make the
-    process hang for minutes after the last test finishes. Stopping them explicitly
-    here, while the interpreter is still in a normal state, avoids that hang.
+    A fresh temporary database is deliberately created for each test. Chroma keeps
+    its clients in a process-global cache, however, and under the macOS test
+    descriptor limit those clients exhaust file descriptors after a few dozen
+    tests unless they are stopped here.
     """
-    yield
     from chromadb.api.client import SharedSystemClient
 
     for system in list(SharedSystemClient._identifier_to_system.values()):
-        system.stop()
+        # A client that fails during Rust binding startup can be registered
+        # before it is fully initialized. Clearing its cache entry is enough.
+        with suppress(AttributeError):
+            system.stop()
     SharedSystemClient.clear_system_cache()
+
+
+@pytest.fixture(autouse=True)
+def _stop_chroma_systems_after_test():
+    """Ensure each isolated temp database releases its Chroma file handles."""
+    yield
+    _stop_chroma_systems()

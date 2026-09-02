@@ -30,12 +30,10 @@ import {
   stopChat,
   type ChatMessage,
   type ChatSummary,
-  type Citation,
-  type CompareRow,
   type Feedback,
   type Paper,
+  type StoredTurn,
   type TagCount,
-  type TraceEntry,
   type UsageInfo,
 } from "../api";
 import Answer from "../components/Answer";
@@ -54,18 +52,9 @@ import { citedCitations } from "../exportAnswer";
 // (<2 papers raises), a slow turn is an inconvenience, not an incident, in a local tool.
 const COMPARE_CONFIRM_THRESHOLD = 12;
 
-interface Turn {
-  role: "user" | "assistant";
-  content: string;
-  citations?: Citation[];
-  trace?: TraceEntry[];
+interface Turn extends StoredTurn {
   streaming?: boolean;
-  feedback?: Feedback | null;
-  usage?: UsageInfo;
-  compare?: boolean;
-  compareResults?: CompareRow[];
   compareTotal?: number; // resolved scope size at send time — only set while streaming live
-  auto?: boolean; // this turn's Ask/Compare shape was resolved by Auto mode, not picked directly
 }
 
 export default function ChatPage() {
@@ -139,19 +128,7 @@ export default function ChatPage() {
     if (!chatId || loadedId.current === chatId) return; // already have it (e.g. just created)
     getChat(chatId)
       .then((s) => {
-        setTurns(
-          s.messages.map((m, i) => ({
-            role: m.role,
-            content: m.content,
-            citations: s.citations?.[i] ?? undefined,
-            trace: s.traces?.[i] ?? undefined,
-            feedback: s.feedback?.[i] ?? undefined,
-            usage: s.usage?.[i] ?? undefined,
-            compare: s.compare?.[i] ?? undefined,
-            compareResults: s.compare_results?.[i] ?? undefined,
-            auto: s.auto?.[i] ?? undefined,
-          })),
-        );
+        setTurns(s.turns);
         // Filters aren't persisted per chat; reset so a reopened chat never shows
         // another session's stale (and now locked) filter values.
         setTags([]);
@@ -161,10 +138,10 @@ export default function ChatPage() {
         // match (e.g. reloading a chat whose last message used per-paper mode would
         // otherwise show the toggle off, misleading the user about what's about to happen
         // if they send another message without checking).
-        const lastPerPaper = s.per_paper?.length ? s.per_paper[s.per_paper.length - 1] : null;
-        setPerPaper(lastPerPaper ?? false);
-        const lastCompare = s.compare?.length ? s.compare[s.compare.length - 1] : null;
-        const lastAuto = s.auto?.length ? s.auto[s.auto.length - 1] : null;
+        const last = s.turns[s.turns.length - 1];
+        setPerPaper(last?.per_paper ?? false);
+        const lastCompare = last?.compare ?? false;
+        const lastAuto = last?.auto ?? false;
         // Once Auto exists, compare[last] alone no longer says who picked the mode — it
         // can mean "Auto picked Compare." Restore to Auto whenever the last turn was
         // auto-decided, not to its resolved mode, so the control shows what it actually
@@ -187,7 +164,7 @@ export default function ChatPage() {
   const lastTurn = turns[turns.length - 1];
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [turns.length, lastTurn?.content, lastTurn?.trace?.length, lastTurn?.streaming]);
+  }, [turns.length, lastTurn?.answer, lastTurn?.trace.length, lastTurn?.streaming]);
 
   const patchLast = (fn: (t: Turn) => Turn) =>
     setTurns((prev) => {
@@ -203,18 +180,18 @@ export default function ChatPage() {
       return next;
     });
 
-  async function onFeedback(i: number, vote: Feedback["vote"], note: string | null) {
+  async function onFeedback(turnIndex: number, vote: Feedback["vote"], note: string | null) {
     if (!chatId) return;
-    patchAt(i, (t) => ({ ...t, feedback: { vote, note } }));
+    patchAt(turnIndex, (t) => ({ ...t, feedback: { vote, note } }));
     try {
-      await setFeedback(chatId, i, vote, note);
+      await setFeedback(chatId, turnIndex, vote, note);
     } catch (e) {
       console.error("Failed to save feedback", e);
     }
   }
 
-  // Shared by send()/sendEdit(): builds history from `prefix` + `question`, appends the
-  // new user turn + a streaming assistant placeholder, and runs the chat() SSE call.
+  // Shared by send()/sendEdit(): builds history from `prefix` + `question`, appends one
+  // streaming exchange, and runs the chat() SSE call.
   // `prefix` must be captured fresh by the caller right before this call — it's applied
   // directly (not via a setTurns functional updater), so an await between capturing it
   // and calling runTurn could hand it a stale snapshot.
@@ -222,25 +199,32 @@ export default function ChatPage() {
     prefix: Turn[],
     question: string,
     id: string,
-    editIndex: number | undefined,
+    editTurn: number | undefined,
     sendCompare: boolean,
     sendAuto: boolean,
   ) {
     const scopeSize = sendCompare ? resolveScopeSize(allPapers, tags, papers) : 0;
     const history: ChatMessage[] = [
-      ...prefix.map((t) => ({ role: t.role, content: t.content })),
+      ...prefix.flatMap((t) => [
+        { role: "user" as const, content: t.question },
+        { role: "assistant" as const, content: t.answer },
+      ]),
       { role: "user", content: question },
     ];
     setTurns([
       ...prefix,
-      { role: "user", content: question },
       {
-        role: "assistant",
-        content: "",
-        streaming: true,
+        question,
+        answer: "",
+        citations: [],
+        trace: [],
+        usage: null,
+        feedback: null,
+        per_paper: mode === "ask" ? perPaper : false,
         compare: sendCompare,
+        compare_results: sendCompare ? [] : null,
         auto: sendAuto,
-        compareResults: sendCompare ? [] : undefined,
+        streaming: true,
         compareTotal: sendCompare ? scopeSize : undefined,
       },
     ]);
@@ -262,23 +246,23 @@ export default function ChatPage() {
         {
           onToken: (tok) =>
             patchLast((t) => {
-              const sep = pendingSeparatorRef.current && t.content && !/\n\n$/.test(t.content);
+              const sep = pendingSeparatorRef.current && t.answer && !/\n\n$/.test(t.answer);
               pendingSeparatorRef.current = false;
-              return { ...t, content: t.content + (sep ? "\n\n" : "") + tok };
+              return { ...t, answer: t.answer + (sep ? "\n\n" : "") + tok };
             }),
           onCitations: (c) => patchLast((t) => ({ ...t, citations: c })),
           onTrace: (e) => {
             pendingSeparatorRef.current = true;
-            patchLast((t) => ({ ...t, trace: [...(t.trace ?? []), e] }));
+            patchLast((t) => ({ ...t, trace: [...t.trace, e] }));
           },
           onUsage: (u) => patchLast((t) => ({ ...t, usage: u })),
           onCompareRow: (row) =>
-            patchLast((t) => ({ ...t, compareResults: [...(t.compareResults ?? []), row] })),
+            patchLast((t) => ({ ...t, compare_results: [...(t.compare_results ?? []), row] })),
           onMeta: () => refreshSessions(),
-          onError: (e) => patchLast((t) => ({ ...t, content: t.content + `\n\n_Error: ${e}_` })),
+          onError: (e) => patchLast((t) => ({ ...t, answer: t.answer + `\n\n_Error: ${e}_` })),
           onDone: () => patchLast((t) => ({ ...t, streaming: false })),
         },
-        editIndex,
+        editTurn,
         controller.signal,
         sendAuto,
       );
@@ -359,7 +343,10 @@ export default function ChatPage() {
     const q = input.trim();
     if (!q || busy || deciding) return;
     const history: ChatMessage[] = [
-      ...turns.map((t) => ({ role: t.role, content: t.content })),
+      ...turns.flatMap((t) => [
+        { role: "user" as const, content: t.question },
+        { role: "assistant" as const, content: t.answer },
+      ]),
       { role: "user", content: q },
     ];
     const resolved = await resolveSendMode(history);
@@ -400,8 +387,8 @@ export default function ChatPage() {
     // before resolveSendMode's possible classifyMode() round trip below — declining it
     // shouldn't have already paid for that call.
     const turnsAfter = turns.length - index - 1;
-    if (turnsAfter > 1) {
-      const exchanges = Math.floor((turnsAfter - 1) / 2);
+    if (turnsAfter > 0) {
+      const exchanges = turnsAfter;
       const noun = exchanges === 1 ? "exchange" : "exchanges";
       if (
         !window.confirm(
@@ -414,7 +401,10 @@ export default function ChatPage() {
 
     const prefix = turns.slice(0, index);
     const history: ChatMessage[] = [
-      ...prefix.map((t) => ({ role: t.role, content: t.content })),
+      ...prefix.flatMap((t) => [
+        { role: "user" as const, content: t.question },
+        { role: "assistant" as const, content: t.answer },
+      ]),
       { role: "user", content: q },
     ];
     const resolved = await resolveSendMode(history);
@@ -618,9 +608,9 @@ export default function ChatPage() {
           <EmptyHero />
         ) : (
           <Stack gap="xl" style={{ flex: 1 }}>
-            {turns.map((t, i) =>
-              t.role === "user" ? (
-                <Group key={i} justify="flex-end" align="center" gap={4}>
+            {turns.map((t, i) => (
+              <Box key={i}>
+                <Group justify="flex-end" align="center" gap={4}>
                   {editingIndex === i ? (
                     <Box style={{ maxWidth: "82%", width: "100%" }}>
                       <Textarea
@@ -668,7 +658,7 @@ export default function ChatPage() {
                         color="gray"
                         aria-label="Edit message"
                         disabled={busy}
-                        onClick={() => startEdit(i, t.content)}
+                        onClick={() => startEdit(i, t.question)}
                       >
                         <IconEdit size={14} />
                       </ActionIcon>
@@ -683,13 +673,12 @@ export default function ChatPage() {
                           borderBottomRightRadius: 4,
                         }}
                       >
-                        <Text style={{ whiteSpace: "pre-wrap" }}>{t.content}</Text>
+                        <Text style={{ whiteSpace: "pre-wrap" }}>{t.question}</Text>
                       </Box>
                     </>
                   )}
                 </Group>
-              ) : (
-                <Box key={i}>
+                <Box mt="sm">
                   {t.auto && (
                     <Badge size="xs" variant="outline" color="gray" mb={4}>
                       Auto
@@ -697,19 +686,19 @@ export default function ChatPage() {
                   )}
                   {t.compare ? (
                     <ComparePanel
-                      rows={t.compareResults ?? []}
-                      totalPapers={t.compareTotal ?? t.compareResults?.length ?? 0}
+                      rows={t.compare_results ?? []}
+                      totalPapers={t.compareTotal ?? t.compare_results?.length ?? 0}
                       streaming={t.streaming}
-                      // The synthesis pass's own text streams through the same `content`
+                      // The synthesis pass's own text streams through the same `answer`
                       // field a normal answer uses — the moment any of it has arrived,
                       // every per-paper sub-run is done and synthesis has started.
-                      synthesizing={t.streaming && !!t.content}
+                      synthesizing={t.streaming && !!t.answer}
                     />
                   ) : (
-                    t.trace && <TraceBox entries={t.trace} streaming={t.streaming} />
+                    <TraceBox entries={t.trace} streaming={t.streaming} />
                   )}
-                  {t.content ? (
-                    <Answer text={t.content} citations={t.citations ?? []} />
+                  {t.answer ? (
+                    <Answer text={t.answer} citations={t.citations} />
                   ) : t.streaming ? (
                     <Group gap="xs">
                       <Loader size="sm" type="dots" color="accent" />
@@ -718,15 +707,15 @@ export default function ChatPage() {
                       </Text>
                     </Group>
                   ) : null}
-                  {!t.streaming && t.citations && (
-                    <SourceCards citations={citedCitations(t.content, t.citations)} />
+                  {!t.streaming && (
+                    <SourceCards citations={citedCitations(t.answer, t.citations)} />
                   )}
                   {!t.streaming && t.usage && (
                     <Text size="xs" c="dimmed" mt={4}>
                       {formatUsage(t.usage)}
                     </Text>
                   )}
-                  {!t.streaming && t.content && chatId && (
+                  {!t.streaming && t.answer && chatId && (
                     <FeedbackControl
                       // Scoped to chatId, not just the array index — otherwise switching
                       // chats reuses this component instance (ChatPage doesn't remount on
@@ -738,12 +727,12 @@ export default function ChatPage() {
                       onChange={(vote, note) => onFeedback(i, vote, note)}
                     />
                   )}
-                  {!t.streaming && t.content && (
-                    <AnswerActions text={t.content} citations={t.citations ?? []} />
+                  {!t.streaming && t.answer && (
+                    <AnswerActions text={t.answer} citations={t.citations} />
                   )}
                 </Box>
-              ),
-            )}
+              </Box>
+            ))}
             <div ref={bottomRef} />
           </Stack>
         )}

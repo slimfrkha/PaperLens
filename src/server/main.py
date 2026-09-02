@@ -310,7 +310,7 @@ def create_app(cfg: Config) -> FastAPI:
     @app.post("/api/chats/{chat_id}/feedback")
     def post_feedback(chat_id: str, req: FeedbackRequest):
         try:
-            c = chats.set_feedback(chat_id, req.index, req.vote, req.note)
+            c = chats.set_feedback(chat_id, req.turn_index, req.vote, req.note)
         except ValueError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
         return c or JSONResponse({"error": "not found"}, status_code=404)

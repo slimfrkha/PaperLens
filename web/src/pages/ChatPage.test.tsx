@@ -7,23 +7,33 @@ import ChatPage from "./ChatPage";
 const chatSession = {
   id: "test-id",
   name: "Test",
-  messages: [{ role: "assistant", content: "regression marker text" }],
-  citations: [null],
-  traces: [null],
+  turns: [storedTurn("question", "regression marker text")],
 };
 
 const twoTurnSession = {
   id: "test-id",
   name: "Test",
-  messages: [
-    { role: "user", content: "first question" },
-    { role: "assistant", content: "first answer" },
-    { role: "user", content: "second question" },
-    { role: "assistant", content: "second answer" },
+  turns: [
+    storedTurn("first question", "first answer"),
+    storedTurn("second question", "second answer"),
   ],
-  citations: [null, [], null, []],
-  traces: [null, [], null, []],
 };
+
+function storedTurn(question: string, answer: string, overrides = {}) {
+  return {
+    question,
+    answer,
+    citations: [],
+    trace: [],
+    usage: null,
+    feedback: null,
+    per_paper: false,
+    compare: false,
+    compare_results: null,
+    auto: false,
+    ...overrides,
+  };
+}
 
 function mockStreamResponse(sse: string): Response {
   let sent = false;
@@ -100,7 +110,11 @@ describe("ChatPage usage metadata", () => {
   it("renders token count and latency for a loaded turn", async () => {
     const sessionWithUsage = {
       ...chatSession,
-      usage: [{ input_tokens: 100, output_tokens: 20, latency_ms: 1500 }],
+      turns: [
+        storedTurn("question", "regression marker text", {
+          usage: { input_tokens: 100, output_tokens: 20, latency_ms: 1500 },
+        }),
+      ],
     };
     vi.stubGlobal(
       "fetch",
@@ -197,7 +211,15 @@ describe("ChatPage feedback control", () => {
       if (init?.method === "POST" && url === "/api/chats/test-id/feedback") {
         return Promise.resolve({
           ok: true,
-          json: () => Promise.resolve({ ...chatSession, feedback: [{ vote: "up", note: null }] }),
+          json: () =>
+            Promise.resolve({
+              ...chatSession,
+              turns: [
+                storedTurn("question", "regression marker text", {
+                  feedback: { vote: "up", note: null },
+                }),
+              ],
+            }),
         } as Response);
       }
       const body =
@@ -230,7 +252,7 @@ describe("ChatPage feedback control", () => {
         "/api/chats/test-id/feedback",
         expect.objectContaining({
           method: "POST",
-          body: JSON.stringify({ index: 0, vote: "up", note: null }),
+          body: JSON.stringify({ turn_index: 0, vote: "up", note: null }),
         }),
       ),
     );
@@ -306,12 +328,11 @@ describe("ChatPage Sources section", () => {
     const session = {
       id: "test-id",
       name: "Test",
-      messages: [
-        { role: "user", content: "question" },
-        { role: "assistant", content: "The cited claim [r1]." },
+      turns: [
+        storedTurn("question", "The cited claim [r1].", {
+          citations: [cite("r1", "p1", "Cited Paper"), cite("r2", "p2", "Uncited Paper")],
+        }),
       ],
-      citations: [null, [cite("r1", "p1", "Cited Paper"), cite("r2", "p2", "Uncited Paper")]],
-      traces: [null, []],
     };
     vi.stubGlobal(
       "fetch",
@@ -493,12 +514,7 @@ describe("ChatPage secondary 'Broaden recall per paper' knob (Ask mode)", () => 
     const otherSession = {
       id: "other-id",
       name: "Other",
-      messages: [
-        { role: "user", content: "other question" },
-        { role: "assistant", content: "other answer" },
-      ],
-      citations: [null, []],
-      per_paper: [null, true],
+      turns: [storedTurn("other question", "other answer", { per_paper: true })],
     };
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
@@ -547,14 +563,10 @@ describe("ChatPage secondary 'Broaden recall per paper' knob (Ask mode)", () => 
     const mixedSession = {
       id: "test-id",
       name: "Test",
-      messages: [
-        { role: "user", content: "first question" },
-        { role: "assistant", content: "first answer" },
-        { role: "user", content: "second question" },
-        { role: "assistant", content: "second answer" },
+      turns: [
+        storedTurn("first question", "first answer", { per_paper: true }),
+        storedTurn("second question", "second answer"),
       ],
-      citations: [null, [], null, []],
-      per_paper: [null, true, null, false],
     };
     vi.stubGlobal(
       "fetch",
@@ -740,12 +752,7 @@ describe("ChatPage Ask/Compare mode", () => {
     const otherSession = {
       id: "other-id",
       name: "Other",
-      messages: [
-        { role: "user", content: "other question" },
-        { role: "assistant", content: "other answer" },
-      ],
-      citations: [null, []],
-      compare: [null, true],
+      turns: [storedTurn("other question", "other answer", { compare: true })],
     };
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
@@ -1099,13 +1106,7 @@ describe("ChatPage Ask/Compare mode", () => {
     const otherSession = {
       id: "other-id",
       name: "Other",
-      messages: [
-        { role: "user", content: "other question" },
-        { role: "assistant", content: "other answer" },
-      ],
-      citations: [null, []],
-      compare: [null, true],
-      auto: [null, true],
+      turns: [storedTurn("other question", "other answer", { compare: true, auto: true })],
     };
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
@@ -1204,7 +1205,8 @@ describe("ChatPage stop generating", () => {
     const stopButton = await screen.findByLabelText("Stop generating");
     expect(screen.queryByLabelText("Send")).not.toBeInTheDocument();
     // Editing the just-sent user turn is locked out while a turn is in flight.
-    expect(screen.getByLabelText("Edit message")).toBeDisabled();
+    const editsWhileStreaming = screen.getAllByLabelText("Edit message");
+    expect(editsWhileStreaming[editsWhileStreaming.length - 1]).toBeDisabled();
 
     fireEvent.click(stopButton);
 
@@ -1216,7 +1218,8 @@ describe("ChatPage stop generating", () => {
     );
     // Composer is unlocked right away — no waiting on the (still-hanging) stream.
     expect(await screen.findByLabelText("Send")).toBeInTheDocument();
-    expect(screen.getByLabelText("Edit message")).not.toBeDisabled();
+    const editsAfterStop = screen.getAllByLabelText("Edit message");
+    expect(editsAfterStop[editsAfterStop.length - 1]).not.toBeDisabled();
   });
 });
 
@@ -1295,7 +1298,7 @@ describe("ChatPage edit-and-resume", () => {
 
     const call = fetchMock.mock.calls.find(([u]) => String(u) === "/api/chat")!;
     const sent = JSON.parse((call[1] as RequestInit).body as string);
-    expect(sent.edit_index).toBe(2);
+    expect(sent.edit_turn).toBe(1);
     expect(sent.messages).toEqual([
       { role: "user", content: "first question" },
       { role: "assistant", content: "first answer" },
@@ -1374,7 +1377,7 @@ describe("ChatPage edit-and-resume", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/chat", expect.anything()));
     const call = fetchMock.mock.calls.find(([u]) => String(u) === "/api/chat")!;
     const sent = JSON.parse((call[1] as RequestInit).body as string);
-    expect(sent.edit_index).toBe(0);
+    expect(sent.edit_turn).toBe(0);
     expect(sent.messages).toEqual([{ role: "user", content: "first question, edited" }]);
     // Everything from the original second exchange onward is gone.
     expect(screen.queryByText("second question")).not.toBeInTheDocument();

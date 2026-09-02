@@ -11,7 +11,7 @@ from rag.config import LLMSpec
 from rag.llm import Usage
 
 from .agent import ChatAgent, InsufficientScopeError, _flatten_compare_rows
-from .chats import ChatStore, generate_name
+from .chats import ChatStore, StoredTurn, UsagePayload, generate_name
 from .schemas import ChatRequest
 
 # How often _run_agent/_run_agent_compare check whether they should give up waiting on the
@@ -202,14 +202,14 @@ def run_turn(
         # An edit-and-resume truncates the stored tail before this turn is computed, so
         # ref_start below reads only the retained history — the caller's single-flight guard
         # ensures no concurrent request can interleave.
-        if req.edit_index is not None and req.chat_id:
-            chats.truncate_at(req.chat_id, req.edit_index)
+        if req.edit_turn is not None and req.chat_id:
+            chats.truncate_before(req.chat_id, req.edit_turn)
         # Existing chats already carry ref-numbered citations for prior turns — offset this
         # turn's numbering past them so a follow-up question continues (r4, r5, ...) instead
         # of restarting at r1 and colliding with refs already shown for a different paper
         # earlier in the chat.
         existing = chats.get(req.chat_id) if req.chat_id else None
-        ref_start = sum(len(c) for c in existing.get("citations", []) if c) if existing else 0
+        ref_start = chats.citation_count(req.chat_id) if req.chat_id else 0
         # Spans the whole turn (retrieval + rerank + LLM + faithfulness check), not just LLM
         # think time — that's the wait the user actually feels.
         t0 = time.perf_counter()
@@ -241,7 +241,7 @@ def run_turn(
             text, citations, usage = _run_agent(agent, req, on_trace, emit, ref_start, stop_check)
             compare_results = None
         latency_ms = int((time.perf_counter() - t0) * 1000)
-        usage_payload = {
+        usage_payload: UsagePayload = {
             "input_tokens": usage.input_tokens,
             "output_tokens": usage.output_tokens,
             "latency_ms": latency_ms,
@@ -253,21 +253,21 @@ def run_turn(
             name = None
             if not existing or not existing.get("name"):
                 name = generate_name(req.messages[0].content, tagging_spec)
-            saved = chats.append_turn(
-                req.chat_id,
-                req.messages[-1].content,
-                text,
-                citations,
-                trace_entries,
-                usage_payload,
-                name=name,
+            turn: StoredTurn = {
+                "question": req.messages[-1].content,
+                "answer": text,
+                "citations": citations,
+                "trace": trace_entries,
+                "usage": usage_payload,
+                "feedback": None,
                 # The secondary knob is hidden/unsendable under Compare (see ChatPage), but
                 # the backend doesn't trust the client alone: never persist both as true.
-                per_paper=req.per_paper and not ran_compare,
-                compare=ran_compare,
-                compare_results=compare_results,
-                auto=req.auto,
-            )
+                "per_paper": req.per_paper and not ran_compare,
+                "compare": ran_compare,
+                "compare_results": compare_results,
+                "auto": req.auto,
+            }
+            saved = chats.append_turn(req.chat_id, turn, name=name)
             emit("meta", json.dumps({"chat_id": saved["id"], "name": saved["name"]}))
     except Exception as e:  # surface errors to the client
         emit("error", f"{type(e).__name__}: {e}")

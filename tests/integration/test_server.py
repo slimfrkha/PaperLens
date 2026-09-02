@@ -379,7 +379,7 @@ def test_chat_streams_usage_event_and_persists_it(make_config, patch_agent_seam)
     assert usage_event["latency_ms"] >= 0
 
     saved = client.get(f"/api/chats/{chat_id}").json()
-    assert saved["usage"][1]["input_tokens"] == 42
+    assert saved["turns"][0]["usage"]["input_tokens"] == 42
 
 
 def test_chat_continues_citation_numbering_across_turns(make_config, patch_agent_seam):
@@ -416,7 +416,7 @@ def test_chat_continues_citation_numbering_across_turns(make_config, patch_agent
     assert cits2[0]["ref"] == "r2"
 
 
-def test_chat_edit_index_truncates_and_restarts_ref_numbering(make_config, patch_agent_seam):
+def test_chat_edit_turn_truncates_and_restarts_ref_numbering(make_config, patch_agent_seam):
     # Edit the FIRST turn of a two-turn chat: the second exchange (and its r2 citation)
     # must be dropped, and the edited turn's citation must renumber from r1, not r3 —
     # ref_start has to be read off the truncated history, not the pre-edit one.
@@ -442,24 +442,24 @@ def test_chat_edit_index_truncates_and_restarts_ref_numbering(make_config, patch
         },
     )
     before = client.get(f"/api/chats/{chat_id}").json()
-    assert len(before["messages"]) == 4
+    assert len(before["turns"]) == 2
 
     edited = client.post(
         "/api/chat",
         json={
             "messages": [{"role": "user", "content": "q1 edited"}],
             "chat_id": chat_id,
-            "edit_index": 0,
+            "edit_turn": 0,
         },
     )
     cits = json.loads(next(e["data"] for e in _parse_sse(edited.text) if e["event"] == "citations"))
     assert cits[0]["ref"] == "r1"  # renumbered from scratch, not r3
 
     after = client.get(f"/api/chats/{chat_id}").json()
-    assert [m["content"] for m in after["messages"]] == ["q1 edited", "See [r1]."]
+    assert [(t["question"], t["answer"]) for t in after["turns"]] == [("q1 edited", "See [r1].")]
 
 
-def test_chat_edit_index_mid_conversation_keeps_earlier_refs(make_config, patch_agent_seam):
+def test_chat_edit_turn_mid_conversation_keeps_earlier_refs(make_config, patch_agent_seam):
     # Edit the SECOND turn of a two-turn chat: the first exchange (and its r1
     # citation) is retained, so the edited turn's ref must continue at r2.
     patch_agent_seam(chat_agent=_RefStartAgent)
@@ -493,23 +493,21 @@ def test_chat_edit_index_mid_conversation_keeps_earlier_refs(make_config, patch_
                 {"role": "user", "content": "q2 edited"},
             ],
             "chat_id": chat_id,
-            "edit_index": 2,
+            "edit_turn": 1,
         },
     )
     cits = json.loads(next(e["data"] for e in _parse_sse(edited.text) if e["event"] == "citations"))
     assert cits[0]["ref"] == "r2"  # continues past the retained r1, doesn't collide
 
     after = client.get(f"/api/chats/{chat_id}").json()
-    assert [m["content"] for m in after["messages"]] == [
-        "q1",
-        "See [r1].",
-        "q2 edited",
-        "See [r2].",
+    assert [(t["question"], t["answer"]) for t in after["turns"]] == [
+        ("q1", "See [r1]."),
+        ("q2 edited", "See [r2]."),
     ]
 
 
-def test_chat_edit_index_on_assistant_turn_surfaces_sse_error(make_config, patch_agent_seam):
-    # truncate_at's ValueError (bad index) must come back as an SSE `error` event, not
+def test_chat_edit_turn_out_of_range_surfaces_sse_error(make_config, patch_agent_seam):
+    # truncate_before's ValueError (bad index) must come back as an SSE `error` event, not
     # an HTTP 4xx — the streaming response has already started by the time it's raised.
     patch_agent_seam(chat_agent=_EchoAgent)
 
@@ -524,7 +522,7 @@ def test_chat_edit_index_on_assistant_turn_surfaces_sse_error(make_config, patch
 
     resp = client.post(
         "/api/chat",
-        json={"messages": [{"role": "user", "content": "q2"}], "chat_id": chat_id, "edit_index": 1},
+        json={"messages": [{"role": "user", "content": "q2"}], "chat_id": chat_id, "edit_turn": 1},
     )
     assert resp.status_code == 200
     events = _parse_sse(resp.text)
@@ -681,7 +679,7 @@ def test_stop_route_signals_stop_check_and_releases_the_guard(make_config, patch
     t.join(timeout=5)
     assert results["first"].status_code == 200
     saved = client.get(f"/api/chats/{chat_id}").json()
-    assert saved["messages"][-1] == {"role": "assistant", "content": "partial"}
+    assert saved["turns"][-1]["answer"] == "partial"
 
     # The turn actually finished (not force-unlocked out from under it) -> a new
     # request on the same chat isn't rejected.
@@ -701,7 +699,7 @@ def test_stop_route_no_op_when_chat_not_in_flight(make_config, patch_agent_seam)
     assert resp.json() == {"stopped": False}
 
 
-def test_feedback_route_sets_clears_and_rejects_invalid_index(make_config, patch_agent_seam):
+def test_feedback_route_sets_clears_and_rejects_invalid_turn_index(make_config, patch_agent_seam):
     patch_agent_seam(chat_agent=_EchoAgent)
 
     cfg = make_config()
@@ -712,24 +710,26 @@ def test_feedback_route_sets_clears_and_rejects_invalid_index(make_config, patch
     client.post(
         "/api/chat", json={"messages": [{"role": "user", "content": "q"}], "chat_id": chat_id}
     )
-    # messages[0] is the user turn, messages[1] is the assistant turn.
+    # The completed exchange is addressed by turn index 0.
 
     resp = client.post(
-        f"/api/chats/{chat_id}/feedback", json={"index": 1, "vote": "up", "note": "nice cite"}
+        f"/api/chats/{chat_id}/feedback",
+        json={"turn_index": 0, "vote": "up", "note": "nice cite"},
     )
     assert resp.status_code == 200
-    saved = resp.json()["feedback"][1]
+    saved = resp.json()["turns"][0]["feedback"]
     assert saved["vote"] == "up"
     assert saved["note"] == "nice cite"
 
-    cleared = client.post(f"/api/chats/{chat_id}/feedback", json={"index": 1})
-    assert cleared.json()["feedback"][1] is None
+    cleared = client.post(f"/api/chats/{chat_id}/feedback", json={"turn_index": 0})
+    assert cleared.json()["turns"][0]["feedback"] is None
 
-    # index 0 is the user turn — feedback only applies to assistant turns.
-    rejected = client.post(f"/api/chats/{chat_id}/feedback", json={"index": 0, "vote": "up"})
+    rejected = client.post(f"/api/chats/{chat_id}/feedback", json={"turn_index": 1, "vote": "up"})
     assert rejected.status_code == 400
 
-    out_of_range = client.post(f"/api/chats/{chat_id}/feedback", json={"index": 99, "vote": "up"})
+    out_of_range = client.post(
+        f"/api/chats/{chat_id}/feedback", json={"turn_index": 99, "vote": "up"}
+    )
     assert out_of_range.status_code == 400
 
 
@@ -738,7 +738,7 @@ def test_feedback_route_404_for_unknown_chat(make_config):
     Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
     client = TestClient(create_app(cfg))
 
-    resp = client.post("/api/chats/missing/feedback", json={"index": 0, "vote": "up"})
+    resp = client.post("/api/chats/missing/feedback", json={"turn_index": 0, "vote": "up"})
     assert resp.status_code == 404
 
 

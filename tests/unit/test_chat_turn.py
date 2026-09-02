@@ -163,7 +163,7 @@ def test_run_turn_persists_partial_text_from_a_stopped_agent(tmp_path):
 
     assert [e for e, _ in events] == ["token", "citations", "usage", "meta", "done"]
     saved = store.get(chat["id"])
-    assert saved["messages"][-1] == {"role": "assistant", "content": "partial answ"}
+    assert saved["turns"][-1]["answer"] == "partial answ"
 
 
 def test_run_turn_abandons_an_agent_that_never_returns_once_stopped(tmp_path):
@@ -204,9 +204,9 @@ def test_run_turn_abandons_an_agent_that_never_returns_once_stopped(tmp_path):
 
     assert [e for e, _ in events] == ["token", "citations", "usage", "meta", "done"]
     saved = store.get(chat["id"])
-    assert saved["messages"][-1] == {"role": "assistant", "content": "partial"}
-    assert saved["usage"][-1]["input_tokens"] is None
-    assert saved["usage"][-1]["output_tokens"] is None
+    assert saved["turns"][-1]["answer"] == "partial"
+    assert saved["turns"][-1]["usage"]["input_tokens"] is None
+    assert saved["turns"][-1]["usage"]["output_tokens"] is None
 
 
 def test_run_turn_never_persists_the_abandoned_agents_late_result(tmp_path):
@@ -245,8 +245,8 @@ def test_run_turn_never_persists_the_abandoned_agents_late_result(tmp_path):
     # let the agent's late return actually happen, and confirm it changed nothing.
     assert finished.wait(timeout=5), "test agent never finished"
     saved = store.get(chat["id"])
-    assert saved["messages"][-1] == {"role": "assistant", "content": "partial"}
-    assert saved["citations"][-1] == []  # not the late [{"ref": "r1", ...}]
+    assert saved["turns"][-1]["answer"] == "partial"
+    assert saved["turns"][-1]["citations"] == []  # not the late [{"ref": "r1", ...}]
 
 
 def test_run_turn_stops_forwarding_tokens_and_trace_after_abandonment(tmp_path):
@@ -306,7 +306,7 @@ def test_run_turn_persists_per_paper_on_the_saved_turn(tmp_path):
     run_turn(lambda: _TwoTokenAgent(), store, req, lambda *a: None, _TAGGING)
 
     saved = store.get(chat["id"])
-    assert saved["per_paper"][-1] is True
+    assert saved["turns"][-1]["per_paper"] is True
 
 
 def test_run_turn_persists_auto_on_the_saved_turn(tmp_path):
@@ -319,7 +319,7 @@ def test_run_turn_persists_auto_on_the_saved_turn(tmp_path):
     run_turn(lambda: _TwoTokenAgent(), store, req, lambda *a: None, _TAGGING)
 
     saved = store.get(chat["id"])
-    assert saved["auto"][-1] is True
+    assert saved["turns"][-1]["auto"] is True
 
 
 def test_run_turn_defaults_auto_to_false_when_omitted(tmp_path):
@@ -330,7 +330,7 @@ def test_run_turn_defaults_auto_to_false_when_omitted(tmp_path):
     run_turn(lambda: _TwoTokenAgent(), store, req, lambda *a: None, _TAGGING)
 
     saved = store.get(chat["id"])
-    assert saved["auto"][-1] is False
+    assert saved["turns"][-1]["auto"] is False
 
 
 def test_run_turn_persists_usage_and_citations(tmp_path):
@@ -341,9 +341,9 @@ def test_run_turn_persists_usage_and_citations(tmp_path):
     run_turn(lambda: _TwoTokenAgent(), store, req, lambda *a: None, _TAGGING)
 
     saved = store.get(chat["id"])
-    assert saved["messages"][-1] == {"role": "assistant", "content": "foobar"}
-    assert saved["citations"][-1] == [{"ref": "r1", "paper_id": "p"}]
-    assert saved["usage"][-1]["input_tokens"] == 10
+    assert saved["turns"][-1]["answer"] == "foobar"
+    assert saved["turns"][-1]["citations"] == [{"ref": "r1", "paper_id": "p"}]
+    assert saved["turns"][-1]["usage"]["input_tokens"] == 10
 
 
 def test_run_turn_continues_citation_numbering_across_turns(tmp_path):
@@ -374,11 +374,11 @@ def test_run_turn_continues_citation_numbering_across_turns(tmp_path):
     assert meta2["name"] == meta1["name"]
 
     saved = store.get(chat["id"])
-    assert saved["citations"][1][0]["ref"] == "r1"
-    assert saved["citations"][3][0]["ref"] == "r2"
+    assert saved["turns"][0]["citations"][0]["ref"] == "r1"
+    assert saved["turns"][1]["citations"][0]["ref"] == "r2"
 
 
-def test_run_turn_edit_index_truncates_before_computing_ref_start(tmp_path):
+def test_run_turn_edit_turn_truncates_before_computing_ref_start(tmp_path):
     store = ChatStore(str(tmp_path))
     chat = store.create()
     req1 = ChatRequest(messages=[ChatMessage(role="user", content="q1")], chat_id=chat["id"])
@@ -398,12 +398,12 @@ def test_run_turn_edit_index_truncates_before_computing_ref_start(tmp_path):
     edit_req = ChatRequest(
         messages=[ChatMessage(role="user", content="q1 edited")],
         chat_id=chat["id"],
-        edit_index=0,
+        edit_turn=0,
     )
     run_turn(lambda: _RefStartAgent(), store, edit_req, lambda *a: None, _TAGGING)
 
     saved = store.get(chat["id"])
-    assert [m["content"] for m in saved["messages"]] == ["q1 edited", "See [r1]."]
+    assert [(t["question"], t["answer"]) for t in saved["turns"]] == [("q1 edited", "See [r1].")]
 
 
 def test_run_turn_agent_run_error_still_emits_done(tmp_path):
@@ -496,10 +496,10 @@ def test_run_turn_persists_compare_and_compare_results(tmp_path):
     run_turn(lambda: _TwoRowCompareAgent(), store, req, lambda *a: None, _TAGGING)
 
     saved = store.get(chat["id"])
-    assert saved["compare"][-1] is True
-    assert saved["messages"][-1] == {"role": "assistant", "content": "Synthesized"}
-    assert [r["paper_id"] for r in saved["compare_results"][-1]] == ["p1", "p2"]
-    assert saved["citations"][-1] == [
+    assert saved["turns"][-1]["compare"] is True
+    assert saved["turns"][-1]["answer"] == "Synthesized"
+    assert [r["paper_id"] for r in saved["turns"][-1]["compare_results"]] == ["p1", "p2"]
+    assert saved["turns"][-1]["citations"] == [
         {"ref": "r1", "paper_id": "p1"},
         {"ref": "r2", "paper_id": "p2"},
     ]
@@ -520,7 +520,7 @@ def test_run_turn_never_persists_per_paper_true_when_compare_true(tmp_path):
     run_turn(lambda: _TwoRowCompareAgent(), store, req, lambda *a: None, _TAGGING)
 
     saved = store.get(chat["id"])
-    assert saved["per_paper"][-1] is False
+    assert saved["turns"][-1]["per_paper"] is False
 
 
 class _InsufficientScopeThenAskAgent:
@@ -604,9 +604,9 @@ def test_run_turn_falls_back_to_ask_when_compare_raises_insufficient_scope(tmp_p
     saved = store.get(chat["id"])
     # Persisted as the mode that actually ran, not the mode that was requested — otherwise
     # a reloaded turn would look like Compare with no rows.
-    assert saved["compare"][-1] is False
-    assert saved["compare_results"][-1] is None
-    assert saved["messages"][-1] == {"role": "assistant", "content": "Fallback answer."}
+    assert saved["turns"][-1]["compare"] is False
+    assert saved["turns"][-1]["compare_results"] is None
+    assert saved["turns"][-1]["answer"] == "Fallback answer."
 
 
 def test_run_turn_does_not_mask_an_unrelated_value_error_from_compare(tmp_path):
@@ -631,7 +631,7 @@ def test_run_turn_does_not_mask_an_unrelated_value_error_from_compare(tmp_path):
     assert any(e == "error" for e, _ in events)
     assert [e for e, _ in events][-1] == "done"
     saved = store.get(chat["id"])
-    assert saved["messages"] == []  # never persisted — the turn never reached append_turn
+    assert saved["turns"] == []  # never persisted — the turn never reached append_turn
 
 
 def test_run_turn_abandons_a_compare_agent_that_never_finishes(tmp_path):
@@ -681,9 +681,9 @@ def test_run_turn_abandons_a_compare_agent_that_never_finishes(tmp_path):
     saved = store.get(chat["id"])
     # abandon-path fallback flattens whatever rows completed, via _flatten_compare_rows —
     # the same helper agent.compare() uses for its own internal stop-before-synthesis path.
-    assert saved["messages"][-1]["content"] == "## P1\n\npartial row\n\n"
-    assert saved["citations"][-1] == [row["citations"][0]]
-    assert saved["compare_results"][-1] == [row]
+    assert saved["turns"][-1]["answer"] == "## P1\n\npartial row\n\n"
+    assert saved["turns"][-1]["citations"] == [row["citations"][0]]
+    assert saved["turns"][-1]["compare_results"] == [row]
 
 
 def test_run_turn_get_agent_failure_emits_error_and_done(tmp_path):

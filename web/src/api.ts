@@ -104,15 +104,21 @@ export interface CompareRow {
 export interface ChatSession {
   id: string;
   name: string;
-  messages: { role: "user" | "assistant"; content: string }[];
-  citations: (Citation[] | null)[];
-  traces?: (TraceEntry[] | null)[];
-  feedback?: (Feedback | null)[];
-  usage?: (UsageInfo | null)[];
-  per_paper?: (boolean | null)[];
-  compare?: (boolean | null)[];
-  compare_results?: (CompareRow[] | null)[];
-  auto?: (boolean | null)[];
+  turns: StoredTurn[];
+}
+
+/** A completed user/assistant exchange as persisted by the chat store. */
+export interface StoredTurn {
+  question: string;
+  answer: string;
+  citations: Citation[];
+  trace: TraceEntry[];
+  usage: UsageInfo | null;
+  feedback: Feedback | null;
+  per_paper: boolean;
+  compare: boolean;
+  compare_results: CompareRow[] | null;
+  auto: boolean;
 }
 
 async function j<T>(r: Response): Promise<T> {
@@ -201,14 +207,14 @@ export const deleteChat = (id: string) =>
   fetch(`/api/chats/${encodeURIComponent(id)}`, { method: "DELETE" }).then((r) => r.json());
 export const setFeedback = (
   chatId: string,
-  index: number,
+  turnIndex: number,
   vote: "up" | "down" | null,
   note: string | null,
 ) =>
   fetch(`/api/chats/${encodeURIComponent(chatId)}/feedback`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ index, vote, note }),
+    body: JSON.stringify({ turn_index: turnIndex, vote, note }),
   }).then(j<ChatSession>);
 
 export interface TraceEntry {
@@ -251,7 +257,7 @@ export const classifyMode = (messages: ChatMessage[], tags: string[], papers: st
 /** POST /api/chat and parse the SSE stream (token / citations / trace / usage /
  *  compare_row / meta / error / done). `compare_row` only fires on a Compare turn, once
  *  per completed paper — the carousel's drill-down data filling in progressively.
- *  `editIndex` truncates the stored chat back to that user turn before resuming from it.
+ *  `editTurn` replaces the selected stored turn and all later turns.
  *  `signal`, if given, aborts the request (e.g. the chat page's Stop button) — an abort
  *  ends the stream silently (no onError/onDone) rather than throwing, since the caller
  *  already knows it stopped things itself. */
@@ -263,7 +269,7 @@ export async function chat(
   compare: boolean,
   chatId: string | null,
   h: ChatHandlers,
-  editIndex?: number,
+  editTurn?: number,
   signal?: AbortSignal,
   auto: boolean = false,
 ): Promise<void> {
@@ -280,7 +286,7 @@ export async function chat(
         compare,
         auto,
         chat_id: chatId,
-        edit_index: editIndex ?? null,
+        edit_turn: editTurn ?? null,
       }),
       signal,
     });

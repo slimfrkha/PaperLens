@@ -95,7 +95,7 @@ describe("chat", () => {
     expect(onCompareRow).toHaveBeenCalledWith(row);
   });
 
-  it("sends edit_index in the request body when editing a prior turn", async () => {
+  it("sends edit_turn in the request body when editing a prior turn", async () => {
     const fetchMock = vi.fn().mockResolvedValue(mockStreamResponse("event: done\ndata: \n\n"));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -112,13 +112,13 @@ describe("chat", () => {
           compare: false,
           auto: false,
           chat_id: "c1",
-          edit_index: 2,
+          edit_turn: 2,
         }),
       }),
     );
   });
 
-  it("sends edit_index: null for a normal (non-edit) send", async () => {
+  it("sends edit_turn: null for a normal (non-edit) send", async () => {
     const fetchMock = vi.fn().mockResolvedValue(mockStreamResponse("event: done\ndata: \n\n"));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -135,7 +135,7 @@ describe("chat", () => {
           compare: false,
           auto: false,
           chat_id: "c1",
-          edit_index: null,
+          edit_turn: null,
         }),
       }),
     );
@@ -158,7 +158,7 @@ describe("chat", () => {
           compare: false,
           auto: false,
           chat_id: "c1",
-          edit_index: null,
+          edit_turn: null,
         }),
       }),
     );
@@ -181,7 +181,7 @@ describe("chat", () => {
           compare: true,
           auto: false,
           chat_id: "c1",
-          edit_index: null,
+          edit_turn: null,
         }),
       }),
     );
@@ -215,7 +215,7 @@ describe("chat", () => {
           compare: true,
           auto: true,
           chat_id: "c1",
-          edit_index: null,
+          edit_turn: null,
         }),
       }),
     );
@@ -376,8 +376,8 @@ describe("setFeedback", () => {
     vi.unstubAllGlobals();
   });
 
-  it("POSTs index/vote/note to the chat's feedback route", async () => {
-    const session = { id: "c1", name: "T", messages: [], citations: [] };
+  it("POSTs turn_index/vote/note to the chat's feedback route", async () => {
+    const session = { id: "c1", name: "T", turns: [] };
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: () => Promise.resolve(session),
@@ -391,7 +391,7 @@ describe("setFeedback", () => {
       expect.objectContaining({
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ index: 1, vote: "up", note: "great citation" }),
+        body: JSON.stringify({ turn_index: 1, vote: "up", note: "great citation" }),
       }),
     );
     expect(result).toEqual(session);
