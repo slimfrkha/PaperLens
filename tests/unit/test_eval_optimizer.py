@@ -240,7 +240,7 @@ def test_build_cache_with_sparse_preserves_default_arm_exactness(make_searcher, 
         sparse=sparse_index,
         fetch_multiplier=2,
     )
-    assert all(c.sparse_ids for c in widened)  # the whole point of passing `sparse`
+    assert all(c.snapshot.sparse_ids for c in widened)  # the whole point of passing `sparse`
     for w, p in zip(widened, plain, strict=True):
         from_widened = score_from_cache(w, candidates=2, k=5, rerank=False)
         from_plain = score_from_cache(p, candidates=2, k=5, rerank=False)
@@ -270,7 +270,7 @@ def test_score_from_cache_sparse_fuses_bm25_into_the_pool(make_searcher, seed_ch
         sparse=sparse_index,
         fetch_multiplier=2,
     )[0]
-    assert cache.sparse_ids == ["p1-rare"]  # the only doc BM25 finds any relevance in
+    assert cache.snapshot.sparse_ids == ("p1-rare",)  # the only doc BM25 finds any relevance in
     hybrid = score_from_cache(cache, candidates=2, k=2, rerank=False, sparse=True)
     assert "p1-rare" in hybrid.candidate_ids  # RRF-fused in via sparse_ids, not just dense
 
@@ -355,7 +355,7 @@ def test_build_cache_with_multi_query_preserves_default_arm_exactness(
         multi_query_llm=llm,
         multi_query_n=1,
     )
-    assert all(c.variant_candidate_ids for c in widened)  # the whole point of passing multi_query
+    assert all(c.snapshot.variant_rankings for c in widened)  # the point of multi_query caching
     for w, p in zip(widened, plain, strict=True):
         from_widened = score_from_cache(w, candidates=2, k=5, rerank=False)
         from_plain = score_from_cache(p, candidates=2, k=5, rerank=False)
@@ -394,10 +394,9 @@ def test_build_cache_multi_query_uses_its_own_fetch_multiplier(
         multi_query_fetch_multiplier=3,
     )
 
-    # base query: max_candidates(2), sparse is None so fetch_multiplier doesn't apply.
-    # paraphrase variant: max_candidates(2) * multi_query_fetch_multiplier(3) = 6 — not 2
-    # (no headroom, the bug) and not 10 (fetch_multiplier=5 leaking in).
-    assert seen_n_results == [2, 6]
+    # Every production multi-query ranking, including the original query, has fusion headroom.
+    # `fetch_multiplier=5` remains irrelevant because sparse is off.
+    assert seen_n_results == [6, 6]
 
 
 def test_score_from_cache_multi_query_fuses_variant_pools(make_config, seed_chunks, fake_llm):
@@ -441,14 +440,24 @@ def test_score_from_cache_multi_query_fuses_variant_pools(make_config, seed_chun
     cache = build_cache(
         ctx.searcher,
         items,
-        max_candidates=1,
+        max_candidates=2,
         reranker=FakeReranker(set()),
         multi_query_llm=llm,
         multi_query_n=1,
     )[0]
-    assert cache.candidate_ids == ["p-near"]  # dense-only misses "target" entirely at depth 1
+    assert cache.snapshot.dense_ids[0] == "p-near"  # dense-only ranks target below near
     fused = score_from_cache(cache, candidates=2, k=2, rerank=False, multi_query=True)
     assert "p-target" in fused.candidate_ids  # RRF-fused in via the paraphrase variant
+
+    product = Searcher(
+        db_dir=cfg.paths.rag_db,
+        collection=cfg.collection,
+        embedder=embedder,
+        multi_query_enabled=True,
+        multi_query_n=1,
+        llm=llm,
+    ).recall("zzflorble", candidates=2, max_k=2)
+    assert fused.candidate_ids == list(product.candidate_ids)
 
 
 def test_screen_retrieval_multi_query_arm_plumbs_through_paired_delta(

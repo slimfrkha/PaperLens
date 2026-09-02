@@ -36,8 +36,8 @@ from rag.embedders import build_embedder
 from rag.llm import LLMBackend, build_llm
 from rag.query_expansion import generate_paraphrases
 from rag.reranker import Reranker, build_reranker
-from rag.search import Searcher
-from rag.sparse import BM25Index, build_sparse_index, reciprocal_rank_fusion
+from rag.search import RecallPoolSnapshot, Searcher
+from rag.sparse import BM25Index, build_sparse_index
 
 from .checkpoint import CheckpointWriter, resume_units
 from .harness import build_searcher, score_items
@@ -69,6 +69,7 @@ _CAVEAT_ELIGIBILITY = (
 )
 
 DEFAULT_CANDIDATE_GRID = [10, 20, 30, 50]
+_RECALL_POOL_CACHE_SCHEMA_VERSION = 2
 # OFAT grids for the chunking screen: values tried per knob (the config's own value
 # is always the paired-against default and is skipped if it appears here). Overridable.
 DEFAULT_CHUNK_GRIDS: dict[str, list[float]] = {
@@ -96,25 +97,16 @@ class Arm:
 class QueryCache:
     """Everything retrieved once per query, reused by every arm.
 
-    ``candidate_ids`` is the dense pool ordered by ascending cosine distance (Chroma's own
-    order) at ``max(grid)`` depth (or ``max(grid) * fetch_multiplier`` when a hybrid arm widened
-    it — see :func:`build_cache`); ``rerank_scores`` maps each of those ids, plus every id in
-    ``sparse_ids`` and every id in ``variant_candidate_ids``, to its cross-encoder score over the
-    full unioned pool; ``relevant_ids`` is the gold-section set. ``sparse_ids`` is the BM25 pool
-    at the same depth, empty when no ``sparse`` index was passed to :func:`build_cache``.
-    ``variant_candidate_ids`` is one dense pool per LLM-generated paraphrase (empty when
-    multi-query wasn't requested for this cache build) — unlike ``sparse_ids``, this needs a
-    fresh embedding + Chroma query per paraphrase, so it isn't free the way hybrid's BM25 pool
-    is; see the ``multi_query_llm``/``multi_query_n`` cost note on :func:`build_cache`.
+    ``snapshot`` contains every raw ranked source list at the widest required depth. It owns
+    later dense/hybrid/multi-query materialization, so this cache never reimplements RRF.
+    ``rerank_scores`` maps every hydrated snapshot id to its cross-encoder score.
     """
 
     qid: str
     paper_id: str
-    candidate_ids: list[str]
+    snapshot: RecallPoolSnapshot
     rerank_scores: dict[str, float]
     relevant_ids: set[str]
-    sparse_ids: list[str] = field(default_factory=list)
-    variant_candidate_ids: list[list[str]] = field(default_factory=list)
 
 
 @dataclass
@@ -146,11 +138,9 @@ def build_reranker_for_cfg(cfg: Config) -> Reranker:
 def _query_cache_to_record(cache: QueryCache) -> dict[str, Any]:
     return {
         "paper_id": cache.paper_id,
-        "candidate_ids": cache.candidate_ids,
+        "snapshot": cache.snapshot.to_record(),
         "rerank_scores": cache.rerank_scores,
         "relevant_ids": sorted(cache.relevant_ids),
-        "sparse_ids": cache.sparse_ids,
-        "variant_candidate_ids": cache.variant_candidate_ids,
     }
 
 
@@ -158,11 +148,9 @@ def _query_cache_from_record(qid: str, record: dict[str, Any]) -> QueryCache:
     return QueryCache(
         qid=qid,
         paper_id=record["paper_id"],
-        candidate_ids=record["candidate_ids"],
+        snapshot=RecallPoolSnapshot.from_record(record["snapshot"]),
         rerank_scores=record["rerank_scores"],
         relevant_ids=set(record["relevant_ids"]),
-        sparse_ids=record["sparse_ids"],
-        variant_candidate_ids=record["variant_candidate_ids"],
     )
 
 
@@ -176,6 +164,7 @@ def _build_cache_header(
     multi_query_fetch_multiplier: int = 3,
 ) -> dict[str, Any]:
     return {
+        "recall_pool_cache_schema": _RECALL_POOL_CACHE_SCHEMA_VERSION,
         "max_candidates": max_candidates,
         "hybrid": hybrid,
         "fetch_multiplier": fetch_multiplier,
@@ -241,11 +230,6 @@ def build_cache(
     a caller (``sweep``) that owns several such files across one command and wants to defer
     cleanup until *all* of them are done, not just this one.
     """
-    fetch_n = max_candidates * fetch_multiplier if sparse is not None else max_candidates
-    # Independent of fetch_n/fetch_multiplier (sparse's) — a variant's own multiplier, so the
-    # multi-query arm gets fusion headroom even when sparse is None (screening multi-query
-    # alone, the common case), mirroring Searcher.search's multi_query_fetch_multiplier.
-    variant_fetch_n = max_candidates * multi_query_fetch_multiplier
     done: dict[str, dict[str, Any]] = {}
     writer: CheckpointWriter | None = None
     if checkpoint_path is not None:
@@ -268,37 +252,39 @@ def build_cache(
         if qid in done:
             caches.append(_query_cache_from_record(qid, done[qid]))
             continue
-        dense_ids, by_id = searcher.dense_recall(it.query, fetch_n, where=None)
-        sparse_ids: list[str] = sparse.search(it.query, n=fetch_n) if sparse is not None else []
-        searcher.backfill_missing(by_id, sparse_ids)  # no-op when sparse_ids is []
-
-        variant_candidate_ids: list[list[str]] = []
+        paraphrases: list[str] = []
         if multi_query_n > 0:
             assert multi_query_llm is not None  # enforced by the caller (screen_retrieval)
-            for variant in generate_paraphrases(it.query, multi_query_llm, n=multi_query_n):
-                v_dense_ids, v_by_id = searcher.dense_recall(variant, variant_fetch_n, where=None)
-                for cid, r in v_by_id.items():
-                    by_id.setdefault(cid, r)
-                variant_candidate_ids.append(v_dense_ids)
-                if sparse is not None:
-                    v_sparse_ids = sparse.search(variant, n=variant_fetch_n)
-                    variant_candidate_ids.append(v_sparse_ids)
-                    searcher.backfill_missing(by_id, v_sparse_ids)
-
-        union_ids = list(by_id.keys())
+            paraphrases = generate_paraphrases(it.query, multi_query_llm, n=multi_query_n)
+        captured = searcher.capture_recall_snapshot(
+            it.query,
+            max_candidates,
+            sparse=sparse,
+            fetch_multiplier=fetch_multiplier,
+            variants=paraphrases,
+            multi_query_fetch_multiplier=multi_query_fetch_multiplier,
+            base_fetch_multiplier=(
+                multi_query_fetch_multiplier
+                if paraphrases
+                else fetch_multiplier
+                if sparse is not None
+                else 1
+            ),
+        )
+        union_ids = list(captured.results_by_id)
         scores = (
-            reranker.score(it.query, [by_id[cid].text for cid in union_ids]) if union_ids else []
+            reranker.score(it.query, [captured.results_by_id[cid].text for cid in union_ids])
+            if union_ids
+            else []
         )
         cache = QueryCache(
             qid=qid,
             paper_id=it.paper_id,
-            candidate_ids=dense_ids,
+            snapshot=captured.snapshot,
             rerank_scores=dict(zip(union_ids, scores, strict=True)),
             relevant_ids=relevant_ids(
                 searcher.collection, it.paper_id, it.section_number, it.section_title
             ),
-            sparse_ids=sparse_ids,
-            variant_candidate_ids=variant_candidate_ids,
         )
         caches.append(cache)
         if writer is not None:
@@ -339,19 +325,15 @@ def score_from_cache(
     arm); if both were somehow requested together, ``multi_query`` wins since its fuse already
     includes the default pool.
     """
-    if multi_query:
-        fetch_n = candidates * multi_query_fetch_multiplier
-        rankings = [cache.candidate_ids[:fetch_n]] + [
-            v[:fetch_n] for v in cache.variant_candidate_ids
-        ]
-        cand = reciprocal_rank_fusion(rankings, k=rrf_k)[:candidates]
-    elif sparse:
-        fetch_n = candidates * fetch_multiplier
-        cand = reciprocal_rank_fusion(
-            [cache.candidate_ids[:fetch_n], cache.sparse_ids[:fetch_n]], k=rrf_k
-        )[:candidates]
-    else:
-        cand = cache.candidate_ids[:candidates]
+    selection = cache.snapshot.materialize(
+        candidates,
+        sparse=sparse,
+        multi_query=multi_query,
+        rrf_k=rrf_k,
+        fetch_multiplier=fetch_multiplier,
+        multi_query_fetch_multiplier=multi_query_fetch_multiplier,
+    )
+    cand = list(selection.candidate_ids)
     if rerank:
         ordered = sorted(cand, key=lambda cid: cache.rerank_scores[cid], reverse=True)
         ranked = [(cid, cache.rerank_scores[cid]) for cid in ordered[:k]]

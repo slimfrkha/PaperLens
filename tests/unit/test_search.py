@@ -60,56 +60,42 @@ def test_result_carries_section_number(make_searcher, seed_chunks):
     assert results[0].section_number == "1"
 
 
-def test_dense_recall_matches_search_dense_only_pool(make_searcher, seed_chunks):
-    # dense_recall is now a public primitive eval's harness/optimizer call directly (instead of
-    # reimplementing dense recall by hand) — this pins its contract against search()'s own
-    # dense-only, no-rerank path, which is built from the exact same by_id values.
+def test_recall_matches_search_dense_only_pool(make_searcher, seed_chunks):
+    # Product search and evaluation now cross the same pre-rerank pool seam. This pins the
+    # dense-only materialization against Searcher's public search path.
     docs = [
         seed_chunks("paper-a", "Attention", "latent attention over the kv cache"),
         seed_chunks("paper-b", "Training", "large batch training run details"),
     ]
     ctx = make_searcher(docs)
 
-    dense_ids, by_id = ctx.searcher.dense_recall("attention", fetch_n=2, where=None)
+    pool = ctx.searcher.recall("attention", candidates=2, max_k=2)
     dense_results = ctx.searcher.search("attention", max_k=2, candidates=2, rerank=False).results
 
-    assert [by_id[cid].paper_id for cid in dense_ids] == [r.paper_id for r in dense_results]
-    top = by_id[dense_ids[0]]
-    assert (top.score, top.text, top.body, top.breadcrumb) == (
+    assert [result.paper_id for result in pool.results] == [r.paper_id for r in dense_results]
+    top = pool.results[0]
+    assert (top.score, top.text, top.body, top.breadcrumb, top.source) == (
         dense_results[0].score,
         dense_results[0].text,
         dense_results[0].body,
         dense_results[0].breadcrumb,
+        dense_results[0].source,
     )
 
 
-def test_backfill_missing_adds_placeholder_results_outside_the_dense_pool(
-    make_searcher, seed_chunks
-):
+def test_recall_snapshot_materializes_dense_without_sparse_provenance(make_searcher, seed_chunks):
     docs = [
         seed_chunks("paper-a", "Attention", "latent attention over the kv cache"),
         seed_chunks("paper-b", "Training", "large batch training run details"),
         seed_chunks("paper-c", "Inference", "fast inference serving pipeline"),
     ]
     ctx = make_searcher(docs)
-    all_ids = [doc_id for doc_id, _, _ in docs]
+    captured = ctx.searcher.capture_recall_snapshot("attention", 1)
+    selection = captured.snapshot.materialize(1)
 
-    dense_ids, by_id = ctx.searcher.dense_recall("attention", fetch_n=1, where=None)
-    real_score = by_id[dense_ids[0]].score
-
-    ctx.searcher.backfill_missing(by_id, all_ids)
-
-    assert set(by_id) == set(all_ids)
-    backfilled_ids = [cid for cid in all_ids if cid not in dense_ids]
-    assert len(backfilled_ids) == 2
-    for cid in backfilled_ids:
-        assert by_id[cid].score == 0.0
-        assert by_id[cid].text  # metadata round-tripped, not left empty
-
-    # Backfilling an id already present is a no-op — doesn't clobber the real dense-recall score
-    # with the placeholder.
-    ctx.searcher.backfill_missing(by_id, dense_ids)
-    assert by_id[dense_ids[0]].score == real_score
+    assert selection.candidate_ids == tuple(captured.snapshot.dense_ids[:1])
+    assert not selection.sparse_ids
+    assert captured.results_by_id[selection.candidate_ids[0]].text
 
 
 def test_rerank_lazy_reranker_load_failure_falls_back(monkeypatch, make_searcher, seed_chunks):

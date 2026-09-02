@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import argparse
 import textwrap
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from statistics import median
 from typing import Any, Literal, cast
 
@@ -75,6 +75,129 @@ class SearchOutcome:
 
     results: list[Result]
     cutoff_reason: CutoffReason
+
+
+@dataclass(frozen=True)
+class RecallSelection:
+    """One materialized candidate-id ordering from a raw recall snapshot."""
+
+    candidate_ids: tuple[str, ...]
+    scores: dict[str, float]
+    dense_ids: frozenset[str]
+    sparse_ids: frozenset[str]
+
+
+@dataclass(frozen=True)
+class RecallPoolSnapshot:
+    """Raw ranked source lists captured once and materialized many times.
+
+    This is intentionally the seam the eval cache crosses: callers can select a candidate
+    depth without knowing RRF, over-fetching, or which variant rankings need fusing.
+    It contains ids only; passage hydration and per-materialization provenance remain in
+    ``Searcher`` so a hybrid arm cannot leak ``Result.source`` into a dense-only arm.
+    """
+
+    dense_ids: tuple[str, ...]
+    sparse_ids: tuple[str, ...] = ()
+    variant_rankings: tuple[tuple[str, ...], ...] = ()
+    variant_sources: tuple[str, ...] = ()
+
+    def materialize(
+        self,
+        candidates: int,
+        *,
+        sparse: bool = False,
+        multi_query: bool = False,
+        rrf_k: int = 60,
+        fetch_multiplier: int = 3,
+        multi_query_fetch_multiplier: int = 3,
+    ) -> RecallSelection:
+        """Select one candidate pool from this snapshot without another retrieval."""
+        if multi_query:
+            fetch_n = candidates * multi_query_fetch_multiplier
+            rankings = [list(self.dense_ids[:fetch_n])] + [
+                list(ids[:fetch_n]) for ids in self.variant_rankings
+            ]
+            candidate_ids = reciprocal_rank_fusion(rankings, k=rrf_k)[:candidates]
+            scores = rrf_scores(rankings, k=rrf_k)
+            dense_ids = set(self.dense_ids[:fetch_n])
+            sparse_ids: set[str] = set(self.sparse_ids[:fetch_n])
+            if self.sparse_ids:
+                rankings.insert(1, list(self.sparse_ids[:fetch_n]))
+                candidate_ids = reciprocal_rank_fusion(rankings, k=rrf_k)[:candidates]
+                scores = rrf_scores(rankings, k=rrf_k)
+            for ids, source in zip(self.variant_rankings, self.variant_sources, strict=True):
+                if source == "dense":
+                    dense_ids.update(ids[:fetch_n])
+                else:
+                    sparse_ids.update(ids[:fetch_n])
+            return RecallSelection(
+                tuple(candidate_ids), scores, frozenset(dense_ids), frozenset(sparse_ids)
+            )
+
+        if sparse:
+            fetch_n = candidates * fetch_multiplier
+            dense_ids = list(self.dense_ids[:fetch_n])
+            sparse_ids = list(self.sparse_ids[:fetch_n])
+            rankings = [dense_ids, sparse_ids]
+            candidate_ids = reciprocal_rank_fusion(rankings, k=rrf_k)[:candidates]
+            return RecallSelection(
+                tuple(candidate_ids),
+                rrf_scores(rankings, k=rrf_k),
+                frozenset(dense_ids),
+                frozenset(sparse_ids),
+            )
+
+        candidate_ids = tuple(self.dense_ids[:candidates])
+        return RecallSelection(candidate_ids, {}, frozenset(candidate_ids), frozenset())
+
+    def to_record(self) -> dict[str, list]:
+        return {
+            "dense_ids": list(self.dense_ids),
+            "sparse_ids": list(self.sparse_ids),
+            "variant_rankings": [list(ids) for ids in self.variant_rankings],
+            "variant_sources": list(self.variant_sources),
+        }
+
+    @classmethod
+    def from_record(cls, record: dict[str, list]) -> RecallPoolSnapshot:
+        return cls(
+            dense_ids=tuple(record["dense_ids"]),
+            sparse_ids=tuple(record.get("sparse_ids", [])),
+            variant_rankings=tuple(tuple(ids) for ids in record.get("variant_rankings", [])),
+            variant_sources=tuple(record.get("variant_sources", [])),
+        )
+
+
+@dataclass(frozen=True)
+class RecallEntry:
+    """One candidate's stable chunk id and fully hydrated passage."""
+
+    chunk_id: str
+    result: Result
+
+
+@dataclass(frozen=True)
+class RecallPool:
+    """The fully hydrated, pre-rerank candidate pool returned to product and eval callers."""
+
+    entries: tuple[RecallEntry, ...]
+
+    @property
+    def candidate_ids(self) -> tuple[str, ...]:
+        return tuple(entry.chunk_id for entry in self.entries)
+
+    @property
+    def results(self) -> tuple[Result, ...]:
+        return tuple(entry.result for entry in self.entries)
+
+
+@dataclass
+class CapturedRecall:
+    """A cache-ready raw pool plus the hydrated passages needed to score it once."""
+
+    snapshot: RecallPoolSnapshot
+    results_by_id: dict[str, Result]
 
 
 def find_cutoff(
@@ -224,8 +347,7 @@ class Searcher:
         return self._sparse
 
     def _embed_query(self, query: str) -> list[list[float]]:
-        """Embeds one query string — the shared primitive behind ``dense_recall``'s default
-        embedding and ``search``'s per-variant precompute (see there for why it's precomputed).
+        """Embeds one query string for the recall pool's precomputed variant vectors.
 
         Asymmetric embedders (e.g. Gemini) embed queries differently from docs; symmetric
         ones fall through to __call__.
@@ -233,7 +355,7 @@ class Searcher:
         embed_query = getattr(self.embedder, "embed_query", None)
         return embed_query([query]) if embed_query else self.embedder([query])
 
-    def dense_recall(
+    def _dense_recall(
         self,
         query: str,
         fetch_n: int,
@@ -242,12 +364,8 @@ class Searcher:
     ) -> tuple[list[str], dict[str, Result]]:
         """One query's dense ranking: chunk ids in Chroma's distance order, plus their Results.
 
-        The shared per-query-variant retrieval primitive. ``search`` calls this once per
-        variant per scope (the single-query path below is the ``len(variants) == 1`` case of
-        the same call); ``eval.harness._retrieve`` and ``eval.optimizer.build_cache`` call it
-        directly to get the same dense pool ``search`` would compute — chunk ids and per-id
-        Results (``.text`` for reranking, ``.score`` for a no-rerank dense-only ranking) that
-        ``search``'s own return value (a fused/reranked/cut ``SearchOutcome``) doesn't expose.
+        An implementation detail of ``capture_recall_snapshot``. It returns ids and hydrated
+        passages so the enclosing recall module can fuse and materialize the pool.
 
         ``qvec`` lets a caller pass an already-computed embedding for ``query`` — ``search``
         precomputes one per variant and reuses it across every scope (e.g. every paper under
@@ -284,18 +402,11 @@ class Searcher:
         }
         return dense_ids, by_id
 
-    def backfill_missing(self, by_id: dict[str, Result], candidate_ids: list[str]) -> None:
+    def _backfill_missing(self, by_id: dict[str, Result], candidate_ids: list[str]) -> None:
         """Fetch any candidate id ``dense_recall`` didn't already return — reached via BM25
-        (hybrid retrieval); in multi-query this is always this variant's own BM25 hits, since
-        a hit already found by another variant's dense recall is already in ``by_id`` — and
-        add it with a placeholder score. Mutates ``by_id`` in place (not a return-a-new-dict
-        design): ``search``'s multi-query loop and ``eval.optimizer.build_cache``'s per-variant
-        loop both call this repeatedly, accumulating onto what earlier calls already backfilled
-        without a reassignment at every call site. The placeholder score (0.0) is overwritten
-        immediately after by ``_tag_and_collect`` in ``search``; eval callers only ever read
-        ``.text`` off a backfilled Result (rerank input), never ``.score``, so the placeholder
-        is never mistaken for a real one there either. Only paper_id/breadcrumb/section/text/body
-        need to be real here.
+        (hybrid retrieval) and add it with a placeholder score. The enclosing recall module
+        replaces that score with an RRF score whenever the candidate pool is materialized; only
+        paper_id/breadcrumb/section/text/body need to be real during capture.
         """
         missing = [cid for cid in candidate_ids if cid not in by_id]
         if not missing:
@@ -315,23 +426,161 @@ class Searcher:
                 body=m["body"],
             )
 
-    def _tag_and_collect(
+    def capture_recall_snapshot(
         self,
-        by_id: dict[str, Result],
-        fused_ids: list[str],
-        scores: dict[str, float],
-        dense_set: set[str],
-        sparse_set: set[str],
-    ) -> list[Result]:
-        """Called once, after fusion is fully resolved: stamp each fused id's RRF score and
-        dense/sparse/both source into ``by_id``, then collect in fused order."""
-        for cid in fused_ids:
-            by_id[cid].score = scores[cid]
-            in_dense, in_sparse = cid in dense_set, cid in sparse_set
-            by_id[cid].source = (
-                "both" if in_dense and in_sparse else "sparse" if in_sparse else "dense"
+        query: str,
+        max_candidates: int,
+        *,
+        where: dict[str, Any] | None = None,
+        allowed_paper_ids: set[str] | None = None,
+        sparse: BM25Index | None = None,
+        fetch_multiplier: int = 3,
+        variants: list[str] | None = None,
+        multi_query_fetch_multiplier: int = 3,
+        base_fetch_multiplier: int | None = None,
+        qvecs: dict[str, list[list[float]]] | None = None,
+    ) -> CapturedRecall:
+        """Capture raw rankings once for the eval cache or one product recall scope.
+
+        Callers only choose the corpus scope and which already-created query variants to
+        capture. Dense lookup, sparse lookup, hydration, and the shape of the raw rankings
+        stay behind this seam. ``RecallPoolSnapshot.materialize`` owns all later fusion.
+        """
+        variants = variants or []
+        multi_query = bool(variants)
+        sparse_enabled = sparse is not None
+        fetch_n = max_candidates * (
+            base_fetch_multiplier
+            if base_fetch_multiplier is not None
+            else multi_query_fetch_multiplier
+            if multi_query
+            else fetch_multiplier
+            if sparse_enabled
+            else 1
+        )
+        variant_fetch_n = max_candidates * multi_query_fetch_multiplier
+        qvec = qvecs.get(query) if qvecs is not None else None
+        dense_ids, by_id = self._dense_recall(query, fetch_n, where, qvec=qvec)
+        sparse_ids = (
+            sparse.search(query, n=fetch_n, allowed_ids=allowed_paper_ids)
+            if sparse is not None
+            else []
+        )
+        self._backfill_missing(by_id, sparse_ids)
+
+        variant_rankings: list[tuple[str, ...]] = []
+        variant_sources: list[str] = []
+        for variant in variants:
+            qvec = qvecs.get(variant) if qvecs is not None else None
+            variant_dense_ids, variant_by_id = self._dense_recall(
+                variant, variant_fetch_n, where, qvec=qvec
             )
-        return [by_id[cid] for cid in fused_ids]
+            for cid, result in variant_by_id.items():
+                by_id.setdefault(cid, result)
+            variant_rankings.append(tuple(variant_dense_ids))
+            variant_sources.append("dense")
+            if sparse is not None:
+                variant_sparse_ids = sparse.search(
+                    variant, n=variant_fetch_n, allowed_ids=allowed_paper_ids
+                )
+                self._backfill_missing(by_id, variant_sparse_ids)
+                variant_rankings.append(tuple(variant_sparse_ids))
+                variant_sources.append("sparse")
+
+        return CapturedRecall(
+            RecallPoolSnapshot(
+                dense_ids=tuple(dense_ids),
+                sparse_ids=tuple(sparse_ids),
+                variant_rankings=tuple(variant_rankings),
+                variant_sources=tuple(variant_sources),
+            ),
+            by_id,
+        )
+
+    def recall(
+        self,
+        query: str,
+        *,
+        candidates: int,
+        max_k: int,
+        paper: str | None = None,
+        paper_ids: list[str] | None = None,
+        per_paper: bool = False,
+        per_paper_min_candidates: int | None = None,
+    ) -> RecallPool:
+        """Build the fully hydrated pre-rerank pool for product and evaluation callers."""
+        ids = paper_ids
+        if paper is not None:
+            ids = [paper] if ids is None else [pid for pid in ids if pid == paper]
+        if ids is not None and not ids:
+            return RecallPool(())
+        if per_paper and ids is None:
+            raise ValueError(
+                "per_paper=True requires a resolved paper/paper_ids filter — Searcher has no "
+                "manifest to fall back to every paper (ChatAgent.run does that fallback "
+                "for you)."
+            )
+
+        paraphrases: list[str] = []
+        if self.multi_query_enabled:
+            assert self.llm is not None  # enforced at construction
+            paraphrases = generate_paraphrases(query, self.llm, n=self.multi_query_n)
+        variants = [query, *paraphrases]
+        qvecs = {variant: self._embed_query(variant) for variant in variants}
+
+        where = {"paper_id": {"$in": ids}} if ids is not None else None
+        allowed = set(ids) if ids is not None else None
+        if per_paper:
+            assert ids is not None
+            minimum = max_k if per_paper_min_candidates is None else per_paper_min_candidates
+            scopes = [
+                (
+                    {"paper_id": {"$in": [pid]}},
+                    {pid},
+                    max(minimum, min(candidates, candidates // len(ids))),
+                )
+                for pid in ids
+            ]
+        else:
+            scopes = [(where, allowed, candidates)]
+
+        entries: list[RecallEntry] = []
+        for scope_where, scope_allowed, scope_candidates in scopes:
+            captured = self.capture_recall_snapshot(
+                query,
+                scope_candidates,
+                where=scope_where,
+                allowed_paper_ids=scope_allowed,
+                sparse=self.sparse if self.sparse_enabled else None,
+                fetch_multiplier=self._fetch_multiplier,
+                variants=paraphrases,
+                multi_query_fetch_multiplier=self.multi_query_fetch_multiplier,
+                qvecs=qvecs,
+            )
+            selection = captured.snapshot.materialize(
+                scope_candidates,
+                sparse=self.sparse_enabled,
+                multi_query=bool(paraphrases),
+                rrf_k=self._rrf_k,
+                fetch_multiplier=self._fetch_multiplier,
+                multi_query_fetch_multiplier=self.multi_query_fetch_multiplier,
+            )
+            for cid in selection.candidate_ids:
+                result = captured.results_by_id[cid]
+                in_dense, in_sparse = cid in selection.dense_ids, cid in selection.sparse_ids
+                source = "both" if in_dense and in_sparse else "sparse" if in_sparse else "dense"
+                entries.append(
+                    RecallEntry(
+                        cid,
+                        replace(
+                            result, score=selection.scores.get(cid, result.score), source=source
+                        ),
+                    )
+                )
+
+        if per_paper:
+            entries.sort(key=lambda entry: entry.result.score, reverse=True)
+        return RecallPool(tuple(entries))
 
     def search(
         self,
@@ -354,140 +603,17 @@ class Searcher:
             # returns more than max_k instead of failing loudly.
             raise ValueError(f"min_k ({min_k}) must be <= max_k ({max_k})")
 
-        # Resolve the paper filter. `paper_ids` (e.g. from a tag filter) and a
-        # single `paper` intersect; an explicit empty set matches nothing.
-        ids = paper_ids
-        if paper is not None:
-            ids = [paper] if ids is None else [p for p in ids if p == paper]
-        if ids is not None and len(ids) == 0:
-            return SearchOutcome([], "pool_exhausted")
-        where = {"paper_id": {"$in": ids}} if ids is not None else None
-        allowed = set(ids) if ids is not None else None
-
-        # per_paper needs a concrete paper list to loop over — Searcher has no manifest to
-        # fall back to "every paper" itself (ChatAgent.run does that fallback before calling
-        # in, see agent.py). Fail here, before burning an LLM call on paraphrasing or an API
-        # call on embedding, rather than on a doomed empty-scope loop below.
-        if per_paper and ids is None:
-            raise ValueError(
-                "per_paper=True requires a resolved paper/paper_ids filter — Searcher has no "
-                "manifest to fall back to every paper (ChatAgent.run does that fallback "
-                "for you)."
-            )
-
-        variants = [query]
-        if self.multi_query_enabled:
-            assert self.llm is not None  # enforced at construction
-            variants += generate_paraphrases(query, self.llm, n=self.multi_query_n)
-
-        # Embed every variant once, up front — reused across every scope below instead of
-        # re-embedding identical query text per scope (per_paper runs one scope per paper).
-        qvecs = {v: self._embed_query(v) for v in variants}
-
-        # Normally one scope: the whole resolved `where`/`allowed`, at the full `candidates`
-        # budget. Under per_paper, one scope per paper, each capped to its own share of the
-        # budget — floored at `max_k` so no paper's contribution shrinks below a full
-        # answer's worth, capped at `candidates` so no paper gets a bigger pool than a normal
-        # search would already pull (which also makes a single resolved paper a no-op,
-        # identical to per_paper=False). Assumes the caller's usual max_k <= candidates — if
-        # max_k > candidates, the floor wins and each paper's fetch exceeds candidates; every
-        # real caller (ChatAgent._build_search_executor) already guarantees candidates >=
-        # max_k, so this isn't guarded here.
-        if per_paper:
-            assert ids is not None  # enforced by the per_paper/ids guard above
-            n_papers = len(ids)
-            scopes = [
-                (
-                    {"paper_id": {"$in": [pid]}},
-                    {pid},
-                    max(max_k, min(candidates, candidates // n_papers)),
-                )
-                for pid in ids
-            ]
-        else:
-            scopes = [(where, allowed, candidates)]
-
-        results: list[Result] = []
-        for scope_where, scope_allowed, scope_candidates in scopes:
-            if len(variants) == 1:
-                # Fusion breadth: when hybrid is on, both sides over-fetch fetch_multiplier *
-                # candidates before RRF-fusing, so fusion has margin to promote a sparse-only
-                # hit that dense ranked outside its own top-`candidates` — the final
-                # truncation to `candidates` happens after fusion, not before, so downstream
-                # (rerank, elbow cutoff) sees the same pool shape either way.
-                fetch_n = (
-                    scope_candidates * self._fetch_multiplier
-                    if self.sparse_enabled
-                    else scope_candidates
-                )
-                dense_ids, by_id = self.dense_recall(query, fetch_n, scope_where, qvec=qvecs[query])
-                if not dense_ids:
-                    continue
-
-                if self.sparse_enabled:
-                    sparse_ids = self.sparse.search(query, n=fetch_n, allowed_ids=scope_allowed)
-                    dense_set = set(dense_ids)
-                    sparse_set = set(sparse_ids)
-                    fused_ids = reciprocal_rank_fusion([dense_ids, sparse_ids], k=self._rrf_k)[
-                        :scope_candidates
-                    ]
-                    self.backfill_missing(by_id, fused_ids)
-                    # RRF score uniformly across the whole fused set — don't mix cosine similarity
-                    # and RRF scales (Result.score's docstring covers this: "rerank score if
-                    # reranked, else cosine similarity" stops being true for a hybrid+no-rerank
-                    # query).
-                    scores = rrf_scores([dense_ids, sparse_ids], k=self._rrf_k)
-                    results += self._tag_and_collect(
-                        by_id, fused_ids, scores, dense_set, sparse_set
-                    )
-                else:
-                    results += list(by_id.values())
-            else:
-                # Multi-query: one flat RRF pass over every ranking from every variant at once —
-                # dense_v1, sparse_v1, dense_v2, sparse_v2, ... — not a fusion of per-variant
-                # fusions. RRF is already generalized to N rankings, so nesting two RRF passes
-                # (fuse dense+sparse per variant, then fuse those fused results again) would
-                # double-apply its rank-decay to evidence that already went through one fusion
-                # round, with no clean interpretation of what that compounding means.
-                # `multi_query_fetch_multiplier` governs over-fetch depth for every ranking here
-                # (both a variant's dense and its sparse query), deliberately independent of
-                # `sparse.fetch_multiplier` — needed even when hybrid is off, or the fuse has no
-                # margin to promote a hit ranked just outside one variant's own top-`candidates`.
-                variant_fetch_n = scope_candidates * self.multi_query_fetch_multiplier
-                rankings: list[list[str]] = []
-                dense_ids_all: list[str] = []
-                sparse_ids_all: list[str] = []
-                by_id = {}
-                for v in variants:
-                    dense_ids_v, by_id_v = self.dense_recall(
-                        v, variant_fetch_n, scope_where, qvec=qvecs[v]
-                    )
-                    for cid, r in by_id_v.items():
-                        by_id.setdefault(cid, r)
-                    rankings.append(dense_ids_v)
-                    dense_ids_all += dense_ids_v
-                    if self.sparse_enabled:
-                        sparse_ids_v = self.sparse.search(
-                            v, n=variant_fetch_n, allowed_ids=scope_allowed
-                        )
-                        rankings.append(sparse_ids_v)
-                        sparse_ids_all += sparse_ids_v
-                        self.backfill_missing(by_id, sparse_ids_v)
-                fused_ids = reciprocal_rank_fusion(rankings, k=self._rrf_k)[:scope_candidates]
-                scores = rrf_scores(rankings, k=self._rrf_k)
-                dense_set = set(dense_ids_all)
-                sparse_set = set(sparse_ids_all)
-                results += self._tag_and_collect(by_id, fused_ids, scores, dense_set, sparse_set)
-
+        pool = self.recall(
+            query,
+            candidates=candidates,
+            max_k=max_k,
+            paper=paper,
+            paper_ids=paper_ids,
+            per_paper=per_paper,
+        )
+        results = [entry.result for entry in pool.entries]
         if not results:
             return SearchOutcome([], "pool_exhausted")
-
-        if per_paper:
-            # Concatenation across papers isn't in any coherent score order yet — sort before
-            # rerank runs so a skipped/failed rerank still degrades to a sane cross-paper order
-            # instead of "papers back to back, each internally sorted." A successful rerank
-            # below overwrites this with its own sort, same as it always has.
-            results.sort(key=lambda r: r.score, reverse=True)
 
         reranked_ok = False
         if rerank:
@@ -499,9 +625,11 @@ class Searcher:
                     )
                 # Lengths are already checked equal above; strict=False since a mismatch is
                 # handled there, not here.
-                for r, s in zip(results, scores, strict=False):
-                    r.score = s
-                results.sort(key=lambda r: r.score, reverse=True)
+                results = [
+                    replace(result, score=score)
+                    for result, score in zip(results, scores, strict=False)
+                ]
+                results.sort(key=lambda result: result.score, reverse=True)
                 reranked_ok = True
             except Exception as e:
                 # Reranker failure (model load, inference error, network/rate-limit/auth from an

@@ -19,6 +19,11 @@ cluster bootstrap — none of it belongs next to `Searcher`/`Agent` in
 [CONTEXT.md](../CONTEXT.md)), and the import graph draws the same line — `eval` **composes**
 `rag` (`Searcher`, `rag.llm`, `chunk_markdown`); `rag`/`server` never import `eval`.
 
+The harness uses `Searcher`'s shared pre-rerank retrieval pool, including hybrid retrieval,
+multi-query expansion, per-paper scope handling, RRF, and passage provenance. Retrieval screens
+capture the raw rankings once, then derive cached candidate-depth arms from that snapshot; this
+keeps the no-retrieve re-slicing property without maintaining a second fusion implementation.
+
 ```mermaid
 flowchart LR
   cfg[config.yaml] --> pool[(ingested pool\nmarkdown + index)]

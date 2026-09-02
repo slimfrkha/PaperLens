@@ -21,7 +21,6 @@ from rag.config import BM25Cfg, Config, HFEmbeddingCfg, LLMRerankerCfg
 from rag.llm import build_llm
 from rag.reranker import build_reranker
 from rag.search import Searcher
-from rag.sparse import reciprocal_rank_fusion, rrf_scores
 
 from .checkpoint import CheckpointWriter, resume_units
 from .comparative_metrics import (
@@ -100,7 +99,11 @@ class RunReport:
 
 def build_searcher(cfg: Config) -> Searcher:
     """A ``Searcher`` over the config's on-disk collection (loads the real embedder)."""
-    llm = build_llm(cfg.llm.chat) if isinstance(cfg.reranker, LLMRerankerCfg) else None
+    llm = (
+        build_llm(cfg.llm.chat)
+        if isinstance(cfg.reranker, LLMRerankerCfg) or cfg.multi_query.enabled
+        else None
+    )
     reranker = build_reranker(cfg.reranker, llm=llm) if cfg.reranker.enabled else None
     return Searcher(
         db_dir=cfg.paths.rag_db,
@@ -115,6 +118,10 @@ def build_searcher(cfg: Config) -> Searcher:
         bm25_b=cfg.sparse.b if isinstance(cfg.sparse, BM25Cfg) else 0.75,
         rrf_k=cfg.sparse.rrf_k,
         fetch_multiplier=cfg.sparse.fetch_multiplier,
+        multi_query_enabled=cfg.multi_query.enabled,
+        multi_query_n=cfg.multi_query.n_paraphrases,
+        multi_query_fetch_multiplier=cfg.multi_query.fetch_multiplier,
+        llm=llm,
     )
 
 
@@ -127,30 +134,17 @@ def _retrieve(
     RRF-fused with BM25 when ``searcher.sparse_enabled`` (``build_searcher`` sets this from
     ``cfg.sparse.enabled``, so ``run``/``confirm`` genuinely reflect a config that has hybrid
     turned on, not just the dense-only reading the pre-hybrid version of this function gave).
-    ``ranked`` is the reranked top-k as ``(chunk_id, score)`` (for stage-2 nDCG). Composes
-    ``Searcher.dense_recall``/``backfill_missing`` directly — the same primitive ``search``
-    uses internally — for the chunk ids ``search``'s own return value throws away.
+    ``ranked`` is the reranked top-k as ``(chunk_id, score)`` (for stage-2 nDCG). It crosses
+    ``Searcher.recall`` — the same pre-rerank pool seam product search uses.
     """
-    fetch_n = candidates * searcher._fetch_multiplier if searcher.sparse_enabled else candidates
-    dense_ids, by_id = searcher.dense_recall(query, fetch_n, where=None)
-    if not dense_ids:
+    pool = searcher.recall(query, candidates=candidates, max_k=k)
+    if not pool.entries:
         return [], []
-
-    if searcher.sparse_enabled:
-        sparse_ids = searcher.sparse.search(query, n=fetch_n)
-        ids = reciprocal_rank_fusion([dense_ids, sparse_ids], k=searcher._rrf_k)[:candidates]
-        searcher.backfill_missing(by_id, ids)
-    else:
-        ids = dense_ids
-
+    ids = [entry.chunk_id for entry in pool.entries]
     if not rerank:
-        if searcher.sparse_enabled:
-            scores = rrf_scores([dense_ids, sparse_ids], k=searcher._rrf_k)
-            ranked = [(i, scores[i]) for i in ids][:k]
-        else:
-            ranked = [(i, by_id[i].score) for i in ids][:k]
+        ranked = [(entry.chunk_id, entry.result.score) for entry in pool.entries][:k]
         return ids, ranked
-    docs = [by_id[i].text for i in ids]
+    docs = [entry.result.text for entry in pool.entries]
     scores = searcher.reranker.score(query, docs)
     ranked = sorted(zip(ids, scores, strict=True), key=lambda t: t[1], reverse=True)[:k]
     return ids, ranked
@@ -511,63 +505,21 @@ def _retrieve_scoped(
     (``max(1, candidates // n_papers)``, ``budget_matched=True``) — see
     per-paper-eval-spec.md's "Retrieval primitive" for why both exist.
     """
-    if per_paper:
-        n_papers = len(paper_ids)
-        per_paper_candidates = (
-            max(1, candidates // n_papers)
-            if budget_matched
-            else max(k, min(candidates, candidates // n_papers))
-        )
-        scopes = [({"paper_id": {"$in": [pid]}}, {pid}, per_paper_candidates) for pid in paper_ids]
-    else:
-        scopes = [({"paper_id": {"$in": paper_ids}}, set(paper_ids), candidates)]
-
-    all_ids: list[str] = []
-    by_id: dict[str, Any] = {}
-    rrf_scores_by_id: dict[str, float] = {}
-    for scope_where, scope_allowed, scope_candidates in scopes:
-        fetch_n = (
-            scope_candidates * searcher._fetch_multiplier
-            if searcher.sparse_enabled
-            else scope_candidates
-        )
-        dense_ids, scope_by_id = searcher.dense_recall(query, fetch_n, scope_where)
-        by_id.update(scope_by_id)
-        if not dense_ids:
-            continue
-        if searcher.sparse_enabled:
-            sparse_ids = searcher.sparse.search(query, n=fetch_n, allowed_ids=scope_allowed)
-            ids = reciprocal_rank_fusion([dense_ids, sparse_ids], k=searcher._rrf_k)[
-                :scope_candidates
-            ]
-            searcher.backfill_missing(by_id, ids)
-            rrf_scores_by_id.update(rrf_scores([dense_ids, sparse_ids], k=searcher._rrf_k))
-        else:
-            ids = dense_ids
-        all_ids.extend(ids)
-
-    if not all_ids:
+    pool = searcher.recall(
+        query,
+        candidates=candidates,
+        max_k=k,
+        paper_ids=paper_ids,
+        per_paper=per_paper,
+        per_paper_min_candidates=1 if budget_matched else None,
+    )
+    if not pool.entries:
         return [], []
-
+    all_ids = [entry.chunk_id for entry in pool.entries]
     if not rerank:
-        score_of = (
-            rrf_scores_by_id if searcher.sparse_enabled else {i: by_id[i].score for i in all_ids}
-        )
-        if per_paper:
-            # Concatenation across per-paper scopes isn't in score order — each scope is
-            # internally sorted, but paper A's chunks are listed before paper B's regardless
-            # of relevance, and build_per_paper_scopes always puts the gold paper first. A
-            # naive [:k] here would spuriously favor whichever paper happens to be scope[0].
-            # Mirrors Searcher.search's own `results.sort(...)` before its rerank/fallback
-            # branch (search.py).
-            ranked = sorted(((i, score_of[i]) for i in all_ids), key=lambda t: t[1], reverse=True)[
-                :k
-            ]
-        else:
-            ranked = [(i, score_of[i]) for i in all_ids][:k]
+        ranked = [(entry.chunk_id, entry.result.score) for entry in pool.entries][:k]
         return all_ids, ranked
-
-    docs = [by_id[i].text for i in all_ids]
+    docs = [entry.result.text for entry in pool.entries]
     scores = searcher.reranker.score(query, docs)
     ranked = sorted(zip(all_ids, scores, strict=True), key=lambda t: t[1], reverse=True)[:k]
     return all_ids, ranked

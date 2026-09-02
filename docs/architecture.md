@@ -156,6 +156,13 @@ failing the request whenever the reranker fails outright — a cross-encoder mod
 error, or an LLM-backend call erroring (timeout, rate limit, auth). A `paper`/`paper_ids`
 filter (used by the tag filter) scopes recall.
 
+The pre-rerank **retrieval pool** is one shared module inside `Searcher`: it owns dense and
+BM25 recall, over-fetching, RRF, multi-query fusion, per-paper assembly, and each passage's
+`source` provenance. The eval harness crosses that same seam rather than rebuilding hybrid
+retrieval from lower-level Chroma and BM25 calls. Its optimizer captures a raw pool snapshot
+once, then materializes cached candidate depths without another retrieval; provenance is
+derived per materialization, so a hybrid arm cannot leak into a dense-only arm.
+
 An opt-in, per-message **per-paper retrieval** mode (`Searcher.search(per_paper=True)`)
 changes *how* that scope is searched: instead of one recall pass over every allowed
 paper's chunks, it runs recall once per paper — each with its own candidate budget,
