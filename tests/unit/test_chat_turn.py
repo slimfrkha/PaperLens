@@ -10,7 +10,12 @@ import time
 from rag.config import OpenAISpec
 from rag.llm import Usage
 from server.agent import InsufficientScopeError
-from server.chat_turn import _run_in_thread_with_abandon, run_turn
+from server.chat_turn import (
+    _InvocationResult,
+    _run_in_thread_with_abandon,
+    _TurnInvocation,
+    run_turn,
+)
 from server.chats import ChatStore
 from server.schemas import ChatMessage, ChatRequest
 
@@ -35,6 +40,44 @@ def test_run_in_thread_with_abandon_returns_false_when_stopped_first():
     result = _run_in_thread_with_abandon(target, stop_flag.is_set)
     assert result is False
     release.set()  # let the background thread finish so it doesn't leak past the test
+
+
+def test_turn_invocation_finishes_an_active_callback_before_abandoning():
+    stop_flag = threading.Event()
+    callback_started = threading.Event()
+    release_callback = threading.Event()
+    fallback_called = threading.Event()
+    result: list[_InvocationResult] = []
+    invocation = _TurnInvocation(stop_flag.is_set)
+
+    def target() -> _InvocationResult:
+        def callback() -> None:
+            callback_started.set()
+            release_callback.wait()
+
+        invocation.forward(callback)
+        return _InvocationResult("complete", [], Usage(10, 5))
+
+    def abandoned_result() -> _InvocationResult:
+        fallback_called.set()
+        return _InvocationResult("partial", [], Usage(None, None))
+
+    caller = threading.Thread(
+        target=lambda: result.append(invocation.run(target, abandoned_result))
+    )
+    caller.start()
+    assert callback_started.wait(timeout=5), "test callback never started"
+    stop_flag.set()
+
+    # The invocation observes Stop after its 0.1s poll, but cannot snapshot the partial
+    # result until the already-approved callback releases the same lock.
+    assert not fallback_called.wait(timeout=0.2)
+    release_callback.set()
+    caller.join(timeout=5)
+
+    assert not caller.is_alive(), "invocation did not finish"
+    assert fallback_called.is_set()
+    assert result == [_InvocationResult("partial", [], Usage(None, None))]
 
 
 class _TwoTokenAgent:
@@ -684,6 +727,60 @@ def test_run_turn_abandons_a_compare_agent_that_never_finishes(tmp_path):
     assert saved["turns"][-1]["answer"] == "## P1\n\npartial row\n\n"
     assert saved["turns"][-1]["citations"] == [row["citations"][0]]
     assert saved["turns"][-1]["compare_results"] == [row]
+
+
+def test_run_turn_stops_forwarding_compare_rows_after_abandonment(tmp_path):
+    first_row = {
+        "paper_id": "p1",
+        "title": "P1",
+        "arxiv_id": None,
+        "text": "first row",
+        "citations": [],
+        "trace": [],
+    }
+    late_row = {**first_row, "paper_id": "p2", "title": "P2", "text": "late row"}
+    finished = threading.Event()
+
+    class _KeepsSendingCompareRowsAfterAbandonment:
+        def compare(
+            self,
+            messages,
+            tags,
+            papers,
+            on_text,
+            on_row,
+            on_trace=None,
+            ref_start=0,
+            stop_check=None,
+        ):
+            on_row(first_row)
+            time.sleep(0.3)  # past run_turn's 0.1s abandon-poll interval
+            on_row(late_row)
+            finished.set()
+            return "ignored", [first_row, late_row], [], Usage(10, 5)
+
+    store = ChatStore(str(tmp_path))
+    chat = store.create()
+    req = ChatRequest(
+        messages=[ChatMessage(role="user", content="compare")], chat_id=chat["id"], compare=True
+    )
+    stop_flag = threading.Event()
+    stop_flag.set()
+    events: list[tuple[str, str]] = []
+
+    run_turn(
+        lambda: _KeepsSendingCompareRowsAfterAbandonment(),
+        store,
+        req,
+        lambda e, d: events.append((e, d)),
+        _TAGGING,
+        stop_flag.is_set,
+    )
+
+    assert finished.wait(timeout=5), "test agent never finished"
+    assert [json.loads(d)["paper_id"] for e, d in events if e == "compare_row"] == ["p1"]
+    saved = store.get(chat["id"])
+    assert saved["turns"][-1]["compare_results"] == [first_row]
 
 
 def test_run_turn_get_agent_failure_emits_error_and_done(tmp_path):

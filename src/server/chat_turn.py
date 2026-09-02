@@ -6,6 +6,7 @@ import json
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from rag.config import LLMSpec
 from rag.llm import Usage
@@ -18,6 +19,16 @@ from .schemas import ChatRequest
 # agent thread — the bound on how long Stop takes to unlock the chat, regardless of what
 # the agent thread is actually blocked on.
 _ABANDON_POLL_INTERVAL_S = 0.1
+
+
+@dataclass
+class _InvocationResult:
+    """The one result shape ``run_turn`` needs from either answer mode."""
+
+    text: str
+    citations: list[dict]
+    usage: Usage
+    compare_results: list[dict] | None = None
 
 
 def _run_in_thread_with_abandon(
@@ -47,6 +58,52 @@ def _run_in_thread_with_abandon(
     return True
 
 
+class _TurnInvocation:
+    """Owns one agent call's abandon race and late-event suppression."""
+
+    def __init__(self, stop_check: Callable[[], bool] | None):
+        self._stop_check = stop_check
+        self._abandoned = threading.Event()
+        self._lock = threading.Lock()
+
+    def forward(self, callback: Callable[[], None]) -> None:
+        """Run an SSE or trace callback only while this invocation owns the stream."""
+        # The callback can mutate a partial-result accumulator as well as emit SSE. Hold
+        # this lock through both the active check and the callback so abandonment cannot
+        # snapshot the accumulator (or emit ``done``) halfway through either operation.
+        with self._lock:
+            if not self._abandoned.is_set():
+                callback()
+
+    def run(
+        self,
+        target: Callable[[], _InvocationResult],
+        abandoned_result: Callable[[], _InvocationResult],
+    ) -> _InvocationResult:
+        result_value: _InvocationResult | None = None
+        result_error: Exception | None = None
+
+        def run_target() -> None:
+            nonlocal result_value, result_error
+            try:
+                result_value = target()
+            except Exception as e:  # re-raised only if this invocation waited for it
+                result_error = e
+
+        if not _run_in_thread_with_abandon(run_target, self._stop_check):
+            # Serialize with `forward`: a callback already in progress completes before
+            # this captures the partial result; callbacks that arrive after this point are
+            # ignored altogether.
+            with self._lock:
+                self._abandoned.set()
+                return abandoned_result()
+
+        if result_error is not None:
+            raise result_error
+        assert result_value is not None  # target returned without a result or an error
+        return result_value
+
+
 def _run_agent(
     agent: ChatAgent,
     req: ChatRequest,
@@ -54,57 +111,35 @@ def _run_agent(
     emit: Callable[[str, str], None],
     ref_start: int,
     stop_check: Callable[[], bool] | None,
-) -> tuple[str, list[dict], Usage]:
-    """Runs ``agent.run()`` via `_run_in_thread_with_abandon` and returns its
-    ``(text, citations, usage)`` — or, if abandoned, whatever text streamed so far with
-    empty citations (see `_run_in_thread_with_abandon`'s docstring for why).
-
-    Once abandoned, `on_text`/`on_trace` stop forwarding to `emit` — the SSE stream this
-    turn owns is about to end (`run_turn` moves straight on to persisting), so any further
-    tokens/trace steps the abandoned thread produces would otherwise queue up for a
-    stream nobody's reading anymore.
-    """
+) -> _InvocationResult:
+    """Invoke Ask, retaining its streamed-text partial-result rule."""
     parts: list[str] = []
-    abandoned = threading.Event()
+    invocation = _TurnInvocation(stop_check)
 
     def on_text(t: str) -> None:
-        if abandoned.is_set():
-            return
-        parts.append(t)
-        emit("token", t)
+        def forward() -> None:
+            parts.append(t)
+            emit("token", t)
+
+        invocation.forward(forward)
 
     def guarded_on_trace(e: dict) -> None:
-        if abandoned.is_set():
-            return
-        on_trace(e)
+        invocation.forward(lambda: on_trace(e))
 
-    result_value: tuple[str, list[dict], Usage] | None = None
-    result_error: Exception | None = None
+    def target() -> _InvocationResult:
+        text, citations, usage = agent.run(
+            [m.model_dump() for m in req.messages],
+            req.tags,
+            req.papers,
+            on_text=on_text,
+            on_trace=guarded_on_trace,
+            ref_start=ref_start,
+            per_paper=req.per_paper,
+            stop_check=stop_check,
+        )
+        return _InvocationResult(text, citations, usage)
 
-    def _target() -> None:
-        nonlocal result_value, result_error
-        try:
-            result_value = agent.run(
-                [m.model_dump() for m in req.messages],
-                req.tags,
-                req.papers,
-                on_text=on_text,
-                on_trace=guarded_on_trace,
-                ref_start=ref_start,
-                per_paper=req.per_paper,
-                stop_check=stop_check,
-            )
-        except Exception as e:  # re-raised below, but only in the thread that waited it out
-            result_error = e
-
-    if not _run_in_thread_with_abandon(_target, stop_check):
-        abandoned.set()
-        return "".join(parts), [], Usage(None, None)
-
-    if result_error is not None:
-        raise result_error
-    assert result_value is not None  # thread finished without setting either result slot
-    return result_value
+    return invocation.run(target, lambda: _InvocationResult("".join(parts), [], Usage(None, None)))
 
 
 def _run_agent_compare(
@@ -114,59 +149,42 @@ def _run_agent_compare(
     emit: Callable[[str, str], None],
     ref_start: int,
     stop_check: Callable[[], bool] | None,
-) -> tuple[str, list[dict], list[dict], Usage]:
-    """Compare-mode counterpart to `_run_agent` — same `_run_in_thread_with_abandon` race,
-    but accumulates `rows` (parallel to `_run_agent`'s `parts`) so an abandoned turn still
-    returns a usable `compare_results`/`citations` pair via `_flatten_compare_rows` — the
-    same helper `ChatAgent.compare` uses for its own internal stop-before-synthesis
-    fallback, so both stop paths degrade the same way."""
+) -> _InvocationResult:
+    """Invoke Compare, retaining its completed-row partial-result rule."""
     rows: list[dict] = []
-    abandoned = threading.Event()
+    invocation = _TurnInvocation(stop_check)
 
     def on_text(t: str) -> None:
-        if abandoned.is_set():
-            return
-        emit("token", t)
+        invocation.forward(lambda: emit("token", t))
 
     def guarded_on_trace(e: dict) -> None:
-        if abandoned.is_set():
-            return
-        on_trace(e)
+        invocation.forward(lambda: on_trace(e))
 
     def on_row(row: dict) -> None:
-        if abandoned.is_set():
-            return
-        rows.append(row)
-        emit("compare_row", json.dumps(row))
+        def forward() -> None:
+            rows.append(row)
+            emit("compare_row", json.dumps(row))
 
-    result_value: tuple[str, list[dict], list[dict], Usage] | None = None
-    result_error: Exception | None = None
+        invocation.forward(forward)
 
-    def _target() -> None:
-        nonlocal result_value, result_error
-        try:
-            result_value = agent.compare(
-                [m.model_dump() for m in req.messages],
-                req.tags,
-                req.papers,
-                on_text=on_text,
-                on_row=on_row,
-                on_trace=guarded_on_trace,
-                ref_start=ref_start,
-                stop_check=stop_check,
-            )
-        except Exception as e:
-            result_error = e
+    def target() -> _InvocationResult:
+        text, completed_rows, citations, usage = agent.compare(
+            [m.model_dump() for m in req.messages],
+            req.tags,
+            req.papers,
+            on_text=on_text,
+            on_row=on_row,
+            on_trace=guarded_on_trace,
+            ref_start=ref_start,
+            stop_check=stop_check,
+        )
+        return _InvocationResult(text, citations, usage, completed_rows)
 
-    if not _run_in_thread_with_abandon(_target, stop_check):
-        abandoned.set()
+    def abandoned_result() -> _InvocationResult:
         text, citations = _flatten_compare_rows(rows)
-        return text, rows, citations, Usage(None, None)
+        return _InvocationResult(text, citations, Usage(None, None), rows)
 
-    if result_error is not None:
-        raise result_error
-    assert result_value is not None
-    return result_value
+    return invocation.run(target, abandoned_result)
 
 
 def run_turn(
@@ -219,9 +237,7 @@ def run_turn(
         ran_compare = req.compare
         if req.compare:
             try:
-                text, compare_results, citations, usage = _run_agent_compare(
-                    agent, req, on_trace, emit, ref_start, stop_check
-                )
+                result = _run_agent_compare(agent, req, on_trace, emit, ref_start, stop_check)
             except InsufficientScopeError:
                 # Classification (Auto mode's own pre-flight round trip) or the user's click
                 # can both race a manifest change between "compare was decided" and this turn
@@ -232,14 +248,14 @@ def run_turn(
                 # bare ValueError) so a genuine failure elsewhere in compare() — e.g. a
                 # synthesis retry that fails twice, after rows have already streamed — surfaces
                 # as a real error instead of being silently rerun as an unrelated Ask turn.
-                text, citations, usage = _run_agent(
-                    agent, req, on_trace, emit, ref_start, stop_check
-                )
-                compare_results = None
+                result = _run_agent(agent, req, on_trace, emit, ref_start, stop_check)
                 ran_compare = False
         else:
-            text, citations, usage = _run_agent(agent, req, on_trace, emit, ref_start, stop_check)
-            compare_results = None
+            result = _run_agent(agent, req, on_trace, emit, ref_start, stop_check)
+        text = result.text
+        citations = result.citations
+        usage = result.usage
+        compare_results = result.compare_results
         latency_ms = int((time.perf_counter() - t0) * 1000)
         usage_payload: UsagePayload = {
             "input_tokens": usage.input_tokens,
