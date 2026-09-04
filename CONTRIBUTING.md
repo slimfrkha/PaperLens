@@ -157,6 +157,3 @@ Docs that contradict the code are worse than no docs. A change isn't done until 
 Run `uv run python scripts/check_docs.py` after editing documentation; it checks local links,
 heading fragments, code-fence languages, and that reader-facing pages stay within two clicks
 of the README.
-
-For the baseline behind the current structure, see the archived
-[September 2026 documentation overhaul](docs/audits/2026-09-docs-overhaul.md).
