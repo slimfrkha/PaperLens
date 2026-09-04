@@ -1,5 +1,5 @@
 # Cloud LLMs via Anthropic (Claude), local HF embedder + reranker.
-# Needs:  uv sync --extra anthropic   and   ANTHROPIC_API_KEY in .env
+# Needs: ANTHROPIC_API_KEY in .env (`uv sync` includes the provider dependencies)
 
 data_path: data
 collection: arxiv_papers

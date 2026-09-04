@@ -19,9 +19,9 @@ that only exist once something runs unattended or serves multiple people at once
 
 ```text
 config.yaml ─┬─> ingestion worker: download → markdown (Docling) → index (Chroma) ‖ LLM tags
-             └─> FastAPI backend ── agentic RAG ──> LLM (Claude | any OpenAI-compatible server)
+             └─> FastAPI backend ── agentic RAG ──> LLM (Anthropic | Gemini | OpenAI-compatible)
                        │  tool: search_papers → Searcher (embedder + reranker)
-                       └─> React + Vite + Mantine UI: Chat · Papers · Admin
+                       └─> React + Vite + Mantine UI: Chat · Papers · Notes · Admin
 ```
 
 - ✂️ **Chunking** is section-aware with hierarchical breadcrumbs rebuilt from the
@@ -29,37 +29,30 @@ config.yaml ─┬─> ingestion worker: download → markdown (Docling) → ind
 - 🎯 **Retrieval** is two-stage: dense embedding recall + a cross-encoder reranker
   (`src/rag/search.py`), with opt-in hybrid dense+BM25 fusion and multi-query
   paraphrase expansion. Both core stages are config-swappable — the embedder
-  (`embedding.type`: `hf` · `openai` · `gemini` · `ollama`) and the reranker
-  (`reranker.type`: `hf` cross-encoder · `llm`, which reuses the chat model).
+  (`embedding.type`: `hf` · `openai` · `gemini` · `voyage` · `ollama`) and the
+  reranker (`reranker.type`: `hf` cross-encoder · `llm` · `voyage`).
 - 🏷️ **Tags** are LLM-generated at ingestion and power a tag filter that restricts
   search to matching papers.
 - ✅ **Faithfulness (opt-in)** verifies each cited sentence against the passage it
   cites and flags entailment/neutral/contradiction — a signal, not a gate.
 - 🔌 **The LLM is an opaque config value** (`type`, `api_base`, `model`) — point
-  it at Anthropic, or any OpenAI-compatible server (LM Studio, Ollama, vLLM, cloud).
+  it at Anthropic, Gemini, or any OpenAI-compatible server (LM Studio, Ollama, vLLM,
+  cloud).
 
 ## 📦 Setup
 
+You need Python 3.14+, [uv](https://docs.astral.sh/uv/), Node.js 22+, npm, and an
+LLM that supports tool/function calling.
+
 ```bash
-# Python — creates a uv-managed venv and installs the locked deps (puts the
-# `rag` + `server` packages on the path and installs the console scripts).
-uv sync
-
-# Optional cloud LLM backends (only if you use them):
-uv sync --extra anthropic   # anthropic provider
-uv sync --extra gemini      # gemini provider
-uv sync --all-extras        # both
-
-# Frontend deps
-npm --prefix web install
-
-# ...or Python + frontend at once:
+# Install the locked Python dependencies and frontend dependencies.
 make install
 ```
 
 > 💡 `uv sync` installs the packages from `src/` and the console scripts, so
 > `uv run paperlens-serve` / `uv run python -m server` work from a clean checkout.
-> Run project commands with `uv run <cmd>` (or activate `.venv`).
+> Run project commands with `uv run <cmd>` (or activate `.venv`). All supported LLM
+> providers are included; there are no provider-specific extras to install.
 
 > 🔑 Provide LLM credentials in a `.env` (e.g. `ANTHROPIC_API_KEY=...`) if using a
 > cloud provider — local servers need no key.
@@ -76,16 +69,17 @@ make install
 
 ```bash
 cp configs/examples/local-gpt-oss.yaml configs/my-setup.yaml   # pick a template, edit papers:
-make serve CONFIG=configs/my-setup.yaml     # serves http://127.0.0.1:8000, auto-starts ingestion
-npm --prefix web run dev                    # UI at http://localhost:5173 (proxies /api → backend)
+make dev CONFIG=configs/my-setup.yaml       # backend + UI; Ctrl-C stops both
 ```
 
-`make serve CONFIG=...` runs `paperlens-serve --config_path ...`; there's no default
-config, so `CONFIG=` (or `PAPERLENS_CONFIG`/discovery) is required. Or call
-`uv run paperlens-serve --config_path <path>` directly.
+Open `http://localhost:5173`; the UI proxies `/api` to the backend at
+`http://127.0.0.1:8000`. There's no default config, so `CONFIG=` (or
+`PAPERLENS_CONFIG`/discovery) is required. For separate backend/frontend terminals and
+the underlying commands, use [Getting started](docs/getting-started.md).
 
 Open the UI, watch papers ingest on the **Admin** page, then ask a question on
-**Chat**. Full walkthrough with expected output:
+**Chat**. You should see a streamed answer with `[rN]` citations; clicking one opens
+the source passage. Full walkthrough with verification at each step:
 [Getting started](docs/getting-started.md). 🎓
 
 Everything is driven by one YAML config (under `configs/`) — paths, models, the
@@ -101,6 +95,7 @@ agent calls a `search_papers` tool). Every key, command, and API route:
   question, and copy an answer as Markdown or BibTeX.
 - 📄 **Papers** — every paper in the DB with tags; open one to read the full
   markdown (tables + LaTeX rendered), highlight passages, and attach notes.
+- 📝 **Notes** — browse, filter, export, and revisit annotations across the library.
 - 📊 **Admin** — add/remove papers, paper/chunk counts, tag explorer, pending
   papers, and a live ingestion progress bar.
 
@@ -122,7 +117,7 @@ Full docs live in [`docs/`](docs/README.md):
 ## 🤝 Contributing
 
 Dev setup, the annotated project layout, the module layering rule, and the
-4-command gate (`ruff format --check` · `ruff check` · `ty check` · `pytest`)
+5-command gate (`ruff format --check` · `ruff check` · `ty check` · docs · `pytest`)
 live in [CONTRIBUTING.md](CONTRIBUTING.md). New to the codebase? Start with the
 [domain glossary](CONTEXT.md). 📖
 

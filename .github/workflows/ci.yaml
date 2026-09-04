@@ -7,8 +7,8 @@ on:
     branches: [main]
 
 jobs:
-  # Python gate — the same 4 commands run locally and in pre-commit's fast subset:
-  #   ruff format --check · ruff check · ty check · pytest --cov
+  # Python + docs gate — the same 5 commands are documented for local runs:
+  #   ruff format --check · ruff check · ty check · check_docs · pytest --cov
   python:
     runs-on: ubuntu-latest
     steps:
@@ -31,10 +31,14 @@ jobs:
       - name: ty check
         run: uv run ty check src
 
+      - name: documentation checks
+        run: uv run python scripts/check_docs.py
+
       - name: pytest --cov
         run: uv run pytest --cov=rag --cov=server --cov=eval --cov-branch --cov-report=term-missing
 
-  # Frontend gate — the same 4 commands run locally and in the web pre-commit hooks:
+  # Frontend gate — the same 4 commands are documented for local runs; pre-commit runs
+  # only the fast formatting/lint subset:
   #   format:check · lint · typecheck · test
   web:
     runs-on: ubuntu-latest

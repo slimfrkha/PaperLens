@@ -17,17 +17,18 @@ everything through uv (`uv run <cmd>`) or activate `.venv`.
 
 ## ✅ The gate
 
-Four commands define "done". They are identical locally and in CI — run them before
-considering any change finished:
+Five commands define "done". They match CI — run them before considering any change
+finished:
 
 ```bash
-uv run ruff format --check src   # formatting
-uv run ruff check src            # lint
-uv run ty check src              # type check
-uv run pytest                    # tests
+uv run ruff format --check
+uv run ruff check
+uv run ty check src
+uv run python scripts/check_docs.py
+uv run pytest --cov=rag --cov=server --cov=eval --cov-branch --cov-report=term-missing
 ```
 
-Auto-fix the first two with `uv run ruff format src` and `uv run ruff check --fix src`.
+Auto-fix the first two with `uv run ruff format` and `uv run ruff check --fix`.
 
 `pre-commit install` wires the **fast, auto-fixing subset** (ruff format + `ruff check
 --fix`, codespell, whitespace/YAML/TOML hygiene) into every commit and blocks direct
@@ -36,13 +37,13 @@ fast — you still run the full gate yourself before pushing.
 
 ### Frontend gate
 
-`web/` has its own 4-command gate, identical locally and in CI:
+`web/` has its own 4-command gate, matching CI:
 
 ```bash
 npm --prefix web run format:check   # prettier --check
 npm --prefix web run lint           # eslint
 npm --prefix web run typecheck      # tsc --noEmit
-npm --prefix web run test           # vitest run
+npm --prefix web run test:cov       # vitest + coverage
 ```
 
 Auto-fix the first two with `npm --prefix web run format` and
@@ -60,12 +61,15 @@ src/
     config.py          # typed config loader, root anchoring (+ .env)
     chunking.py        # section-aware chunking + breadcrumbs
     extract.py         # PDF → markdown (Docling)
-    embedders.py       # pluggable embedders (hf | openai | gemini | ollama)
-    reranker.py        # pluggable rerankers (hf cross-encoder | llm)
+    embedders.py       # pluggable embedders (hf | openai | gemini | voyage | ollama)
+    reranker.py        # pluggable rerankers (hf cross-encoder | llm | voyage)
     index.py           # chunk → embed → upsert (Chroma)
     llm.py             # provider-agnostic LLM backends (tool-use loop)
     manifest.py        # papers.json (paper metadata + tags)
-    search.py          # Searcher: retrieval + rerank (+ paper filter)
+    sparse.py          # BM25 + reciprocal rank fusion for hybrid retrieval
+    query_expansion.py # multi-query paraphrase generation
+    search.py          # Searcher: dense/hybrid recall → rerank → elbow cutoff
+    faithfulness.py    # optional post-generation citation check
     tagger.py          # LLM tag generation
     pipeline.py        # download → extract → index → tag → manifest
     ingest.py          # headless ingestion CLI (+ --retag, --reindex)
@@ -127,8 +131,9 @@ Adding a paper, an LLM backend, or an embedder is a documented recipe — see
   `fake_embedder` and `fake_llm`, plus a temp Chroma. `Searcher(embedder=...)` and
   `ChatAgent(client=...)` exist for exactly this. Don't write tests that download models or
   call a live API.
-- **Optional-extra tests self-skip** with `pytest.importorskip(...)` (e.g. `anthropic`,
-  `google.genai`).
+- **HF-specific tests may self-skip** with `pytest.importorskip("sentence_transformers")`
+  in a deliberately minimal environment. A normal `uv sync` installs it and every supported
+  provider dependency; there are no optional provider extras.
 - **Coverage** (branch, over `rag` + `server` + `eval`):
 
   ```bash
@@ -149,3 +154,9 @@ change**:
 - any new user-facing or internal feature → [docs/features.md](docs/features.md)
 
 Docs that contradict the code are worse than no docs. A change isn't done until they agree.
+Run `uv run python scripts/check_docs.py` after editing documentation; it checks local links,
+heading fragments, code-fence languages, and that reader-facing pages stay within two clicks
+of the README.
+
+For the baseline behind the current structure, see the archived
+[September 2026 documentation overhaul](docs/audits/2026-09-docs-overhaul.md).

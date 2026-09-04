@@ -1,319 +1,156 @@
 # Features
 
-A working inventory of what PaperLens does today, organized into four sections:
-**App / Product**, **ML / RAG**, **Backend / Infra**, and **DevX**.
-
-## App / Product
-
-### Chat — conversation UX
-
-- **Ask a question (composer)** — textarea with Enter-to-send, Shift+Enter newline, busy/disabled states (`web/src/pages/ChatPage.tsx`)
-- **Streaming answer tokens** — assistant text renders incrementally as SSE `token` events arrive, "Thinking…" loader before first token (`web/src/pages/ChatPage.tsx`, `web/src/api.ts`)
-- **Stop generating** — the send button becomes a Stop button while a turn streams; clicking it aborts the client's SSE fetch and signals the backend's in-flight turn (via its per-chat `stop_check`, checked between/within the LLM's streaming rounds) to stop generating and persist whatever text streamed so far as the answer, releasing the chat's single-flight lock so the composer unlocks immediately for a new message or an edit (`web/src/pages/ChatPage.tsx`, `web/src/api.ts`, `src/server/main.py`, `src/server/chats.py`, `src/server/chat_turn.py`, `src/server/agent.py`, `src/rag/llm.py`)
-- **Edit a previous user message and resend** — inline editable textarea on any user turn, truncates and replays the conversation from that point (`web/src/pages/ChatPage.tsx`)
-- **Confirm-before-discard on edit** — warns how many later exchanges will be dropped before an edit truncates them (`web/src/pages/ChatPage.tsx`)
-- **New chat** — clears turns/filters, starts a fresh session (`web/src/components/ChatSidebar.tsx`, `web/src/pages/ChatPage.tsx`)
-- **Chat history sidebar** — collapsible rail listing all saved chats with active highlight (`web/src/components/ChatSidebar.tsx`)
-- **Delete a conversation** — per-row delete, redirects home if it was the active chat (`web/src/components/ChatSidebar.tsx`, `web/src/pages/ChatPage.tsx`)
-- **Resume/reload a past conversation** — restores full turn history including citations, trace, feedback, usage (`web/src/pages/ChatPage.tsx`, `web/src/api.ts`)
-- **Auto-scroll to latest turn** (`web/src/pages/ChatPage.tsx`)
-- **Empty-state hero** — friendly prompt shown for a chat with no turns yet (`web/src/pages/ChatPage.tsx`)
-- **Empty-library warning banner** — shown when no papers are indexed, links to Admin (`web/src/pages/ChatPage.tsx`)
-- **409 "turn in progress" handling** — friendly error if another turn is already streaming for that chat (`web/src/api.ts`)
-- **In-answer error surfacing** — stream `error` events appended inline into the assistant bubble (`web/src/pages/ChatPage.tsx`)
-
-### Chat — filters/scoping
-
-- **Restrict search by paper** — multi-select scoping retrieval, locked once a conversation has started (`web/src/pages/ChatPage.tsx`)
-- **Restrict search by tag** — multi-select scoping retrieval, likewise locked mid-conversation (`web/src/pages/ChatPage.tsx`)
-- **"Filters locked" tooltip** — explains why filters are disabled mid-conversation and that New Chat changes them (`web/src/pages/ChatPage.tsx`)
-- **"Broaden recall per paper" toggle (Ask mode only)** — runs `search_papers` recall once per paper and pools candidates flat before reranking instead of once over the whole scope, sticky per message (not locked mid-conversation like the filters above); reloading or switching to a conversation restores the toggle to its last message's actual value rather than resetting it, and it's off by default for a brand-new chat; hidden (and never sent) under Compare mode and under Auto mode — Compare's per-paper sub-runs already search one paper at a time, and Auto hasn't committed to Ask until the query is classified (`web/src/pages/ChatPage.tsx`, `src/server/agent.py`, `src/server/chats.py`)
-
-### Chat — Compare mode
-
-- **Auto/Ask/Compare primary switch** — three-way segmented control choosing the turn's answer shape: one combined answer over the shared retrieval pool (Ask), a guaranteed per-paper search+answer synthesized into one comparative answer (Compare), or letting the LLM decide between the two (Auto, the default — see "Chat — Auto mode" below); sticky per message, resets to Auto on New chat / restores from the conversation's last-used mode on reload, same semantics the secondary knob already has (`web/src/pages/ChatPage.tsx`)
-- **Compare disabled below 2 resolved papers** — the primary switch's Compare option disables itself (with an explanatory tooltip) when the active tag/paper filter — or the whole manifest, with no filter — resolves to fewer than 2 papers; mirrored client-side (`web/src/compareScope.ts`) from the same tag/paper-intersection + manifest-fallback logic the backend enforces on its own (`src/server/agent.py`)
-- **Guaranteed per-paper search+answer, then synthesis** — Compare runs the question once per paper as an independent sub-run (reusing the normal single-paper agent loop unmodified), then feeds every per-paper answer back into the model once more to synthesize one final, genuinely comparative answer that reuses each sub-run's own `[rN]` citation markers (`src/server/agent.py`'s `ChatAgent.compare`, `SYNTHESIS_SYSTEM_PROMPT`)
-- **Confirm before a large Compare run** — a `window.confirm()` gate above 12 resolved papers, since Compare is N sequential search+answer sub-runs plus a synthesis pass (`web/src/pages/ChatPage.tsx`)
-- **Per-paper drill-down carousel** — a collapsible "Compared N papers" panel above the synthesized answer, auto-expanding while sub-runs stream and auto-collapsing the moment synthesis starts; one slide per paper (prev/next, no wraparound) showing that paper's own title, its own Thought → Action → Observation trace, and its own individual answer rendered through the same, unmodified `Answer` component (`web/src/components/ComparePanel.tsx`, `web/src/components/TraceEntries.tsx`)
-- **Progressive carousel fill-in** — each paper's row streams into the carousel as its sub-run completes (`compare_row` SSE event), rather than one long silent wait before synthesis starts (`web/src/api.ts`, `src/server/chat_turn.py`, `src/server/main.py`)
-- **Resilient to a single paper's search failure** — a sub-run that errors out still gets a placeholder row ("search failed for this paper") and stays in the comparison rather than dropping the whole turn (`src/server/agent.py`)
-- **Full conversation history in the synthesis pass** — a multi-turn Compare follow-up ("and their inference cost?") resolves the same way every per-paper sub-run already does, with a context-overflow fallback that retries once with just the current question (`src/server/agent.py`)
-- **Compare turns persist and restore in full** — the synthesized answer, its union citations, and every row's own trace/citations/text are all stored per turn and restore the carousel on reload, the same parallel-array-per-turn pattern `per_paper` already uses (`src/server/chats.py`, `web/src/pages/ChatPage.tsx`)
-
-### Chat — Auto mode
-
-- **LLM-classified Ask vs Compare, the default mode** — a small, tool-free LLM completion (`ChatAgent.classify_mode`, `CLASSIFY_SYSTEM_PROMPT`) decides whether a question needs a guaranteed per-paper pass or a single pooled answer is faithful enough; below 2 resolved papers it skips the LLM call and resolves to Ask deterministically (Compare is structurally impossible there), and any classifier failure also defaults to Ask (`src/server/agent.py`)
-- **Classifier sees the same papers catalog the ReAct system prompt does** — `_papers_catalog` (shared with `_system`) lists the resolved papers' titles/tag hints in the classify prompt, so e.g. "what's the model size?" over a scope of several distinct model papers resolves to Compare from the scope itself, without the question needing to say "each" or "compare" (`src/server/agent.py`)
-- **Classification runs on a separate, cheap tagging-tier client** — `build_llm(cfg.llm.tagging)`, not the full chat model, the same pattern `generate_name` already uses for session titling; sized generously (256 tokens) so a reasoning-model backend's hidden reasoning channel doesn't starve the visible one-word answer (`src/server/agent.py`)
-- **Pre-flight classify endpoint** — `POST /api/chat/classify` resolves the mode + scope size *before* the real turn is sent (SSE can't pause mid-stream for a confirm), so the client can gate the large-Compare confirm dialog and send the real turn with the decision already made — never re-classified server-side (`src/server/main.py`, `web/src/api.ts`)
-- **Reuses the existing large-Compare confirm gate** — an Auto turn that resolves to Compare over more than 12 resolved papers shows the same `window.confirm()` gate manual Compare already has, bounded by a client-side timeout on the classify call itself so a hung request can't leave Send permanently disabled (`web/src/pages/ChatPage.tsx`)
-- **"Auto" badge on the turn** — a small badge next to the trace/compare panel area shows when a turn's mode was auto-decided, including a small-talk turn with no search calls at all (`web/src/pages/ChatPage.tsx`)
-- **Auto turns persist and restore to Auto, not their resolved mode** — `auto: bool` is a badge-only field alongside `compare`/`per_paper`; reloading a conversation whose last turn was auto-decided restores the control to Auto rather than showing whatever it happened to resolve to (`src/server/chats.py`, `web/src/pages/ChatPage.tsx`)
-
-### Chat — trace / observability
-
-- **Thought → Action → Observation trace timeline** — collapsible rail rendering the agent's reasoning steps, search-query actions with paper badge, observations (`web/src/components/TraceBox.tsx`)
-- **Auto-expand trace while streaming, collapsible after** (`web/src/components/TraceBox.tsx`)
-- **Search-count badge** — "N searches" in the trace header (`web/src/components/TraceBox.tsx`)
-- **Token usage / latency display** — per-turn footer with total tokens and response latency (`web/src/pages/ChatPage.tsx`, `web/src/api.ts`)
-
-### Chat — citations & faithfulness
-
-- **Clickable inline citation badges** — `[rN]` markers, click navigates to the source paper with the passage highlighted (`web/src/components/Answer.tsx`)
-- **Citation hover tooltip** — paper title, section, snippet preview, "click to open" hint (`web/src/components/Answer.tsx`)
-- **Faithfulness flag on citations** — colored marker + tooltip on any non-"entailment" citation (`web/src/components/Answer.tsx`, `web/src/faithfulness.ts`)
-- **Source cards ("Sources" section)** — cards grouped by paper, citation numbers, faithfulness flags, retrieval-source tooltip (keyword vs semantic match); scoped to citations actually cited inline in the answer text (`citedCitations`), not every passage a search call retrieved but the model never cited — otherwise the list (and its faithfulness summary denominator) disagrees with what the answer actually used, most visible on a Compare turn's large union citations list (`web/src/components/SourceCards.tsx`, `web/src/pages/ChatPage.tsx`, `web/src/exportAnswer.ts`)
-- **Turn-level faithfulness summary badge** — "N/M not clearly supported / may contradict source" (`web/src/components/SourceCards.tsx`, `web/src/faithfulness.ts`)
-- **Markdown rendering with GFM/LaTeX/heading anchors** (`web/src/components/Markdown.tsx`)
-
-### Chat — feedback
-
-- **Thumbs up/down per answer** — toggleable vote, persisted via API (`web/src/components/FeedbackControl.tsx`)
-- **Optional feedback note** — free-text note attached to a vote, commits on blur (`web/src/components/FeedbackControl.tsx`)
-- **Per-chat-scoped feedback state** — keyed by `chatId-index` so switching chats doesn't leak stale state (`web/src/pages/ChatPage.tsx`)
-
-### Chat — export/sharing
-
-- **Copy answer as Markdown** — `[rN]` rewritten to `[^N]` footnotes plus a generated `## References` block (`web/src/components/AnswerActions.tsx`, `web/src/exportAnswer.ts`)
-- **Copy as BibTeX** — one `@misc` entry per distinct cited paper (`web/src/components/AnswerActions.tsx`, `web/src/exportAnswer.ts`)
-- **Copy-confirmation UI** — icon swaps to a checkmark briefly after a successful copy (`web/src/components/AnswerActions.tsx`)
-
-### Paper library (Papers page)
-
-- **Paper grid/library browser** — responsive card grid with title, id, chunk count, tag badges (`web/src/pages/PapersPage.tsx`)
-- **Open a paper** — card links into the paper viewer (`web/src/pages/PapersPage.tsx`)
-- **Remove a paper (with confirmation)** — deletes index/cache/config entry, refreshes the grid (`web/src/pages/PapersPage.tsx`, `web/src/api.ts`)
-- **Empty-library state** — points to Admin when no papers exist yet (`web/src/pages/PapersPage.tsx`)
-
-### Paper viewer
-
-- **Rendered paper reading view** — full paper markdown with title, arXiv link, tags (`web/src/pages/PaperViewer.tsx`)
-- **Figures rendered in the reading view** — cropped from the PDF at ingest time, deduped by content hash (drops repeated per-page watermarks/logos); display-only — never chunked/embedded/retrieved (`src/rag/extract.py`, `src/server/main.py`, `configs/examples/reference.yaml`'s `extraction.render_images`)
-- **Link out to arXiv abstract page** (`web/src/pages/PaperViewer.tsx`)
-- **Citation deep-link highlighting** — navigating from a citation/source card highlights and scrolls to the cited passage (`web/src/pages/PaperViewer.tsx`, `web/src/highlight.ts`)
-- **Text-selection annotation toolbar** — floating "Highlight / Add note" toolbar on selecting ≥20 chars (`web/src/pages/PaperViewer.tsx`, `web/src/components/AnnotationPopover.tsx`)
-- **Highlight a passage (no note)** (`web/src/pages/PaperViewer.tsx`)
-- **Add a note to a passage** — section-scoped for re-anchoring (`web/src/pages/PaperViewer.tsx`, `web/src/components/AnnotationPopover.tsx`)
-- **View/edit/delete an existing annotation** (`web/src/pages/PaperViewer.tsx`, `web/src/components/AnnotationPopover.tsx`)
-- **Persistent multi-annotation highlighting** — all saved annotations render as persistent highlights on load (`web/src/highlight.ts`)
-- **Annotation re-anchoring failure state** — flags "Not found in current text" if a paper's text changed since annotation (`web/src/pages/PaperViewer.tsx`)
-- **Notes rail (drawer)** — side drawer listing all annotations with badge/count indicator (`web/src/pages/PaperViewer.tsx`)
-- **Jump to annotation** — smooth-scrolls to the highlighted passage (`web/src/pages/PaperViewer.tsx`)
-- **First-time annotation hint** — floating tip until the paper has at least one annotation (`web/src/pages/PaperViewer.tsx`)
-- **Paper outline / jump nav** — collapsible "Contents" rail built from the paper's rendered heading ids, indented by section-number depth (numbered headings) or inferred from the nearest numbered neighbors (unnumbered ones) (`web/src/pages/PaperViewer.tsx`, `web/src/outline.ts`)
-- **Loading state** (`web/src/pages/PaperViewer.tsx`)
-
-### Notes (cross-paper)
-
-- **Aggregated Notes page** — every annotation across the whole library, grouped by paper (paper title, arXiv link), sorted alphabetically by paper with notes newest-first (`web/src/pages/NotesPage.tsx`, `GET /api/annotations` in `src/server/main.py`)
-- **Text/paper filtering** — client-side substring match over snippet+note, plus a paper multi-select (`web/src/pages/NotesPage.tsx`)
-- **Click-through to source passage** — reuses the citation navigate-with-state mechanism (`Answer.tsx`'s `{highlight, section}` pattern) to open the paper with the passage highlighted, no `PaperViewer.tsx` changes needed (`web/src/pages/NotesPage.tsx`)
-- **Delete a note (with confirmation)** — reuses the existing `deleteAnnotation` API, removes it from the list in place (`web/src/pages/NotesPage.tsx`, `web/src/api.ts`)
-- **Copy notes as Markdown** — exports the currently filtered view, grouped by paper (`web/src/exportNotes.ts`, `web/src/pages/NotesPage.tsx`)
-
-### Admin / ingestion management
-
-- **Add paper(s) by arXiv id/URL** — one tags-style input: type or paste ids/URLs, space/tab/enter/comma turns each into a removable pill, pasting a multi-line list creates one pill per line; Add submits every pill in one request and shows a per-line queued/duplicate/invalid/error status list (`web/src/pages/AdminPage.tsx`, `web/src/api.ts`)
-- **Re-scan config** — triggers a re-scan/re-sync of the papers config (`web/src/pages/AdminPage.tsx`, `web/src/api.ts`)
-- **Live ingestion progress** — polls every 1.5s, current paper/stage, done/total counts, animated progress bar (`web/src/pages/AdminPage.tsx`)
-- **Ingestion state badge** — idle/running/error (`web/src/pages/AdminPage.tsx`)
-- **Pending papers list** (`web/src/pages/AdminPage.tsx`)
-- **Ingestion error list** (`web/src/pages/AdminPage.tsx`)
-- **Library stat tiles** — paper count, chunk count, pending count (`web/src/pages/AdminPage.tsx`)
-- **Tag directory with counts** (`web/src/pages/AdminPage.tsx`)
-
-### Global navigation / theming / app shell
-
-- **Top nav (Chat / Papers / Admin)** (`web/src/App.tsx`)
-- **Light/dark mode toggle** — starts OS-following, persists once explicitly toggled (`web/src/App.tsx`)
-- **Multiple built-in color palettes** — Rosé Pine default, Solarized/Catppuccin/Gruvbox alternatives (`web/src/theme.ts`, `web/src/palettes.ts`)
-- **Frosted-glass sticky header** (`web/src/App.tsx`)
-- **Responsive layout** — breakpoint-aware grid and content width (`web/src/App.tsx`, `web/src/pages/PapersPage.tsx`)
-- **Reduced-motion accessibility support** — respects `prefers-reduced-motion` (`web/src/styles.css`)
-- **Custom scrollbar styling** (`web/src/styles.css`)
-- **Global error boundary** — catches render/effect crashes app-wide, shows error + Reload button (`web/src/components/ErrorBoundary.tsx`)
-- **Custom icon set** — hand-rolled SVG icons used throughout the UI (`web/src/components/Icons.tsx`)
-
-## ML / RAG
-
-### Retrieval
-
-- **Three-stage retrieval (dense recall → rerank → elbow cutoff)** — embeds the query, pulls `retrieval.candidates` nearest chunks from Chroma, reranks, then elbow-cuts to `[retrieval.min_k, retrieval.max_k]` (`src/rag/search.py`)
-- **Elbow cutoff (adaptive result count)** — `find_cutoff` picks the first real score drop-off (a MAD-based robust outlier test + a prominence floor, both self-normalizing per query) instead of always returning a fixed count; falls back to plain `max_k` truncation when reranking didn't happen (`rerank=False`, a reranker failure, or `retrieval.elbow_enabled=False`) — see `SearchOutcome.cutoff_reason` (`src/rag/search.py`)
-- **Candidate-pool scaling** — recall pool scales to `max(candidates, max_k * 4)` so the reranker always has candidates to discard (`src/server/agent.py`, `src/rag/config.py`)
-- **Graceful degrade on reranker failure** — falls back to pre-rerank order rather than failing the request (`src/rag/search.py`)
-- **Asymmetric embedding query/document split** — `embed_query()` diverges from `__call__()` for embedders that treat queries and documents differently (`src/rag/embedders.py`)
-- **Hybrid dense+BM25 retrieval (opt-in)** — lexical search alongside dense recall, fused via reciprocal rank fusion before reranking (`src/rag/search.py`, `src/rag/sparse.py`, `src/rag/config.py`)
-- **Stale-snapshot-safe BM25** — lazily rebuilds the BM25 index whenever the collection has grown since the last snapshot (`src/rag/search.py`)
-- **Result provenance tagging** — each fused result records whether it came from dense/sparse/both (`src/rag/search.py`)
-- **Multi-query expansion (opt-in)** — paraphrases the query into `n_paraphrases` variants, RRF-fuses all rankings in one pass (`src/rag/search.py`, `src/rag/query_expansion.py`, `src/rag/config.py`)
-- **Paper/tag-scoped search filter** — intersects a tag filter and explicit paper picker into Chroma's `where` clause (`src/rag/search.py`, `src/rag/manifest.py`)
-- **Per-paper retrieval (opt-in)** — recall runs once per paper (its own dense/sparse/multi-query fusion each, clamped to a per-paper candidate budget) instead of once over the whole scope, then pools flat before the shared rerank/elbow-cutoff step (`src/rag/search.py`, `src/server/agent.py`)
-- **Section-aware chunking with breadcrumbs** (upstream of retrieval) — breadcrumb + body is what dense recall matches against (`src/rag/chunking.py`)
-
-### Reranking
-
-- **Pluggable reranker ABC** — uniform `score(query, docs) -> list[float]` interface (`src/rag/reranker.py`)
-- **`hf` cross-encoder reranker** — local sentence-transformers cross-encoder, default `BAAI/bge-reranker-v2-m3`, lazy-loaded (`src/rag/reranker.py`)
-- **`llm` reranker** — reuses the chat LLM to pointwise-rate candidates 0–10 in one batched call, degrades to zero scores on malformed output (`src/rag/reranker.py`)
-- **`build_reranker` registry dispatch** (`src/rag/reranker.py`)
-- **`reranker.enabled` kill switch** — turns off the whole rerank stage (`src/rag/config.py`)
-
-### Agent loop
-
-- **`ChatAgent` — ReAct loop over native tool calling** — Thought → Action (`search_papers`) → Observation, repeats until it answers; small talk skips search entirely (`src/server/agent.py`)
-- **Single tool: `search_papers`** — `query` (required), optional `paper`; decomposes multi-part questions into several focused calls (`src/server/agent.py`)
-- **Filter-scoped system prompt** — injected paper catalog restricted to the active tag/paper filter so the model can't bypass it via the prompt prefix (`src/server/agent.py`)
-- **Ref/citation registry** — each returned passage gets a `ref` (`r1`, `r2`, ...) the model must cite; numbering continues across turns in the same chat (`src/server/agent.py`)
-- **Provider-agnostic tool-use loop** — one neutral tool schema, normalized to every provider's wire format by LiteLLM (`src/rag/llm.py`)
-- **Streaming reasoning/trace surfacing** — `on_text`/`on_reasoning` callbacks stream tokens and reasoning (including `<think>` tag stripping) for the live trace (`src/rag/llm.py`, `src/server/agent.py`)
-- **`retrieval.max_rounds`** — caps ReAct search/answer cycles before the agent must answer (`src/rag/config.py`)
-
-### Faithfulness
-
-- **Post-generation faithfulness check (opt-in)** — verifies each `[rN]`-cited sentence against the passage it cites; attaches a verdict as a signal, never gates or alters the answer (`src/rag/faithfulness.py`, `src/server/agent.py`)
-- **`hf` faithfulness backend** — local consistency-scoring cross-encoder (`vectara/hallucination_evaluation_model`, pinned revision) (`src/rag/faithfulness.py`, `src/rag/config.py`)
-- **Sentence-vs-sentence scoring (SummaC-style)** — scores the citing sentence against every sentence of the cited passage, keeps the strongest-supporting pair (`src/rag/faithfulness.py`)
-- **Threshold-derived labels** — `contradiction_max`/`entailment_min` turn the raw score into entailment/neutral/contradiction (`src/rag/faithfulness.py`, `src/rag/config.py`)
-- **Faithfulness threshold calibration** — standalone script checks thresholds against a hand-labeled golden set, corpus-independent (`scripts/calibrate_faithfulness.py`, `tests/data/faithfulness_pairs.jsonl`)
-- **Model warmup for faithfulness** — dummy check at server startup preloads the cross-encoder (`src/server/main.py`)
-
-### Eval / calibration harness (`paperlens-eval`)
-
-- **`gen`** — builds the span-anchored QA eval set from the loaded, ingested pool, idempotent on corpus fingerprint; optional closed-book leakage pre-check (`src/eval/cli.py`, `src/eval/queryset.py`, `src/eval/genfilter.py`, `src/eval/fingerprint.py`)
-- **`run`** — scores the current config on the dev split, no re-index (`src/eval/cli.py`, `src/eval/harness.py`)
-- **`screen --tier retrieval`** — one-factor-at-a-time screen of `reranker.enabled`/`retrieval.candidates` (plus optional hybrid/multi-query arms), paired vs. default with confidence intervals (`src/eval/optimizer.py`)
-- **`screen --tier elbow`** — OFAT screen of `elbow_mad_multiplier`/`elbow_prominence`, paired-vs-default `recall@elbow` with a CI; needs no cache/checkpoint, every arm just re-cuts one already-reranked scoring pass — `min_k`/`max_k` deliberately stay out, same "product decision" reasoning `retrieval.k` always had (`src/eval/harness.py`)
-- **`screen --tier chunking`** — OFAT screen over `chunking.*` knobs, each arm re-indexed into its own isolated collection (`src/eval/optimizer.py`)
-- **`sweep`** — staged grid over `chunking.max_tokens × retrieval.candidates × reranker.enabled` (`src/eval/optimizer.py`)
-- **`confirm`** — scores one human-chosen config once on the held-out test split, emits a paste-ready `config.yaml` block (`src/eval/cli.py`)
-- **`per-paper sweep`/`confirm`** — standalone, outside `gen→run→screen→sweep→confirm`: measures `Searcher.search(per_paper=True)` vs `False` on randomly-sampled multi-paper scopes, paired across a `candidates` grid, production and budget-matched-allocation variants; produces **no `config.yaml` value** (`per_paper` is a per-call flag, not a config knob) (`src/eval/harness.py`, `src/eval/cli.py`)
-- **`comparative gen`/`sweep`/`confirm`** — standalone, its own eval-set type: a trial loop generates genuinely cross-paper questions (gold spans 2-6 papers, LLM-spotted from outlines then written to need every matched section), then measures `per_paper` the way `per-paper` structurally can't — strict-AND success and minimum-reciprocal-rank across the gold papers, its own item-level dev/test split, a hard floor blocking `confirm`'s recommendation language below `COMPARATIVE_MIN_CLUSTERS`; produces **no `config.yaml` value** (`src/eval/comparative_queryset.py`, `src/eval/comparative_metrics.py`, `src/eval/harness.py`, `src/eval/cli.py`)
-- **Guard: chunking-sweep index isolation** — every chunking arm re-indexes into its own throwaway collection, asserts chunk counts to catch id collisions (`src/eval/index_isolated.py`)
-- **Guard: config-independent gold spans** — gold is a character span over sections, never a chunk id, so no arm can recognize its own handwriting (`src/eval/queryset.py`)
-- **Two-stage metrics** — Stage 1 `success@candidates`, Stage 2 `MRR@k` conditioned on stage-1 success (`src/eval/metrics.py`)
-- **Additive elbow metrics** — `mean_returned_at_elbow`/`precision@elbow`/`recall@elbow`, computed in `run` alongside (never replacing) the two-stage metrics above (`src/eval/metrics.py`, `src/eval/harness.py`)
-- **Resolution reporting (paper-clustered bootstrap)** — ceiling, minimum detectable difference, cluster count; warnings below cluster minimum and near-saturated ceilings (`src/eval/stats.py`)
-- **Resumable checkpointing** — `run`/`screen`/`sweep`/`confirm` checkpoint per-item/per-cell, resuming a killed run; invalidated by header/index mismatch, `--fresh` discards (`src/eval/checkpoint.py`)
-- **Corpus fingerprinting** — SHA-256 over sorted paper ids + markdown content keys every eval-set file, so a changed pool is detected and regenerated (`src/eval/fingerprint.py`)
-- **Known-limits self-documentation** — estimand gap, section-localization-not-answer-localization, no contamination audit, documented inline and in `docs/harness.md`
-
-## Backend / Infra
-
-### Ingestion pipeline
-
-- **`ingest_paper` — six-stage per-paper pipeline** — download → extract (Docling) → chunk → index (Chroma) → tag (LLM) → manifest write; index and tag stages run concurrently (`src/rag/pipeline.py`)
-- **PDF download** — arXiv PDF fetch by id, cached (skips if already downloaded) (`src/rag/pipeline.py`)
-- **PDF → markdown extraction (Docling)** — single converter instance reused across calls, OCR off by default, cached on disk (`src/rag/extract.py`)
-- **Display-only figure rendering** — the same conversion pass also crops figures to a sibling `<paper_id>_display.md` + `<paper_id>.assets/` dir for the paper viewer, deduped by content hash; `backfill_paper_images` catches up already-ingested papers when the flag is turned on later (`src/rag/extract.py`, `src/rag/pipeline.py`)
-- **Section-aware chunking with breadcrumbs** — rebuilds section-numbering hierarchy into a breadcrumb prepended to embedded text; drops noise sections; packs oversized sections into overlapping sub-chunks; keeps tables atomic (`src/rag/chunking.py`)
-- **Chroma indexing** — content-hashing chunk ids so re-ingest under a changed chunking config also deletes stale orphaned chunks (`src/rag/index.py`)
-- **LLM tagging** — generates topic tags per paper, degrades to `[]` on failure rather than failing ingestion (`src/rag/tagger.py`)
-- **Tag normalization pass** — post-ingestion pass merging near-duplicate tags across the whole library (`src/rag/pipeline.py`, `src/rag/tagger.py`)
-- **Pending-paper diffing** — diffs `config.yaml`'s `papers:` list against the manifest to find what's left to ingest (`src/rag/pipeline.py`)
-- **Headless ingestion CLI** — `paperlens-ingest`, with `--retag` (regenerate tags only) and `--reindex` (re-chunk/re-embed, tags carried forward) (`src/rag/ingest.py`)
-- **Manifest (paper-level metadata store)** — `papers.json`, no in-memory cache, lock-serialized writes, tag counts and filtering (`src/rag/manifest.py`)
-- **Comment-preserving config writer** — `ruamel.yaml` read-modify-write over `config.yaml`'s `papers:` list, preserves comments/formatting, write-temp-then-rename, thread-locked (`src/rag/config_writer.py`)
-
-### Serving infra
-
-- **FastAPI app composition** — `create_app(cfg)` wires manifest, chat store, annotation store, ingestion worker, Chroma collection, all HTTP routes; SPA served as catch-all fallback (`src/server/main.py`)
-- **In-process ingestion worker** — background thread over pending papers, re-scans for newly-added papers within the same run, single-flight via `trigger()` (`src/server/worker.py`)
-- **Lazy, singleton `ChatAgent` build with lock** — embedder/reranker/LLM stack builds once on first use, guarded against double-build by the startup warmer (`src/server/main.py`)
-- **Admin add/remove-paper routes** — add takes one or more arXiv ids/URLs per call: normalizes, dedupes, writes config, triggers ingestion once per batch; remove deletes config entry, Chroma chunks, manifest record, annotations, cached PDF/markdown (`src/server/main.py`)
-- **Chat session store (file-backed)** — one JSON file per session, parallel messages/citations/traces/feedback/usage arrays, single-flight per-chat guard, write-temp-then-rename (`src/server/chats.py`)
-- **Annotation store (file-backed)** — per-paper JSON anchored by text snippet + section slug (not a chunk id/offset), reflow-resilient across re-extraction (`src/server/annotations.py`)
-- **Request/response schemas** — pydantic models for chat, feedback, annotations, add-paper(s) requests (`src/server/schemas.py`)
-- **HTTP API surface** — papers/tags listing, paper markdown fetch, admin status/rescan/add/remove, chat session CRUD + feedback, streaming `/api/chat` (`src/server/main.py`)
-
-### Startup / model warming
-
-- **Instant startup, background model warmup** — worker starts and a daemon thread eagerly builds the searcher (+ faithfulness checker if enabled) via a dummy search, so routes are servable immediately while the ~20-30s model load happens in the background; warmup failures are non-fatal (`src/server/main.py`)
-- **MPS tensor-cap guard** — `embedding.max_seq_length` caps `bge-m3`'s sequence length to avoid overflowing Metal's per-tensor limit on Apple Silicon (`src/rag/embedders.py`)
-- **Only `hf` and `voyage` import lazily** — `sentence_transformers`/`torch` (`hf`) and `httpx` (`voyage`) imported inside methods, not at module load; `openai`/`gemini`/`ollama` embedding and every LLM backend go through LiteLLM, a hard top-level dependency (`src/rag/embedders.py`, `src/rag/llm.py`)
-
-### SSE streaming plumbing
-
-- **`/api/chat` SSE endpoint** — agent turn runs on a worker thread, bridges thread-safe callbacks to an asyncio queue, async generator drains it as an `EventSourceResponse` (`src/server/main.py`)
-- **Event types emitted** — `token`, `trace`, `citations`, `usage`, `meta`, `error`, `done` (`src/server/main.py`)
-- **Latency measurement scope** — timed across retrieval + rerank + LLM + faithfulness check, the wait the user actually feels (`src/server/main.py`)
-- **Concurrency guard for streamed turns** — prevents two overlapping `/api/chat` calls on the same chat id from interleaving a truncate-then-append (`src/server/chats.py`, `src/server/main.py`)
-
-### Config system
-
-- **`draccus` dataclass config with `ChoiceRegistry` tagged unions** — `Config` is the single decode target; embedder/reranker/sparse/faithfulness/LLM are tagged-union bases whose `type:` selects a variant (`src/rag/config.py`)
-- **OmegaConf `${...}` interpolation** — resolved at load time or after CLI-override merge (`src/rag/config.py`)
-- **Per-field CLI overrides** — `--field.subfield=value` flags on top of the config file (`src/rag/config.py`)
-- **Config discovery** — `--config_path` → `PAPERLENS_CONFIG` env var → upward search from CWD (`src/rag/config.py`)
-- **Project-root anchoring** — every relative path anchored to the nearest `pyproject.toml` ancestor of the resolved config file, not CWD (`src/rag/config.py`)
-- **Fail-loud validation** — `__post_init__` checks (e.g. `overlap_tokens < max_tokens`, `k <= candidates`, `min_tags <= max_tags`) so incoherent configs fail at load rather than degrading silently (`src/rag/config.py`)
-- **`IngestConfig` — narrow, frozen ingestion projection** — `Config.for_ingest()` aliases sub-objects by reference so a live admin edit is immediately visible to the worker with no reload (`src/rag/config.py`)
-- **`.env` loading** — picked up automatically by every entry point (`src/rag/config.py`)
-- **Migration guards** — old spellings (`provider` instead of `type`, `--config` instead of `--config_path`) fail loudly rather than silently defaulting (`src/rag/config.py`)
-
-### ChoiceRegistry extensibility pattern
-
-- **Pattern shape** — one `@Base.register_subclass("name")` dataclass + one `match` arm in the corresponding `build_*` function; unknown `type` or stray field fails loudly at decode time, no `if/elif` dispatch (`src/rag/config.py`)
-- **Embedder backends** — `hf`, `openai`, `gemini`, `voyage`, `ollama`; `openai`/`gemini`/`ollama` via LiteLLM, `voyage` called directly (LiteLLM's Voyage support drops the asymmetric `input_type` param) (`src/rag/embedders.py`, `src/rag/config.py`)
-- **Reranker backends** — `hf` cross-encoder, `llm` (chat model as judge), `voyage` (dedicated rerank API, via LiteLLM) (`src/rag/reranker.py`, `src/rag/config.py`)
-- **LLM backends** — `anthropic`, `openai`/`vllm`/`sglang` (OpenAI-compatible wire format), `gemini`; all one `LiteLLMBackend` under the hood, so a LiteLLM-supported provider is a config variant + one provider-prefix mapping, not a new backend class (`src/rag/llm.py`, `src/rag/config.py`)
-- **Sparse backend** — `bm25` today, structured for future lexical-backend additions (`src/rag/config.py`)
-- **Faithfulness backend** — `hf` today, same pattern (`src/rag/config.py`, `src/rag/faithfulness.py`)
-- **Documented add-a-backend workflow** — `docs/how-to.md#add-a-new-llm-backend`, codified as the `add-llm-backend` skill
-
-## DevX
-
-### Quality gate
-
-- **4-command Python gate** — `ruff format --check`, `ruff check`, `ty check`, `pytest`; identical locally and in CI (`CLAUDE.md`, `.github/workflows/ci.yaml`)
-- **4-command web gate** — prettier, eslint, tsc, vitest; identical locally and in CI (`web/package.json`, `.github/workflows/ci.yaml`)
-- **Auto-fix commands** — `ruff format`/`ruff check --fix` and `prettier --write`/`eslint --fix`
-- **ruff config** — line length 100, double quotes, lint rules `E,F,I,UP,B,SIM` (`pyproject.toml`)
-- **Node version pin** — `web/.nvmrc` (22)
-
-### CI pipeline
-
-- **GitHub Actions, two parallel jobs** (`python`, `web`) — plain `uv sync` (no extras to install); web job builds the frontend after its gate (`.github/workflows/ci.yaml`)
-
-### Pre-commit hooks
-
-- **Fast auto-fixing subset runs on every commit** — `ruff-check`/`ruff-format` (pinned via `uv run`), `codespell`, whitespace/EOF/YAML/TOML/AST/merge-conflict/large-file checks, `eslint --fix`/`prettier --write` scoped to `web/` (`.pre-commit-config.yaml`)
-- **`ty` and `pytest`/`typecheck`/`test` deliberately excluded** from pre-commit to keep hooks fast — CI-only
-
-### Test fixtures / offline seams
-
-- **Factory fixtures in `tests/conftest.py`** — `make_config`, `make_searcher`, `seed_chunks`, `fake_embedder` (deterministic bag-of-words hashing embedder), `fake_llm` (scripted `FakeLLM`), `fake_faithfulness_checker` (scripted verdicts) — every test runs fully offline, no network or model downloads
-- **`tests/unit/` + `tests/integration/` + `tests/data/` split**, no `__init__.py` (`--import-mode=importlib`)
-- **Coverage config** — branch coverage over `rag`, `server`, `eval` (`pyproject.toml`)
-- **`sentence_transformers` test skipping** — `pytest.importorskip("sentence_transformers")` for the `hf` embedder's tests (`tests/unit/test_embedders.py`); every other backend goes through LiteLLM or plain `httpx`, both hard dependencies, so nothing else needs to skip
-- **Web test setup** — jsdom environment, shared setup file (`web/vite.config.ts`, `web/src/test/setup.ts`)
-
-### Config-driven design as a DevX feature
-
-- **Copy-me example configs** — `local-gpt-oss.yaml`, `anthropic.yaml`, `gemini.yaml`, `ollama.yaml` (`configs/examples/`)
-- **Fully annotated reference config** — every key, default, and accepted value documented in one file (`configs/examples/reference.yaml`)
-
-### Docs structure
-
-- **Diátaxis-style docs hub** — landing page routes by task type (Tutorial/Reference/How-to/Explanation) (`docs/README.md`)
-- **Tutorial, Reference, How-to, Explanation docs** — `docs/getting-started.md`, `docs/configuration.md`, `docs/how-to.md`, `docs/architecture.md`, `docs/harness.md`
-- **Project glossary** — one term per concept with code pointer and deliberately-avoided synonyms (`CONTEXT.md`)
-- **Contributor guide** — dev setup, the gate, layout, import-graph rule, style, test conventions, docs-update-on-change rule (`CONTRIBUTING.md`)
-- **AI-agent-facing project instructions** — restates the gate and layout for Claude Code sessions (`CLAUDE.md`)
-
-### Architecture enforcement as DevX
-
-- **Documented one-way import graph** across `rag` → `server`/`eval`, checked by convention, not tooling (`src/rag/__init__.py`, `CONTRIBUTING.md`)
-
-### Dev scripts
-
-- **`scripts/calibrate_faithfulness.py`** — standalone faithfulness-threshold calibration against a hand-labeled golden set; deliberately outside the pytest gate since it loads a real model
-
-### Makefile targets
-
-- **`make install`**, **`make dev`** (backend + frontend together), **`make serve`**, **`make ingest`**, **`make build`** — all of `serve`/`dev`/`ingest` accept `CONFIG=<path>` (`Makefile`)
-
-### CLI entry points
-
-- **`paperlens-serve`**, **`paperlens-ingest`** (`--retag`, `--reindex`), **`paperlens-eval`** (`gen`/`run`/`screen`/`sweep`/`confirm`) — all take `--config_path` and per-field overrides (`pyproject.toml`)
+This page is for people deciding whether PaperLens fits their workflow. It summarizes the
+current product surface without duplicating the configuration and architecture references.
+
+## What PaperLens is for
+
+PaperLens is a local, single-user research app for asking grounded questions across arXiv
+papers. It ingests a configured paper library, retrieves relevant passages, and asks a
+tool-calling LLM to answer with citations that open the exact source passage.
+
+It is a good fit when you want to:
+
+- work with a curated library of modern arXiv papers;
+- run the app and its data locally while choosing local or cloud model backends;
+- inspect the agent's searches instead of accepting an opaque answer; or
+- compare several papers and keep notes alongside the sources.
+
+It is not an authenticated, multi-user service or a generic upload-and-chat product. See
+[architecture: why arXiv-specific](architecture.md#-why-arxiv-specific--what-wont-generalize)
+for the structural assumptions.
+
+## Ask and compare
+
+### Grounded chat
+
+- Answers stream into the browser over Server-Sent Events (SSE).
+- The agent can make several focused `search_papers` calls before answering. Small talk can
+  skip retrieval.
+- Each `[rN]` citation opens the cited paper at the highlighted passage.
+- Source cards group used citations by paper and identify semantic, keyword, or combined
+  retrieval provenance.
+- A collapsible Thought → Action → Observation trace shows the searches and passages the
+  model used.
+- Each completed turn shows token usage when the backend reports it and the total latency.
+- You can stop a running turn. PaperLens persists the text already streamed and unlocks the
+  conversation for the next message.
+
+### Search scope and answer modes
+
+You can restrict retrieval by paper, tag, or both before the first turn in a conversation.
+The selected scope stays fixed for that conversation.
+
+PaperLens offers three answer modes:
+
+- **Ask** searches the selected scope as one pool. You can optionally broaden recall by
+  retrieving from each paper separately before the shared rerank step.
+- **Compare** runs an independent search-and-answer pass for every paper, then synthesizes
+  those answers. A carousel lets you inspect each paper's answer and trace. Large comparisons
+  require confirmation because cost and latency grow with the number of papers.
+- **Auto** asks the configured tagging LLM to choose Ask or Compare. With fewer than two
+  papers in scope, or if classification fails, it uses Ask.
+
+Compare tolerates one paper-level failure and preserves the other results. Compare and Auto
+turns are stored with the conversation and restore on reload.
+
+### Conversation controls
+
+- Create, resume, and delete saved conversations.
+- Edit an earlier user message and resend from that point. PaperLens confirms before
+  discarding later turns; it does not preserve branches.
+- Rate an answer with thumbs up or down and attach an optional note.
+- Copy an answer as Markdown footnotes or as one BibTeX entry per cited paper. BibTeX export
+  omits authors because the manifest does not store them.
+
+## Read and annotate papers
+
+### Paper library and viewer
+
+- Browse ingested papers with their titles, tags, and chunk counts.
+- Read rendered Markdown with tables, mathematics, heading links, and figures extracted
+  during ingestion.
+- Follow a citation directly to its highlighted passage.
+- Use the generated contents rail to jump between sections.
+- Remove a paper after confirmation; PaperLens removes its config entry, index chunks,
+  cached files, annotations, and manifest record.
+
+Extracted figures are display-only. They are not chunked, embedded, or retrieved.
+
+### Notes
+
+- Highlight selected text or attach a note to it in the paper viewer.
+- Edit, delete, and jump back to saved annotations.
+- Browse annotations across the library on the Notes page, with text and paper filters.
+- Export the filtered notes view as Markdown.
+- If re-extraction changes the text and an annotation cannot be re-anchored, the viewer marks
+  it as not found instead of silently attaching it elsewhere.
+
+## Manage the library
+
+The Admin page lets you add one or more modern arXiv IDs or arXiv URLs. It reports queued,
+duplicate, invalid, and failed inputs separately, updates the active config, and triggers one
+ingestion run for the batch.
+
+It also shows:
+
+- paper, chunk, and pending-paper counts;
+- the tag directory and counts;
+- current ingestion stage and progress; and
+- ingestion errors.
+
+**Re-scan** asks the worker to recheck pending papers in the configuration already loaded by
+the server. It does not reload manual edits made to the config file on disk. Restart the
+server or run `paperlens-ingest --config_path ...` after a manual edit.
+
+## Retrieval and grounding
+
+PaperLens combines several configurable stages:
+
+1. **Section-aware chunking** reconstructs heading breadcrumbs from section numbers and
+   prepends them to the embedded text.
+2. **Dense recall** retrieves candidate chunks from Chroma.
+3. **Hybrid retrieval** can add BM25 lexical recall and fuse both rankings with reciprocal
+   rank fusion (RRF).
+4. **Multi-query expansion** can generate paraphrases and fuse their result rankings.
+5. **Reranking** uses a local cross-encoder, the chat LLM, or Voyage's rerank API.
+6. **Elbow cutoff** chooses a bounded result count from the reranked score drop-off.
+
+Hybrid retrieval and multi-query expansion are off by default. The
+[`paperlens-eval` harness](harness.md) can measure them and tune retrieval settings against
+your own paper pool.
+
+An optional post-generation faithfulness check scores each cited sentence against its cited
+passage and labels it as entailment, neutral, or contradiction. It is a diagnostic signal;
+it does not edit or block the answer. See
+[architecture: faithfulness](architecture.md#-post-generation-faithfulness-check) for its
+limits and calibration model.
+
+## Ingestion and model backends
+
+Ingestion downloads each configured arXiv PDF, extracts Markdown with Docling, creates and
+embeds chunks, generates tags, and writes the manifest. Indexing and tag generation overlap,
+and cached artifacts avoid repeated work. You can re-tag without re-indexing or re-index
+without replacing tags.
+
+Backends are selected in `config.yaml`:
+
+| Component | Supported backends |
+|---|---|
+| Embedding | Hugging Face, OpenAI-compatible, Gemini, Voyage, Ollama |
+| Reranking | Hugging Face cross-encoder, chat LLM, Voyage rerank API |
+| Chat and tagging LLMs | Anthropic, Gemini, OpenAI, or OpenAI-compatible vLLM/SGLang servers |
+| Sparse retrieval | BM25 |
+| Faithfulness | Hugging Face consistency scorer |
+
+The base `uv sync` installs the supported provider dependencies. Local model weights still
+download on first use; API-backed configurations avoid loading local models they do not use.
+
+## Where to go next
+
+- Install and ask a first question: [Getting started](getting-started.md).
+- Look up keys, commands, and routes: [Configuration and commands](configuration.md).
+- Complete a specific task: [How-to guides](how-to.md).
+- Understand the design: [Architecture](architecture.md).
+- Tune retrieval for a paper pool: [Eval harness](harness.md).
+- Change the code: [Contributing](../CONTRIBUTING.md).

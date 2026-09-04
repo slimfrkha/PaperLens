@@ -11,7 +11,7 @@ see [Configuration & commands](configuration.md).
 
 - 🐍 **Python 3.14+** (the project pins it in `.python-version`).
 - 📦 **[uv](https://docs.astral.sh/uv/)** — manages the virtualenv, dependencies, and scripts.
-- 🟢 **Node.js** and **npm** — for the frontend.
+- 🟢 **Node.js 22+** and **npm** — for the frontend (`web/.nvmrc` pins 22).
 - 🤖 An **LLM endpoint**. The template this guide uses
   (`configs/examples/local-gpt-oss.yaml`) points at a local OpenAI-compatible server (LM
   Studio at `http://127.0.0.1:1234/v1`). A cloud provider works too — see
@@ -26,6 +26,7 @@ npm --prefix web install
 
 `uv sync` creates a `.venv`, installs the locked dependencies, and puts the `paperlens-serve`
 and `paperlens-ingest` commands on the path. Run project commands with `uv run <cmd>`.
+All supported LLM providers are included; there are no provider-specific extras to install.
 
 Verify:
 

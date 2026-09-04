@@ -49,6 +49,13 @@ class _RaisingCrossEncoderReranker:
         raise OSError("model not found")
 
 
+class _DeterministicReranker:
+    """Scores locally so rerank-path tests never load or download a model."""
+
+    def score(self, query: str, docs: list[str]) -> list[float]:
+        return [float(len(docs) - index) for index in range(len(docs))]
+
+
 def test_result_carries_section_number(make_searcher, seed_chunks):
     # section_number is stored on every chunk's metadata but was previously dropped on the
     # way back into Result — needed downstream for section-identity scoring (paperlens-eval)
@@ -468,6 +475,7 @@ def test_search_elbow_disabled_skips_cutoff_but_still_reranks(make_searcher, see
         seed_chunks("paper-c", "S3", "gamma three"),
     ]
     ctx = make_searcher(docs)
+    ctx.searcher._reranker = _DeterministicReranker()
     outcome = ctx.searcher.search(
         "alpha", min_k=1, max_k=2, candidates=3, rerank=True, elbow_enabled=False
     )

@@ -81,13 +81,14 @@ worker trigger to catch up any already-manifested paper still missing its displa
 retrying loop.
 
 The `papers:` list in config.yaml is what `pending_papers` diffs against the manifest to
-decide what's left to ingest — hand-edit it and hit "Re-scan config", or use the Admin
-UI's add/remove-paper actions (`POST /api/admin/papers`, `DELETE
-/api/admin/papers/{paper_id}`), which write that same
-list through `rag.config_writer` (a comment-preserving `ruamel.yaml` round-trip, so a
-UI-driven edit doesn't clobber the rest of the file's formatting) and mutate the running
-process's in-memory `cfg.papers` in place — `IngestConfig.papers` is the same list object
-by reference, so the worker picks the change up immediately, no restart needed. Remove is
+decide what's left to ingest. The Admin UI's add/remove-paper actions (`POST
+/api/admin/papers`, `DELETE /api/admin/papers/{paper_id}`) write that list through
+`rag.config_writer` (a comment-preserving `ruamel.yaml` round-trip, so a UI-driven edit
+doesn't clobber the rest of the file's formatting) and mutate the running process's
+in-memory `cfg.papers` in place. `IngestConfig.papers` is the same list object by reference,
+so the worker picks up UI changes immediately, without a restart. A manual edit on disk
+requires a server restart or a separate `paperlens-ingest --config_path ...` run; the Admin
+**Re-scan** action only rechecks the configuration already in memory. Remove is
 the inverse of the six stages above: it deletes the paper's Chroma chunks, manifest entry,
 cached PDF/markdown, annotations, and `config.yaml` entry together, so it can't reappear as
 "pending" on the next rescan and doesn't leave annotations orphaned against a paper that no
@@ -441,10 +442,10 @@ dealing with two very different kinds of coupling.
   fields in BibTeX export, `web/src/exportAnswer.ts`) — they degrade gracefully (nullable)
   but aren't source-agnostic.
 
-**What *is* source-agnostic:** the `ChoiceRegistry`-backed pieces — embedder, reranker, LLM
-backend — are designed to be swapped via config (see above). The document-domain model
-itself (`Paper` = an arXiv report, `arxiv_id` a first-class field everywhere) isn't
-pluggable the same way.
+**What *is* source-agnostic:** the `ChoiceRegistry`-backed pieces — embedder, reranker, sparse
+retrieval, faithfulness checker, and LLM backend — are designed to be swapped via config
+(see above). The document-domain model itself (`Paper` = an arXiv report, `arxiv_id` a
+first-class field everywhere) isn't pluggable the same way.
 
 ## 💡 Notable design facts
 
@@ -454,9 +455,10 @@ pluggable the same way.
 - **Lazy heavy models, warmed at startup.** The cross-encoder and embedder are built once
   on first use, but the server also warms them in a background thread at startup (a tiny
   dummy search) so the first `/api/chat` doesn't pay the 20-30s load; startup itself stays
-  instant. Cloud embedder SDKs are optional extras imported lazily — so an
-  OpenAI-compatible or cloud setup never pays for local model downloads it won't use. The
-  LLM backend goes through LiteLLM, a hard top-level dependency covering every provider.
+  instant. Backend-specific clients are imported lazily, so an API-backed setup does not
+  load local embedding or reranking models it will not use. LiteLLM and the supported
+  provider dependencies are installed by the base environment; there are no
+  provider-specific extras.
 - **Structured LLM output is validated and retried, not regex-parsed.** Tag generation,
   tag normalization, and query paraphrasing (`src/rag/tagger.py`,
   `src/rag/query_expansion.py`) all go through `LLMBackend.complete_structured`, which

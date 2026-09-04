@@ -15,25 +15,26 @@ retrieval config for a specific pool? Read [docs/harness.md](docs/harness.md) �
 
 ## ✅ The gate — run before calling anything done
 
-Four commands define "done", identical locally and in CI:
+Five commands define "done", matching CI:
 
 ```bash
-uv run ruff format --check src   # formatting
-uv run ruff check src            # lint
-uv run ty check src              # type check
-uv run pytest                    # tests
+uv run ruff format --check
+uv run ruff check
+uv run ty check src
+uv run python scripts/check_docs.py
+uv run pytest --cov=rag --cov=server --cov=eval --cov-branch --cov-report=term-missing
 ```
 
-Auto-fix the first two with `uv run ruff format src` / `uv run ruff check --fix src`.
+Auto-fix the first two with `uv run ruff format` / `uv run ruff check --fix`.
 `pre-commit` runs the fast auto-fixing subset on commit; `ty` + `pytest` are yours to run.
 
-`web/` has its own 4-command gate, identical locally and in CI:
+`web/` has its own 4-command gate, matching CI:
 
 ```bash
 npm --prefix web run format:check   # prettier
 npm --prefix web run lint           # eslint
 npm --prefix web run typecheck      # tsc --noEmit
-npm --prefix web run test           # vitest
+npm --prefix web run test:cov       # vitest + coverage
 ```
 
 Auto-fix with `npm --prefix web run format` / `npm --prefix web run lint -- --fix`.
@@ -45,11 +46,11 @@ Auto-fix with `npm --prefix web run format` / `npm --prefix web run lint -- --fi
 ```bash
 uv sync                          # venv + locked deps + paperlens-* scripts
 npm --prefix web install         # frontend deps
-uv run paperlens-serve           # backend only (FastAPI, port 8000)
-uv run paperlens-ingest          # ingest configured papers not yet in the DB
-uv run paperlens-ingest --retag  # regenerate tags without re-indexing
-uv run paperlens-ingest --reindex # re-chunk/re-embed existing papers under current config, tags untouched
-uv run paperlens-eval gen        # per-pool eval set + config tuning (see docs/harness.md)
+uv run paperlens-serve --config_path <path>    # backend only (FastAPI, port 8000)
+uv run paperlens-ingest --config_path <path>   # ingest configured papers not yet in the DB
+uv run paperlens-ingest --config_path <path> --retag    # regenerate tags without re-indexing
+uv run paperlens-ingest --config_path <path> --reindex  # re-chunk/re-embed; tags untouched
+uv run paperlens-eval gen --config <path>      # per-pool eval set (see docs/harness.md)
 make dev CONFIG=<path>           # backend + Vite dev server together
 ```
 
@@ -66,12 +67,12 @@ src/
     config.py          # typed config loader, project-root anchoring (+ .env)
     chunking.py        # section-aware chunking + breadcrumbs
     extract.py         # PDF → markdown (Docling)
-    embedders.py       # pluggable embedders (hf | openai | gemini | ollama)
-    reranker.py        # pluggable rerankers (hf cross-encoder | llm)
+    embedders.py       # pluggable embedders (hf | openai | gemini | voyage | ollama)
+    reranker.py        # pluggable rerankers (hf cross-encoder | llm | voyage)
     index.py           # chunk → embed → upsert (Chroma)
     llm.py             # provider-agnostic LLM backends (tool-use loop)
     manifest.py        # papers.json (paper metadata + tags)
-    search.py          # Searcher: dense recall → rerank (+ paper filter)
+    search.py          # Searcher: dense/hybrid recall → rerank → elbow cutoff
     tagger.py          # LLM tag generation
     pipeline.py        # ingest_paper: download → extract → index → tag → manifest
     ingest.py          # headless ingestion CLI (+ --retag, --reindex)
@@ -90,7 +91,7 @@ tests/                 # unit/ + integration/ (no __init__.py; importlib mode)
 docs/                  # documentation hub (docs/README.md)
 data/                  # git-ignored runtime: papers/, rag_db/, chat_history/
 evals/                 # git-ignored eval-harness artifacts: <fingerprint>.dev/test.jsonl, confirm.json
-scripts/               # standalone dev tools, not part of the gate (see docs/how-to.md)
+scripts/               # docs gate plus standalone dev tools (see docs/how-to.md)
 ```
 
 Import the public API from the package (`from rag import Searcher, load_config`), **not**
@@ -126,24 +127,25 @@ server hosts the worker, so it reads every field). Don't widen `IngestConfig` fo
 - **Lazy heavy models, warmed at startup.** The cross-encoder and embedder load on first
   use and the `ChatAgent` is built once (lazily, under a lock), but the server warms them in
   a background thread at startup (`warm_models` in `main.py`, a tiny dummy search) so the
-  first `/api/chat` skips the 20-30s load while startup stays instant. Cloud clients are
-  optional extras imported lazily — an OpenAI-compatible or cloud setup never pays for local
-  model downloads.
+  first `/api/chat` skips the 20-30s load while startup stays instant. Backend-specific
+  clients are imported lazily, so an API-backed setup does not load local models it will not
+  use. Provider dependencies come from the base `uv sync`.
 - **Config anchoring.** Every relative path in `config.yaml` resolves against the **project
   root** — the nearest `pyproject.toml` ancestor of the config file — so a config in
   `configs/` still writes data to the repo root, and every entry point is CWD-independent.
-  Located by `--config_path` → `PAPERLENS_CONFIG` → upward search from CWD. Config is
-  dataclasses decoded by `draccus` with OmegaConf `${...}` interpolation; `parse_config`
-  adds per-field CLI overrides (`--server.port=…`) that feed interpolation.
+  Serve/ingest locate it by `--config_path` → `PAPERLENS_CONFIG` → upward search from CWD;
+  eval uses `--config` for the explicit form, then the same fallbacks. Config is dataclasses
+  decoded by `draccus` with OmegaConf `${...}` interpolation; `parse_config` adds per-field
+  CLI overrides (`--server.port=…`) that feed interpolation.
 - **SSE streaming.** `/api/chat` streams tokens and trace steps over Server-Sent Events;
   the agent runs in a thread executor and pushes events onto an asyncio queue. The UI
   renders the answer and the Thought → Action → Observation trace as they happen.
 - **Embedder identity is baked into the index.** The embedder's `name()` namespaces the
   Chroma collection. Changing the embedder means re-indexing (delete `paths.rag_db` and
   re-ingest, or use a fresh `collection` name).
-- **ChoiceRegistry pattern.** Embedders, rerankers, and LLM backends are selected by a
-  config `type` string and modelled as `draccus.ChoiceRegistry` variant dataclasses
-  (`EmbeddingCfg`/`RerankerCfg`/`LLMSpec` in `config.py`). Adding a backend is one
+- **ChoiceRegistry pattern.** Embedders, rerankers, sparse and faithfulness backends, and
+  LLM backends are selected by a config `type` string and modelled as
+  `draccus.ChoiceRegistry` variant dataclasses in `config.py`. Adding a backend is one
   `@Base.register_subclass("name")` dataclass + a `build_*` match arm — no `if/elif`; an
   unknown `type` or stray field fails loudly at load.
 
@@ -167,6 +169,7 @@ server hosts the worker, so it reads every field). Don't widen `IngestConfig` fo
   a new/renamed term → [CONTEXT.md](CONTEXT.md); a change to `src/eval/` or the
   `paperlens-eval` flow → [docs/harness.md](docs/harness.md); any new feature (user-facing or
   internal) → [docs/features.md](docs/features.md). A change isn't done until docs agree.
+  After doc edits, run `uv run python scripts/check_docs.py`.
 
 Full contributor guide: [CONTRIBUTING.md](CONTRIBUTING.md). Recipes for adding a paper,
 LLM backend, or embedder: [docs/how-to.md](docs/how-to.md).

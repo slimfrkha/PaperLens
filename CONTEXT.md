@@ -66,7 +66,7 @@ in the same directory.
 ### 🧬 Embedder
 
 The component that turns text into vectors. Selected by `embedding.type`
-(`hf` · `openai` · `gemini` · `ollama`) and built through the **registry**. The same
+(`hf` · `openai` · `gemini` · `voyage` · `ollama`) and built through the **registry**. The same
 embedder is used at indexing time and query time — though asymmetric embedders may embed
 the same text differently depending on which side it's called from: Gemini's `task_type`,
 or `hf`'s optional `query_prefix`/`document_prefix`, via `embed_query()` diverging from
@@ -78,8 +78,8 @@ or `hf`'s optional `query_prefix`/`document_prefix`, via `embed_query()` divergi
 ### 🎯 Reranker
 
 The second retrieval stage: rescores candidate chunks against the query. Selected by
-`reranker.type` — `hf` (a local cross-encoder) or `llm` (reuses the chat model to score).
-`reranker.enabled` toggles the whole stage.
+`reranker.type` — `hf` (a local cross-encoder), `llm` (reuses the chat model to score), or
+`voyage` (a dedicated rerank API). `reranker.enabled` toggles the whole stage.
 
 - Code: `Reranker` ABC + `build_reranker` in `src/rag/reranker.py`.
 - `_Avoid_:` re-ranker (no hyphen), scorer, second-pass.
@@ -343,11 +343,12 @@ Computed by diffing the config paper list against the manifest.
 
 The `draccus.ChoiceRegistry` config bases whose `type` string selects a variant
 subclass carrying only that backend's fields, so adding a backend is one
-`@Base.register_subclass("name")` dataclass plus a `build_*` match arm. Three of them:
-`EmbeddingCfg`, `RerankerCfg`, `LLMSpec` (all in `src/rag/config.py`).
+`@Base.register_subclass("name")` dataclass plus a `build_*` match arm. The five registries
+are `EmbeddingCfg`, `RerankerCfg`, `SparseCfg`, `FaithfulnessCfg`, and `LLMSpec` (all in
+`src/rag/config.py`).
 
-- Code: the `ChoiceRegistry` bases + variants in `src/rag/config.py`; the `build_embedder`
-  / `build_reranker` / `build_llm` match dispatch in `embedders.py` / `reranker.py` / `llm.py`.
+- Code: the `ChoiceRegistry` bases + variants in `src/rag/config.py`; backend builders in
+  `embedders.py`, `reranker.py`, `faithfulness.py`, and `llm.py`.
 - `_Avoid_:` factory map, plugin table, dispatch dict, decorator registry (the old
   `@register_*` decorators are gone). Not to be confused with the **manifest**.
 
@@ -364,8 +365,8 @@ chat, tagging, and the `llm` reranker.
 
 ### ✅ The gate
 
-The four commands that define "done", identical locally and in CI:
-`ruff format --check` · `ruff check` · `ty check` · `pytest`. See
+The five commands that define "done", matching CI:
+`ruff format --check` · `ruff check` · `ty check` · `check_docs` · `pytest`. See
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
 - `_Avoid_:` checks, lint step, CI suite (say "the gate").
@@ -375,8 +376,9 @@ The four commands that define "done", identical locally and in CI:
 `config.yaml` is the single source of truth. The **project root** is the nearest
 `pyproject.toml` ancestor of the config file, and every relative path in the config is
 anchored there — so a config in `configs/` still writes to the repo root, and commands work
-from any working directory. Located by: explicit `--config_path` → `PAPERLENS_CONFIG` env →
-upward search from the CWD.
+from any working directory. Serve/ingest locate it by explicit `--config_path` →
+`PAPERLENS_CONFIG` env → upward search from the CWD. Eval uses `--config` for its explicit
+form, then the same fallbacks.
 
 - Code: `load_config` / `_project_root` in `src/rag/config.py`.
 - `_Avoid_:` settings, config dir, working dir (the root is the pyproject.toml ancestor, not

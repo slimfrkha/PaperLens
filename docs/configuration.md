@@ -16,6 +16,9 @@ A config file is the single source of truth. It is located in this order:
 2. The `PAPERLENS_CONFIG` environment variable.
 3. An upward search for a file literally named `config.yaml` from the current directory.
 
+`paperlens-eval` uses `--config <path>` for its explicit option, then the same environment
+variable and upward-search fallback.
+
 Configs live under [`configs/`](../configs/) — there is no default config and no
 `config.yaml` at the repo root, so a bare command with no `--config_path`/`PAPERLENS_CONFIG`
 and no `config.yaml` discoverable upward from the CWD raises `FileNotFoundError`. The
@@ -38,9 +41,9 @@ merged *before* interpolation resolves, so `${...}` sees them too. `paperlens-in
 takes the non-config flags `--retag` and `--reindex`.
 
 > **Migration (from the pydantic config):** the LLM selector key `provider` was renamed to
-> `type` (uniform with `embedding.type` / `reranker.type`), and the config-file CLI flag
-> `--config` became `--config_path`. Both old spellings now fail loudly rather than silently
-> defaulting.
+> `type` (uniform with `embedding.type` / `reranker.type`), and the serve/ingest config-file
+> flag `--config` became `--config_path`. Both old spellings fail loudly there rather than
+> silently defaulting. The separate eval CLI intentionally still uses `--config`.
 
 Copy-me templates for common setups (local gpt-oss, Anthropic, Gemini, Ollama) live in
 [`configs/examples/`](../configs/examples/README.md), alongside the annotated
@@ -168,8 +171,9 @@ Each spec is a tagged union on `type` (the `LLMSpec` variants):
 old `provider`, or `api_base` on `anthropic`) or an unknown `type` **fails loudly at load**.
 
 Defaults differ by spec: `llm.tagging` defaults to model `claude-haiku-4-5-20251001`;
-`llm.chat` defaults to `claude-opus-4-8`. The **shipped `config.yaml`** overrides both to a
-local OpenAI-compatible server.
+`llm.chat` defaults to `claude-opus-4-8`. The focused templates in
+[`configs/examples/`](../configs/examples/README.md) set both explicitly for their chosen
+backend.
 
 ### ✂️ `chunking`
 
@@ -270,13 +274,14 @@ Loaded from a local `.env` (via `python-dotenv`) or the shell.
 | `PAPERLENS_CONFIG` | Path to `config.yaml` (overrides the upward search). |
 | `ANTHROPIC_API_KEY` | Default key env for the `anthropic` provider. |
 | `GEMINI_API_KEY` | Default key env for the `gemini` provider/embedder. |
-| `OPENAI_API_KEY` | Default key env for the `openai` embedder. |
-| `VOYAGE_API_KEY` | Default key env for the `voyage` embedder. |
+| `OPENAI_API_KEY` | Default key env for the `openai` LLM and embedder. |
+| `VOYAGE_API_KEY` | Default key env for the `voyage` embedder and reranker. |
 | *(custom)* | Whatever you set a spec's `api_key_env` to (e.g. `LOCAL_LLM_KEY`). |
 
 ## 💻 Commands
 
-Console scripts (from `pyproject.toml`); each also runs as `python -m <module>`.
+Console scripts are declared in `pyproject.toml`. Serve and ingest also have module forms;
+use the console script for eval.
 
 | Command | Equivalent | What it does |
 |---|---|---|
@@ -285,6 +290,7 @@ Console scripts (from `pyproject.toml`); each also runs as `python -m <module>`.
 | `uv run paperlens-ingest --retag` | — | Regenerate tags for already-ingested papers (no re-index). |
 | `uv run paperlens-ingest --reindex` | — | Re-chunk/re-embed every already-ingested paper under the current config, cleaning up chunks orphaned by a chunking change. Tags are left untouched — `--retag` and `--reindex` each do one job and don't combine in a single invocation, so run `--retag` as a separate follow-up command if you also want fresh tags. |
 | `uv run paperlens-{serve,ingest} --config_path <path>` | — | Use a specific config file. |
+| `uv run paperlens-eval <command> --config <path>` | — | Run the per-pool eval harness. Commands are `gen`, `run`, `screen`, `sweep`, `confirm`, `per-paper`, and `comparative`; see [Eval harness](harness.md). |
 
 ### 🎁 Make targets
 
@@ -314,13 +320,15 @@ Served under `/api`; any other path falls through to the SPA.
 |---|---|---|
 | GET | `/api/papers` | List ingested papers with tags. |
 | GET | `/api/papers/{paper_id}` | One paper's full markdown. |
+| GET | `/api/papers/{paper_id}/assets/{filename}` | Serve an extracted figure used by display markdown. |
 | GET | `/api/papers/{paper_id}/annotations` | List a paper's saved annotations. |
 | POST | `/api/papers/{paper_id}/annotations` | Create an annotation (snippet + section + optional note). |
 | PATCH | `/api/papers/{paper_id}/annotations/{annotation_id}` | Update an annotation's note. |
 | DELETE | `/api/papers/{paper_id}/annotations/{annotation_id}` | Delete an annotation. |
+| GET | `/api/annotations` | List annotations across the library, joined with paper metadata. |
 | GET | `/api/tags` | Tags with paper counts, excluding any tag present on every paper (no filtering value). |
 | GET | `/api/admin/status` | Paper/chunk counts, pending papers, ingestion progress. |
-| POST | `/api/admin/rescan` | Re-scan `config.yaml` and ingest new papers. |
+| POST | `/api/admin/rescan` | Trigger ingestion for pending papers in the server's in-memory config. This does not reload a file edited on disk. |
 | POST | `/api/admin/papers` | Add one or more papers from a list of arXiv ids/URLs: per-line queued/duplicate/invalid/error status, one ingestion trigger for the batch. |
 | DELETE | `/api/admin/papers/{paper_id}` | Remove a paper: manifest entry, Chroma chunks, cached PDF/markdown, annotations, and its `config.yaml` entry. |
 | GET | `/api/chats` | List chat sessions. |
@@ -328,4 +336,6 @@ Served under `/api`; any other path falls through to the SPA.
 | GET | `/api/chats/{chat_id}` | Fetch one chat session. |
 | DELETE | `/api/chats/{chat_id}` | Delete a chat session. |
 | POST | `/api/chats/{chat_id}/feedback` | Set or clear 👍/👎 + note feedback on one turn. |
+| POST | `/api/chats/{chat_id}/stop` | Request that the current turn stop and persist the text streamed so far. |
+| POST | `/api/chat/classify` | Resolve Auto mode to Ask or Compare before starting a streamed turn. |
 | POST | `/api/chat` | Run the agent; streams the answer + trace over SSE. |

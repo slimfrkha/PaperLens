@@ -1,5 +1,5 @@
 # Google Gemini for both embeddings and the LLMs.
-# Needs:  uv sync --extra gemini   and   GEMINI_API_KEY in .env
+# Needs: GEMINI_API_KEY in .env (`uv sync` includes the provider dependencies)
 
 data_path: data
 collection: arxiv_papers

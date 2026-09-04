@@ -8,11 +8,11 @@
 # Every value shown is the built-in default from src/rag/config.py unless noted. The one
 # exception is `paths` (below): the values shown are the recommended collection-namespaced
 # layout, NOT the dataclass defaults — those are flat (e.g. `data/rag_db`). All relative
-# paths are anchored to this file's directory (the project root). Full prose reference:
+# paths are anchored to the nearest pyproject.toml ancestor (the project root here). Reference:
 # docs/configuration.md.
 #
-# The `embedding`, `reranker`, and `llm.*` sections are tagged unions: a `type` string
-# selects the variant, and only that variant's keys are valid (an unknown key or an
+# The `embedding`, `reranker`, `sparse`, `faithfulness`, and `llm.*` sections are tagged
+# unions: a `type` string selects the variant, and only that variant's keys are valid (an unknown key or an
 # unknown `type` fails loudly at load — no silent defaulting). Values support OmegaConf
 # `${...}` interpolation (e.g. `${server.port}`, `${oc.env:HOME}`), resolved at load
 # time; CLI overrides on paperlens-serve/-ingest (e.g. `--server.port=9000`) feed it too.
@@ -21,7 +21,7 @@
 data_path: data # base dir for all runtime data (referenced as ${data_path})
 collection: arxiv_papers # Chroma collection name; also namespaces the data paths
 
-# --- Filesystem paths (relative -> anchored to this file's dir; absolute -> used as-is) ---
+# --- Filesystem paths (relative -> anchored to the project root; absolute -> used as-is) ---
 # Setting the ${data_path}/${collection} prefix below is what keeps each collection's data
 # isolated — it is NOT automatic. Omit a path and you get the flat dataclass default for it
 # (e.g. `data/rag_db`, un-namespaced), not a derived one. Edit freely.
@@ -150,7 +150,7 @@ tagger:
 # measure your own pool with `paperlens-eval screen --tier retrieval --multi-query` (docs/harness.md)
 # before trusting this blindly, same as sparse/faithfulness ask you to for their own opt-ins.
 multi_query:
-  enabled: true # recommended default, not measured for your specific pool — see comment above
+  enabled: false # opt-in; screen on your paper pool before enabling
   n_paraphrases: 3
   fetch_multiplier: 3
 

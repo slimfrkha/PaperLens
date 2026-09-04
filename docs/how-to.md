@@ -19,7 +19,13 @@
 
 ## Add papers
 
-1. Add a line to `papers` in your config (e.g. `configs/my-setup.yaml`):
+The Admin page is the fastest path. Paste one or more modern arXiv IDs or arXiv URLs,
+then select **Add**. PaperLens writes them to the active config and starts ingestion without
+a restart.
+
+To choose a human-readable `paper_id`, edit `papers` in your config instead:
+
+1. Add a line to the active config (for example, `configs/my-setup.yaml`):
 
    ```yaml
    papers:
@@ -29,13 +35,16 @@
    `name` becomes the `paper_id` (filename stem, manifest key, search filter). Keep it
    short and unique. Quote the `arxiv_id`.
 
-2. Ingest it. Either hit **Re-scan** on the Admin page (no restart), or run headless:
+2. Load the edited file. Either restart the server (which starts ingestion when
+   `ingestion.auto_start` is on), or run ingestion headlessly:
 
    ```bash
-   uv run paperlens-ingest
+   uv run paperlens-ingest --config_path configs/my-setup.yaml
    ```
 
-   Only papers not already in the DB are processed.
+   Only papers not already in the manifest are processed. The Admin **Re-scan** action
+   rechecks the configuration already loaded by the running server; it does not reload a
+   config file edited on disk.
 
 3. ✅ Verify: the paper appears on the **Papers** page with tags, and the Admin chunk count
    rises. Ask a question the new paper should answer and check the citations point to it.
@@ -48,7 +57,7 @@ Regenerate tags for already-ingested papers without re-indexing (e.g. after chan
 tagging model):
 
 ```bash
-uv run paperlens-ingest --retag
+uv run paperlens-ingest --config_path configs/my-setup.yaml --retag
 ```
 
 Both re-tagging and a normal ingest end with a **tag normalization** pass: the LLM sees the

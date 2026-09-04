@@ -17,8 +17,9 @@ here when you want to go deeper.
 - **Retrieval.** A FastAPI `ChatAgent` runs a **ReAct loop** with one `search_papers`
   tool over a **two-stage `Searcher`** (dense recall → cross-encoder/LLM rerank), with
   opt-in hybrid dense+BM25 fusion and multi-query paraphrase expansion.
-- **Pluggable backends.** Embedders (`hf` · `openai` · `gemini` · `ollama`), rerankers
-  (`hf` cross-encoder · `llm`), and LLM providers — each selected by config.
+- **Pluggable backends.** Embedders (`hf` · `openai` · `gemini` · `voyage` · `ollama`),
+  rerankers (`hf` cross-encoder · `llm` · `voyage`), and LLM providers — each selected by
+  config.
 - **Faithfulness (opt-in).** A post-generation check verifies each cited sentence
   against the passage it cites and flags entailment/neutral/contradiction, without
   altering the answer.
@@ -48,9 +49,9 @@ here when you want to go deeper.
 
 ```text
 config.yaml ─┬─> ingestion worker: download → markdown (Docling) → index (Chroma) → LLM tags
-             └─> FastAPI backend ── agentic RAG ──> LLM (Claude | any OpenAI-compatible server)
+             └─> FastAPI backend ── agentic RAG ──> LLM (Anthropic | Gemini | OpenAI-compatible)
                        │  tool: search_papers → Searcher (embedder + reranker)
-                       └─> React + Vite + Mantine UI: Chat · Papers · Admin
+                       └─> React + Vite + Mantine UI: Chat · Papers · Notes · Admin
 ```
 
 Two flows meet at the vector index: **ingestion** fills it, **retrieval** reads it.
