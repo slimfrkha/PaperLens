@@ -10,8 +10,10 @@ import pytest
 from rag.config import (
     CONFIG_ENV_VAR,
     ChunkingCfg,
+    ExtractionCfg,
     HFFaithfulnessCfg,
     IngestConfig,
+    Paper,
     RetrievalCfg,
     TaggerCfg,
     load_config,
@@ -69,6 +71,21 @@ def test_parses_scalars_and_papers(tmp_path):
     assert cfg.collection == "my_papers"
     assert [p.name for p in cfg.papers] == ["foo"]
     assert cfg.papers[0].arxiv_id == "1234.5678"
+
+
+def test_paper_name_rejects_reserved_display_suffix():
+    with pytest.raises(ValueError, match="reserved suffix '_display'"):
+        Paper(name="foo_display", arxiv_id="1234.5678")
+
+
+def test_reserved_paper_name_rejected_at_config_load(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text('papers:\n  - { name: foo_display, arxiv_id: "1234.5678" }\n')
+
+    with pytest.raises(Exception, match="Paper") as exc:
+        load_config(str(path))
+
+    assert "reserved suffix '_display'" in str(exc.value.__cause__)
 
 
 def test_missing_file_raises(tmp_path):
@@ -167,6 +184,8 @@ def test_incoherent_knobs_fail_at_construction():
         TaggerCfg(min_tags=8, max_tags=3)
     with pytest.raises(ValueError, match="contradiction_max"):
         HFFaithfulnessCfg(contradiction_max=0.5, entailment_min=0.3)
+    with pytest.raises(ValueError, match="extraction.backend"):
+        ExtractionCfg(backend="magic")
 
 
 def test_incoherent_knobs_fail_at_config_load(tmp_path):

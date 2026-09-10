@@ -1,17 +1,16 @@
 """Guard 1: isolated re-index cells for chunking sweeps — never touch the prod collection.
 
-Changing ``chunking.max_tokens`` and re-ingesting into the **same** collection contaminates
-it: ``_chunk_id`` is a content hash of ``paper_id|section_number|section_title|part`` and
-``upsert_chunks`` only upserts, so re-cut chunks get *new* ids and pile up alongside the old
-ones — every retrieval number after that is garbage (``src/rag/index.py:40-91``). The embedder
-is protected (``embedder.name()`` namespaces the collection); chunking is not.
+Changing ``chunking.max_tokens`` and repeatedly rebuilding a shared collection risks coupling
+otherwise independent sweep cells through persistent state. Production indexing removes stale
+ids, but an eval cell must still be fresh so its contents cannot depend on an earlier cell or
+interrupted run. The embedder is protected (``embedder.name()`` namespaces the collection);
+chunking is not.
 
 So each cell gets its **own** collection, named from a hash of the chunking (+ embedding)
 config, built fresh (``reset=True``) in a throwaway temp dir — the prod ``paths.rag_db`` is
 never opened. After upsert we assert ``count() == len(chunks)``: a fresh collection holds
-exactly what we just put in it, so any shortfall means two chunks collided on ``_chunk_id``
-— a latent *prod* bug (the second silently overwrites the first on disk too), surfaced here,
-not a harness fault.
+exactly what we just put in it, so any shortfall means two chunks collided on ``_chunk_id`` —
+a latent *prod* bug surfaced here, not a harness fault.
 
 We reuse ``rag.index`` (``open_collection`` + ``upsert_chunks``) rather than reimplement
 indexing, and return the ordinary :class:`~rag.search.Searcher` over the cell's collection —

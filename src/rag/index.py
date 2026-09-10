@@ -39,7 +39,10 @@ DEFAULT_EMBEDDER = "BAAI/bge-m3"
 
 def _chunk_id(c: Chunk) -> str:
     m = c.metadata
-    key = f"{m['paper_id']}|{m['section_number']}|{m['section_title']}|{m['part']}"
+    key = (
+        f"{m['paper_id']}|{m.get('section_index', '')}|{m['section_number']}|"
+        f"{m['section_title']}|{m['part']}"
+    )
     return hashlib.md5(key.encode()).hexdigest()
 
 
@@ -59,6 +62,8 @@ def collect_chunks(docs_dir: str, **chunk_kwargs) -> list[Chunk]:
     chunks: list[Chunk] = []
     for path in sorted(glob.glob(os.path.join(docs_dir, "*.md"))):
         paper_id = os.path.splitext(os.path.basename(path))[0]
+        if paper_id.endswith("_display"):
+            continue
         with open(path) as f:
             md = f.read()
         doc_chunks = chunk_markdown(md, paper_id=paper_id, **chunk_kwargs)

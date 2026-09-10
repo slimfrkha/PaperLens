@@ -128,15 +128,23 @@ limits and calibration model.
 
 ## Ingestion and model backends
 
-Ingestion downloads each configured arXiv PDF, extracts Markdown with Docling, creates and
-embeds chunks, generates tags, and writes the manifest. Indexing and tag generation overlap,
-and cached artifacts avoid repeated work. You can re-tag without re-indexing or re-index
-without replacing tags.
+Ingestion fetches each configured paper's semantic arXiv HTML and normalizes it to canonical
+Markdown. If HTML is unavailable or invalid, `auto` mode falls back to PDF/Docling. It then
+creates and embeds chunks, generates tags, and writes extraction provenance to the manifest.
+Indexing and tag generation overlap, and cached artifacts avoid repeated work. You can
+re-tag without re-indexing, re-index without replacing tags, or explicitly re-extract and
+reindex while preserving tags.
+
+The HTML normalizer distinguishes inline from display equations, retains theorem-style labels,
+and preserves footnote content without embedding duplicate numeric note markers. Display-image
+backfill stays pinned to the paper's recorded extraction source so the viewer matches the
+canonical markdown used by retrieval.
 
 Backends are selected in `config.yaml`:
 
 | Component | Supported backends |
 |---|---|
+| Extraction | arXiv HTML, PDF/Docling, or automatic HTML → Docling fallback |
 | Embedding | Hugging Face, OpenAI-compatible, Gemini, Voyage, Ollama |
 | Reranking | Hugging Face cross-encoder, chat LLM, Voyage rerank API |
 | Chat and tagging LLMs | Anthropic, Gemini, OpenAI, or OpenAI-compatible vLLM/SGLang servers |

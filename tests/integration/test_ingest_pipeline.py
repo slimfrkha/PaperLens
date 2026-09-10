@@ -1,6 +1,6 @@
-"""End-to-end ingestion of one paper: download -> markdown -> index -> tag -> manifest.
+"""End-to-end ingestion of one paper: extract -> markdown -> index -> tag -> manifest.
 
-Network (arXiv), Docling extraction, and the tagging LLM are stubbed; chunking,
+Network/extraction and the tagging LLM are stubbed; chunking,
 embedding into a real temp Chroma, and the manifest write run for real.
 """
 
@@ -10,6 +10,7 @@ from pathlib import Path
 
 from rag import pipeline
 from rag.config import ChunkingCfg, ExtractionCfg, Paper
+from rag.extract import ExtractionResult
 from rag.index import open_collection
 from rag.manifest import Manifest
 
@@ -29,9 +30,24 @@ _BODY = "\n\n".join(_PARA for _ in range(12))
 _LONG_MARKDOWN = f"## Paper A\n\n## 1 Architecture\n\n{_BODY}\n"
 
 
-def _fake_download(arxiv_id: str, dest: str) -> None:
-    Path(dest).parent.mkdir(parents=True, exist_ok=True)
-    Path(dest).write_bytes(b"%PDF")
+def _fake_extractor(markdown: str = _MARKDOWN, calls: list[dict] | None = None):
+    def _extract(arxiv_id: str, paper_id: str, **kwargs) -> ExtractionResult:
+        if calls is not None:
+            calls.append(kwargs)
+        display_markdown = markdown if kwargs["render_images"] else None
+        if display_markdown is not None:
+            display = Path(kwargs["display_md_path"])
+            display.parent.mkdir(parents=True, exist_ok=True)
+            display.write_text(display_markdown)
+        return ExtractionResult(
+            markdown=markdown,
+            display_markdown=display_markdown,
+            source="html",
+            source_url=f"https://arxiv.org/html/{arxiv_id}",
+            arxiv_version=f"{arxiv_id}v1",
+        )
+
+    return _extract
 
 
 def test_ingest_paper_populates_db_and_manifest(make_config, fake_embedder, monkeypatch):
@@ -41,9 +57,8 @@ def test_ingest_paper_populates_db_and_manifest(make_config, fake_embedder, monk
         cfg.paths.rag_db, cfg.collection, embedder_name=fake_embedder.name()
     )
 
-    # Stub the three external stages.
-    monkeypatch.setattr(pipeline, "_download", _fake_download)
-    monkeypatch.setattr(pipeline, "pdf_to_markdown", lambda path, **kw: _MARKDOWN)
+    # Stub the external extraction and tagging stages.
+    monkeypatch.setattr(pipeline, "extract_paper", _fake_extractor())
     monkeypatch.setattr(
         pipeline, "generate_tags", lambda md, spec, existing_tags, **kw: ["moe", "attention"]
     )
@@ -65,7 +80,9 @@ def test_ingest_paper_populates_db_and_manifest(make_config, fake_embedder, monk
     # Manifest persisted and markdown cached to disk.
     assert manifest.is_ingested("paper-a")
     assert (Path(cfg.paths.markdown_dir) / "paper-a.md").exists()
-    assert stages[0] == "download" and stages[-1] == "done"
+    assert stages[0] == "extract" and stages[-1] == "done"
+    assert record["extraction_source"] == "html"
+    assert record["arxiv_version"] == "0000.00001v1"
 
 
 def test_ingest_survives_tagging_failure(make_config, fake_embedder, monkeypatch):
@@ -73,8 +90,7 @@ def test_ingest_survives_tagging_failure(make_config, fake_embedder, monkeypatch
     manifest = Manifest(cfg.paths.rag_db)
     collection = open_collection(cfg.paths.rag_db, cfg.collection)
 
-    monkeypatch.setattr(pipeline, "_download", _fake_download)
-    monkeypatch.setattr(pipeline, "pdf_to_markdown", lambda path, **kw: _MARKDOWN)
+    monkeypatch.setattr(pipeline, "extract_paper", _fake_extractor())
 
     def _boom(*a, **k):
         raise RuntimeError("no tagging key")
@@ -98,8 +114,7 @@ def test_ingest_propagates_index_failure(make_config, fake_embedder, monkeypatch
     manifest = Manifest(cfg.paths.rag_db)
     collection = open_collection(cfg.paths.rag_db, cfg.collection)
 
-    monkeypatch.setattr(pipeline, "_download", _fake_download)
-    monkeypatch.setattr(pipeline, "pdf_to_markdown", lambda path, **kw: _MARKDOWN)
+    monkeypatch.setattr(pipeline, "extract_paper", _fake_extractor())
     monkeypatch.setattr(pipeline, "generate_tags", lambda md, spec, existing_tags, **kw: ["moe"])
 
     def _boom(*a, **k):
@@ -120,8 +135,7 @@ def test_chunking_config_reaches_chunk_markdown(make_config, fake_embedder, monk
     Unit tests call chunk_markdown directly, so a kwarg dropped anywhere along
     this chain would otherwise go unnoticed.
     """
-    monkeypatch.setattr(pipeline, "_download", _fake_download)
-    monkeypatch.setattr(pipeline, "pdf_to_markdown", lambda path, **kw: _MARKDOWN)
+    monkeypatch.setattr(pipeline, "extract_paper", _fake_extractor())
     monkeypatch.setattr(pipeline, "generate_tags", lambda md, spec, existing_tags, **kw: [])
 
     def _ingest(chunking: ChunkingCfg | None) -> int:
@@ -154,8 +168,7 @@ def test_ingest_paper_reindex_after_chunking_change_does_not_leak_stale_chunks(
     config' scenario --reindex exists for) must leave the collection reflecting only the
     new chunking, not the union of both — the same bug test_index.py proves directly
     against index_markdown, exercised here through the full ingest_paper pipeline."""
-    monkeypatch.setattr(pipeline, "_download", _fake_download)
-    monkeypatch.setattr(pipeline, "pdf_to_markdown", lambda path, **kw: _LONG_MARKDOWN)
+    monkeypatch.setattr(pipeline, "extract_paper", _fake_extractor(_LONG_MARKDOWN))
     monkeypatch.setattr(pipeline, "generate_tags", lambda md, spec, existing_tags, **kw: ["moe"])
 
     paper = Paper(name="paper-a", arxiv_id="0000.00001")
@@ -184,8 +197,7 @@ def test_ingest_paper_retag_false_preserves_existing_tags(make_config, fake_embe
     tags are carried forward from the manifest instead of regenerated (and regenerated
     tags aren't even guaranteed deterministic, so re-running the tagger on every reindex
     would risk silent tag churn unrelated to the chunking change that triggered it)."""
-    monkeypatch.setattr(pipeline, "_download", _fake_download)
-    monkeypatch.setattr(pipeline, "pdf_to_markdown", lambda path, **kw: _LONG_MARKDOWN)
+    monkeypatch.setattr(pipeline, "extract_paper", _fake_extractor(_LONG_MARKDOWN))
 
     paper = Paper(name="paper-a", arxiv_id="0000.00001")
     cfg_small = make_config(chunking=ChunkingCfg(max_tokens=128))
@@ -221,17 +233,22 @@ def test_ingest_paper_rerenders_when_text_cached_but_display_missing(
     it) even though the RAG text itself doesn't need re-extracting."""
     cfg = make_config(extraction=ExtractionCfg(render_images=True))
     manifest = Manifest(cfg.paths.rag_db)
+    manifest.upsert(
+        {
+            "paper_id": "paper-a",
+            "tags": [],
+            "n_chunks": 1,
+            "extraction_source": "html",
+        }
+    )
     collection = open_collection(
         cfg.paths.rag_db, cfg.collection, embedder_name=fake_embedder.name()
     )
     Path(cfg.paths.markdown_dir).mkdir(parents=True, exist_ok=True)
     (Path(cfg.paths.markdown_dir) / "paper-a.md").write_text(_MARKDOWN)  # cached text only
 
-    monkeypatch.setattr(pipeline, "_download", _fake_download)
     calls = []
-    monkeypatch.setattr(
-        pipeline, "pdf_to_markdown", lambda path, **kw: calls.append(kw) or _MARKDOWN
-    )
+    monkeypatch.setattr(pipeline, "extract_paper", _fake_extractor(calls=calls))
     monkeypatch.setattr(pipeline, "generate_tags", lambda md, spec, existing_tags, **kw: [])
 
     pipeline.ingest_paper(
@@ -244,7 +261,6 @@ def test_ingest_paper_rerenders_when_text_cached_but_display_missing(
 
     assert len(calls) == 1
     assert calls[0]["render_images"] is True
-    assert calls[0]["paper_id"] == "paper-a"
     assert calls[0]["display_md_path"].endswith("paper-a_display.md")
 
 
@@ -253,6 +269,14 @@ def test_ingest_paper_skips_extract_when_text_and_display_both_cached(
 ):
     cfg = make_config(extraction=ExtractionCfg(render_images=True))
     manifest = Manifest(cfg.paths.rag_db)
+    manifest.upsert(
+        {
+            "paper_id": "paper-a",
+            "tags": [],
+            "n_chunks": 1,
+            "extraction_source": "html",
+        }
+    )
     collection = open_collection(
         cfg.paths.rag_db, cfg.collection, embedder_name=fake_embedder.name()
     )
@@ -260,12 +284,10 @@ def test_ingest_paper_skips_extract_when_text_and_display_both_cached(
     (Path(cfg.paths.markdown_dir) / "paper-a.md").write_text(_MARKDOWN)
     (Path(cfg.paths.markdown_dir) / "paper-a_display.md").write_text(_MARKDOWN)
 
-    monkeypatch.setattr(pipeline, "_download", _fake_download)
-
     def _fail(*a, **k):
-        raise AssertionError("pdf_to_markdown should not run — both files are cached")
+        raise AssertionError("extract_paper should not run — both files are cached")
 
-    monkeypatch.setattr(pipeline, "pdf_to_markdown", _fail)
+    monkeypatch.setattr(pipeline, "extract_paper", _fail)
     monkeypatch.setattr(pipeline, "generate_tags", lambda md, spec, existing_tags, **kw: [])
 
     record = pipeline.ingest_paper(
@@ -276,3 +298,63 @@ def test_ingest_paper_skips_extract_when_text_and_display_both_cached(
         manifest,
     )
     assert record["title"] == "Paper A"
+
+
+def test_ingest_paper_force_extract_replaces_cached_markdown(
+    make_config, fake_embedder, monkeypatch
+):
+    cfg = make_config(extraction=ExtractionCfg(render_images=True))
+    manifest = Manifest(cfg.paths.rag_db)
+    collection = open_collection(
+        cfg.paths.rag_db, cfg.collection, embedder_name=fake_embedder.name()
+    )
+    markdown_dir = Path(cfg.paths.markdown_dir)
+    markdown_dir.mkdir(parents=True, exist_ok=True)
+    (markdown_dir / "paper-a.md").write_text("## Stale title\n")
+    (markdown_dir / "paper-a_display.md").write_text("## Stale title\n")
+
+    calls = []
+    monkeypatch.setattr(pipeline, "extract_paper", _fake_extractor(calls=calls))
+    monkeypatch.setattr(pipeline, "generate_tags", lambda *args, **kwargs: [])
+
+    record = pipeline.ingest_paper(
+        Paper(name="paper-a", arxiv_id="0000.00001"),
+        cfg.for_ingest(),
+        fake_embedder,
+        collection,
+        manifest,
+        force_extract=True,
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["refresh_html"] is True
+    assert record["title"] == "Paper A"
+    assert (markdown_dir / "paper-a.md").read_text() == _MARKDOWN
+
+
+def test_ingest_paper_does_not_trust_cached_artifacts_without_manifest(
+    make_config, fake_embedder, monkeypatch
+):
+    cfg = make_config(extraction=ExtractionCfg(render_images=True))
+    manifest = Manifest(cfg.paths.rag_db)
+    collection = open_collection(
+        cfg.paths.rag_db, cfg.collection, embedder_name=fake_embedder.name()
+    )
+    markdown_dir = Path(cfg.paths.markdown_dir)
+    markdown_dir.mkdir(parents=True, exist_ok=True)
+    (markdown_dir / "paper-a.md").write_text(_MARKDOWN)
+    (markdown_dir / "paper-a_display.md").write_text(_MARKDOWN)
+
+    calls = []
+    monkeypatch.setattr(pipeline, "extract_paper", _fake_extractor(calls=calls))
+    monkeypatch.setattr(pipeline, "generate_tags", lambda *args, **kwargs: [])
+
+    pipeline.ingest_paper(
+        Paper(name="paper-a", arxiv_id="0000.00001"),
+        cfg.for_ingest(),
+        fake_embedder,
+        collection,
+        manifest,
+    )
+
+    assert len(calls) == 1

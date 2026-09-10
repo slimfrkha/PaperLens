@@ -1,12 +1,12 @@
 # CLAUDE.md — PaperLens operational map
 
 Local, config-driven **agentic RAG** over arXiv model technical reports. A single YAML
-config under `configs/` is the source of truth; two flows hang off it — **ingestion** (arXiv PDF → Docling
-markdown → chunk → embed → Chroma index → LLM tags → manifest) and **retrieval** (a
-FastAPI backend whose `ChatAgent` runs a ReAct loop with one `search_papers` tool over a
-two-stage `Searcher`). A Vite + React frontend streams the answer and its
-Thought → Action → Observation trace over SSE. Backend is Python (`rag` core + `server`);
-frontend is `web/`.
+config under `configs/` is the source of truth; two flows hang off it — **ingestion**
+(arXiv HTML, with PDF/Docling fallback → markdown → chunk → embed → Chroma index → LLM
+tags → manifest) and **retrieval** (a FastAPI backend whose `ChatAgent` runs a ReAct loop
+with one `search_papers` tool over a two-stage `Searcher`). A Vite + React frontend streams
+the answer and its Thought → Action → Observation trace over SSE. Backend is Python (`rag`
+core + `server`); frontend is `web/`.
 
 **New here?** Read [CONTEXT.md](CONTEXT.md) (domain glossary — use these exact terms) and
 [docs/architecture.md](docs/architecture.md) (why it's built this way) first. Tuning
@@ -50,6 +50,7 @@ uv run paperlens-serve --config_path <path>    # backend only (FastAPI, port 800
 uv run paperlens-ingest --config_path <path>   # ingest configured papers not yet in the DB
 uv run paperlens-ingest --config_path <path> --retag    # regenerate tags without re-indexing
 uv run paperlens-ingest --config_path <path> --reindex  # re-chunk/re-embed; tags untouched
+uv run paperlens-ingest --config_path <path> --reextract # refresh source + reindex; tags untouched
 uv run paperlens-eval gen --config <path>      # per-pool eval set (see docs/harness.md)
 make dev CONFIG=<path>           # backend + Vite dev server together
 ```
@@ -66,7 +67,7 @@ src/
   rag/                 # config-driven core: ingestion + two-stage retrieval
     config.py          # typed config loader, project-root anchoring (+ .env)
     chunking.py        # section-aware chunking + breadcrumbs
-    extract.py         # PDF → markdown (Docling)
+    extract.py         # arXiv HTML → markdown; PDF/Docling fallback
     embedders.py       # pluggable embedders (hf | openai | gemini | voyage | ollama)
     reranker.py        # pluggable rerankers (hf cross-encoder | llm | voyage)
     index.py           # chunk → embed → upsert (Chroma)
@@ -74,8 +75,8 @@ src/
     manifest.py        # papers.json (paper metadata + tags)
     search.py          # Searcher: dense/hybrid recall → rerank → elbow cutoff
     tagger.py          # LLM tag generation
-    pipeline.py        # ingest_paper: download → extract → index → tag → manifest
-    ingest.py          # headless ingestion CLI (+ --retag, --reindex)
+    pipeline.py        # ingest_paper: extract → index → tag → manifest
+    ingest.py          # headless ingestion CLI (+ --retag, --reindex, --reextract)
   server/              # FastAPI backend + in-process ingestion worker (composes rag)
     main.py            # create_app: wires manifest, worker, lazy ChatAgent; all routes
     agent.py           # ChatAgent: ReAct loop, search_papers tool, ref/citation registry
@@ -124,6 +125,11 @@ server hosts the worker, so it reads every field). Don't widen `IngestConfig` fo
   Metal's `2**32`-byte per-tensor limit on Apple Silicon at a normal batch size.
   `embedding.max_seq_length` (default 1024, `hf` only) caps it; chunks stay well under.
   Don't raise it blindly on Apple Silicon.
+- **HTML-first extraction contract.** `extraction.backend: auto` fetches arXiv's semantic
+  HTML and falls back to PDF/Docling only when it is unavailable or invalid. The HTML
+  normalizer deliberately emits flat `##` headings and retains LaTeXML's numeric heading
+  tags, because `chunking.py` reconstructs breadcrumbs from that exact markdown shape.
+  `--reextract` is the explicit operation for changing an already-ingested corpus.
 - **Lazy heavy models, warmed at startup.** The cross-encoder and embedder load on first
   use and the `ChatAgent` is built once (lazily, under a lock), but the server warms them in
   a background thread at startup (`warm_models` in `main.py`, a tiny dummy search) so the

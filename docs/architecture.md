@@ -14,7 +14,8 @@ flowchart LR
   cfg[config.yaml] --> ing
   cfg --> srv
   subgraph ing[Ingestion — write path]
-    dl[download] --> ex[extract: Docling]
+    html[arXiv HTML] --> ex[normalize]
+    html -. unavailable/invalid .-> pdf[PDF + Docling fallback] --> ex
     ex --> ck[chunk] --> ix[(index: Chroma)] --> mf[(manifest)]
     ex --> tg[tag: LLM] --> mf
   end
@@ -54,31 +55,38 @@ embedder/collection lifecycle and picking fail-fast vs. isolate-and-continue per
 via `stop_on_error`. Both the headless CLI and the background **worker** call
 `run_batch`, each supplying its own progress/error reporting hooks.
 
-1. **Download** the PDF by `arxiv_id`.
-2. **Extract** to markdown with Docling. Cached — re-ingesting reuses existing markdown.
-3. **Chunk** the markdown (below).
-4. **Index**: embed each chunk and upsert into the Chroma **collection**.
-5. **Tag**: an LLM generates topic tags (degrades gracefully to no tags if it fails).
-6. **Manifest**: write the paper record to `papers.json` — atomically (temp file +
+1. **Extract** by `arxiv_id`. In `auto` mode, fetch and normalize arXiv's semantic HTML;
+   if it is unavailable or structurally invalid, download the PDF and use Docling. Raw
+   HTML, fallback PDFs, and canonical markdown are cached.
+2. **Chunk** the canonical markdown (below).
+3. **Index**: embed each chunk and upsert into the Chroma **collection**.
+4. **Tag**: an LLM generates topic tags (degrades gracefully to no tags if it fails).
+5. **Manifest**: write the paper record—including extraction source, source URL, arXiv
+   version, and warnings—to `papers.json` — atomically (temp file +
    rename) and behind a cross-process file lock, so a concurrent `paperlens-ingest`
    CLI run and the server's `IngestionWorker` can't corrupt or lose each other's writes.
 
-Steps 4 (index) and 5 (tag) run **concurrently** — tags live in the manifest, not in
+Steps 3 (index) and 4 (tag) run **concurrently** — tags live in the manifest, not in
 chunk metadata, so neither needs the other's output; they meet at the manifest write. The
 compute-bound embedder and the I/O-bound LLM call overlap for free. (This is also why
 `--retag` can regenerate tags without re-indexing.)
 
-Step 2 also renders figures for the paper viewer when `extraction.render_images` is on
-(default): the same Docling conversion crops each detected picture — a measured, not
-assumed, decision (`generate_picture_images=True` added no meaningful time to a real
-conversion) — and exports a second, **display-only** markdown (`<paper_id>_display.md` +
-`<paper_id>.assets/`), deduped by content hash so a per-page watermark/logo collapses to
-one appearance. The RAG-facing markdown chunking reads is untouched (`<paper_id>.md`,
-placeholder image comments as before) — figures are never chunked, embedded, or
+Extraction also prepares figures for the paper viewer when `extraction.render_images` is
+on (default). HTML extraction downloads LaTeXML's figure URLs directly; the Docling
+fallback crops detected pictures and deduplicates repeated page watermarks/logos by
+content hash. Both paths export a second, **display-only** markdown
+(`<paper_id>_display.md` + `<paper_id>.assets/`). The canonical RAG markdown
+`<paper_id>.md` contains no image references, so figures are never chunked, embedded, or
 retrievable. `backfill_paper_images` (`src/rag/pipeline.py`) runs once per ingest batch/
-worker trigger to catch up any already-manifested paper still missing its display file
-(e.g. the flag was turned on after that paper was ingested) — a one-shot sweep, not a
-retrying loop.
+worker trigger to catch up an already-manifested paper still missing its display file. It
+pins extraction to the manifest's recorded source (or infers it from legacy cached artifacts),
+so a Docling-indexed paper cannot silently receive a different HTML-derived viewer document.
+
+Cached canonical markdown remains stable during ordinary ingest and `--reindex` runs.
+`paperlens-ingest --reextract` explicitly refreshes the source, rewrites markdown and
+display artifacts, and reindexes while preserving tags. This boundary prevents a backend
+default change from silently changing an existing corpus. The manifest provenance makes
+HTML fallbacks visible instead of treating them as an equivalent hidden path.
 
 The `papers:` list in config.yaml is what `pending_papers` diffs against the manifest to
 decide what's left to ingest. The Admin UI's add/remove-paper actions (`POST
@@ -89,8 +97,8 @@ in-memory `cfg.papers` in place. `IngestConfig.papers` is the same list object b
 so the worker picks up UI changes immediately, without a restart. A manual edit on disk
 requires a server restart or a separate `paperlens-ingest --config_path ...` run; the Admin
 **Re-scan** action only rechecks the configuration already in memory. Remove is
-the inverse of the six stages above: it deletes the paper's Chroma chunks, manifest entry,
-cached PDF/markdown, annotations, and `config.yaml` entry together, so it can't reappear as
+the inverse of the five stages above: it deletes the paper's Chroma chunks, manifest entry,
+cached HTML/PDF/markdown, annotations, and `config.yaml` entry together, so it can't reappear as
 "pending" on the next rescan and doesn't leave annotations orphaned against a paper that no
 longer exists.
 
@@ -104,9 +112,10 @@ and the worker run it after ingesting, and `--retag` runs it after regeneration.
 
 ### ✂️ Section-aware chunking
 
-The interesting design choice is chunking (`src/rag/chunking.py`). Docling flattens every
-heading to `##`, discarding the visual hierarchy — but the section **numbering** in the
-heading text (`2`, `2.1`, `2.1.1`) still encodes it. So PaperLens:
+The interesting design choice is chunking (`src/rag/chunking.py`). Its canonical markdown
+contract flattens every heading to `##`; the HTML normalizer therefore retains LaTeXML's
+numeric heading tag, matching Docling's output shape. The section **numbering** in heading
+text (`2`, `2.1`, `2.1.1`) still encodes hierarchy. So PaperLens:
 
 - splits on `##` boundaries,
 - rebuilds the hierarchy into a **breadcrumb** (e.g. `2.1.1 Multi-Head Latent Attention`),
@@ -408,22 +417,29 @@ is documented in `src/rag/__init__.py`. Keeping it acyclic is a maintained invar
 ## 🧬 Why arXiv-specific — what won't generalize
 
 PaperLens is not a generic "chat with any PDF/document" tool — it's coupled end-to-end to
-arXiv's *structural* conventions (LaTeX PDF layout, decimal section numbering,
-ID-addressable download, an Abstract heading). Pointing it at a different corpus means
-dealing with two very different kinds of coupling.
+arXiv's *structural* conventions (LaTeXML HTML, LaTeX PDF fallback, decimal section
+numbering, ID-addressable fetches, an Abstract heading). Pointing it at a different corpus
+means dealing with two very different kinds of coupling.
+
+That coupling is also an advantage: for the modern TeX/LaTeX submissions PaperLens targets,
+arXiv normally exposes a structured HTML representation alongside the PDF. PaperLens can
+therefore ingest the paper's sections, equations, links, and figure URLs directly instead of
+reconstructing them from PDF layout. HTML conversion can still be unavailable or invalid,
+which is why PDF/Docling remains the fallback rather than disappearing entirely.
 
 **Structural — breaks silently, needs real engineering to change:**
 
 - **Identity & ingestion path.** `arxiv_id` is the sole identifier end-to-end: the config
-  schema (`Paper{name, arxiv_id}`), the fixed download URL (`arxiv.org/pdf/{id}`,
-  `src/rag/pipeline.py`), and the *only* admin ingestion path — `POST /api/admin/papers`
-  requires each line to be an arXiv ID or `arxiv.org` URL (`_normalize_arxiv_id`,
-  `src/server/main.py`).
+  schema (`Paper{name, arxiv_id}`), the fixed source URLs (`arxiv.org/html/{id}` and
+  `arxiv.org/pdf/{id}`, `src/rag/extract.py`), and the *only* admin ingestion path —
+  `POST /api/admin/papers` requires each line to be an arXiv ID or `arxiv.org` URL
+  (`_normalize_arxiv_id`, `src/server/main.py`).
   There's no "upload an arbitrary file" flow.
-- **Extraction.** OCR is off by default (`src/rag/extract.py`) because arXiv PDFs are
-  LaTeX-generated with a real text layer; a scanned document extracts empty or garbled
-  under that default. Figure-crop dedup assumes a repeated crop is a per-page
-  watermark/logo, not a deliberately repeated diagram.
+- **Extraction.** The normalizer assumes arXiv LaTeXML classes such as `ltx_document`,
+  `ltx_tag`, and `ltx_graphics`. OCR applies only to the PDF/Docling fallback and is off
+  by default because arXiv PDFs are normally LaTeX-generated with a real text layer.
+  Docling figure-crop dedup assumes a repeated crop is a per-page watermark/logo, not a
+  deliberately repeated diagram.
 - **Chunking.** see [Section-aware chunking](#️-section-aware-chunking)
   above; on top of that, the very first `##` heading is assumed to be the paper title, which
   doesn't hold for unnumbered headings or a cover page. The noise skip-list (references,

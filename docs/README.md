@@ -12,8 +12,8 @@ here when you want to go deeper.
 
 - **Config-driven.** A single `config.yaml` (typed dataclasses via `draccus`, with
   `ChoiceRegistry` variants) is the source of truth for both flows.
-- **Ingestion.** arXiv PDF → Docling markdown → section-aware chunk → embed → Chroma
-  index → LLM tags → manifest.
+- **Ingestion.** arXiv HTML (PDF/Docling fallback) → Markdown → section-aware chunk →
+  embed → Chroma index → LLM tags → manifest.
 - **Retrieval.** A FastAPI `ChatAgent` runs a **ReAct loop** with one `search_papers`
   tool over a **two-stage `Searcher`** (dense recall → cross-encoder/LLM rerank), with
   opt-in hybrid dense+BM25 fusion and multi-query paraphrase expansion.
@@ -48,7 +48,8 @@ here when you want to go deeper.
 ## 🗺️ The shape of the system
 
 ```text
-config.yaml ─┬─> ingestion worker: download → markdown (Docling) → index (Chroma) → LLM tags
+config.yaml ─┬─> ingestion worker: arXiv HTML → markdown → index (Chroma) → LLM tags
+             │                         └─ PDF/Docling fallback
              └─> FastAPI backend ── agentic RAG ──> LLM (Anthropic | Gemini | OpenAI-compatible)
                        │  tool: search_papers → Searcher (embedder + reranker)
                        └─> React + Vite + Mantine UI: Chat · Papers · Notes · Admin

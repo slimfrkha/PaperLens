@@ -19,7 +19,7 @@ One arXiv paper tracked by the app. Declared in `config.yaml` under `papers` as
 ### 🆔 paper_id
 
 The stable identifier for a paper, equal to its config `name` (e.g. `deepseek-v3`). Used
-as the Chroma metadata key, the manifest key, the markdown/PDF filename stem, and the
+as the Chroma metadata key, the manifest key, the markdown/HTML/PDF filename stem, and the
 `paper` filter in search.
 
 - Code: set to `paper.name` in `ingest_paper` (`src/rag/pipeline.py`).
@@ -37,8 +37,9 @@ A section-sized unit of a paper that gets embedded and indexed. Its embedded tex
 ### 🧭 Breadcrumb
 
 The reconstructed section path prepended to a chunk, e.g. `2.1.1 Multi-Head Latent
-Attention`. Docling flattens every heading to `##`, so we rebuild the hierarchy from the
-section *numbering* in the heading text. Prepending it gives the embedding context.
+Attention`. Canonical extraction markdown flattens every heading to `##`, so we rebuild
+the hierarchy from the section *numbering* retained in the heading text. Prepending it
+gives the embedding context.
 
 - Code: built in `src/rag/chunking.py`; carried as `Result.breadcrumb`.
 - `_Avoid_:` heading path, section trail, hierarchy string.
@@ -46,8 +47,9 @@ section *numbering* in the heading text. Prepending it gives the embedding conte
 ### 📋 Manifest
 
 The paper-level metadata store, `papers.json`, living inside the RAG DB directory. Holds
-one record per ingested paper (`paper_id`, `title`, `arxiv_id`, `tags`, `n_chunks`,
-`ingested_at`) and answers "is this paper ingested?" and "which papers have these tags?".
+one record per ingested paper (`paper_id`, `title`, `arxiv_id`, extraction source/version/
+warnings, `tags`, `n_chunks`, `ingested_at`) and answers "is this paper ingested?" and
+"which papers have these tags?".
 
 - Code: `Manifest` in `src/rag/manifest.py`; file at `<rag_db>/papers.json`.
 - `_Avoid_:` catalog, registry (see **registry** below — a different concept), index
@@ -316,8 +318,8 @@ plumbing around it, since both are tied to the HTTP response, not the turn's log
 
 ### 🔧 Pipeline
 
-The per-paper ingestion sequence: **download → extract (Docling) → index → tag →
-manifest**. One function runs it; both the CLI and the worker call it.
+The per-paper ingestion sequence: **extract (arXiv HTML, PDF/Docling fallback) → index →
+tag → manifest**. One function runs it; both the CLI and the worker call it.
 
 - Code: `ingest_paper` in `src/rag/pipeline.py`.
 - `_Avoid_:` flow, ETL, job. The `on_stage` callback reports named **stages**.

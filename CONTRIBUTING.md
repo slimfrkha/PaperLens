@@ -60,7 +60,7 @@ src/
   rag/                 # config-driven core: ingestion + two-stage retrieval
     config.py          # typed config loader, root anchoring (+ .env)
     chunking.py        # section-aware chunking + breadcrumbs
-    extract.py         # PDF → markdown (Docling)
+    extract.py         # arXiv HTML → markdown; PDF/Docling fallback
     embedders.py       # pluggable embedders (hf | openai | gemini | voyage | ollama)
     reranker.py        # pluggable rerankers (hf cross-encoder | llm | voyage)
     index.py           # chunk → embed → upsert (Chroma)
@@ -71,8 +71,8 @@ src/
     search.py          # Searcher: dense/hybrid recall → rerank → elbow cutoff
     faithfulness.py    # optional post-generation citation check
     tagger.py          # LLM tag generation
-    pipeline.py        # download → extract → index → tag → manifest
-    ingest.py          # headless ingestion CLI (+ --retag, --reindex)
+    pipeline.py        # extract → index → tag → manifest
+    ingest.py          # headless ingestion CLI (+ --retag, --reindex, --reextract)
   server/              # FastAPI backend + in-process ingestion worker (composes rag)
     main.py agent.py worker.py chats.py schemas.py
   eval/                # per-pool config optimizer (composes rag; see docs/harness.md)

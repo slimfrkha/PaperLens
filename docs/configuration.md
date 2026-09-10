@@ -38,7 +38,7 @@ input, so env interpolation is a convenience, not a new trust boundary.
 `paperlens-serve` / `paperlens-ingest` also take **per-field CLI overrides** on top of the
 file (`--server.port=9000`, `--llm.chat.model=…`, `--help` to list them all). Overrides are
 merged *before* interpolation resolves, so `${...}` sees them too. `paperlens-ingest` also
-takes the non-config flags `--retag` and `--reindex`.
+takes the mutually exclusive non-config flags `--retag`, `--reindex`, and `--reextract`.
 
 > **Migration (from the pydantic config):** the LLM selector key `provider` was renamed to
 > `type` (uniform with `embedding.type` / `reranker.type`), and the serve/ingest config-file
@@ -57,8 +57,8 @@ Copy-me templates for common setups (local gpt-oss, Anthropic, Gemini, Ollama) l
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `rag_db` | path | `data/rag_db` | Chroma persistent dir + the `papers.json` manifest. |
-| `pdf_dir` | path | `data/papers/pdf` | Downloaded PDFs (named `<paper_id>.pdf`). |
-| `markdown_dir` | path | `data/papers/text` | Docling-extracted markdown (`<paper_id>.md`). |
+| `pdf_dir` | path | `data/papers/pdf` | PDFs cached when Docling extraction is forced or used as fallback (`<paper_id>.pdf`). |
+| `markdown_dir` | path | `data/papers/text` | Canonical markdown (`<paper_id>.md`), cached raw HTML, display markdown, and figure assets. |
 | `chat_history` | path | `data/chat_history` | Per-session chat JSON files. |
 | `annotations` | path | `data/annotations` | Per-paper annotation JSON files. |
 | `web_dist` | path | `web/dist` | Built frontend SPA served by the backend. |
@@ -69,7 +69,7 @@ Copy-me templates for common setups (local gpt-oss, Anthropic, Gemini, Ollama) l
 |---|---|---|---|
 | `collection` | string | `arxiv_papers` | Chroma collection name for all chunks. |
 | `data_path` | string | `data` | Base dir for runtime data; interpolation handle for `paths` (`${data_path}`). |
-| `papers` | list | `[]` | The paper list; each entry is `{ name, arxiv_id }`. |
+| `papers` | list | `[]` | The paper list; each entry is `{ name, arxiv_id }`. `name` must not end in the reserved `_display` suffix. |
 
 The shipped configs build `paths` from these via interpolation, e.g.
 `rag_db: ${data_path}/${collection}/rag_db`, so each collection's data stays isolated and
@@ -86,7 +86,7 @@ one. (Changing the embedder alone likewise invalidates the index; see the embedd
 | Field | Type | Description |
 |---|---|---|
 | `name` | string | Human name **and** the `paper_id` (filename stem, manifest key, search filter). |
-| `arxiv_id` | string | arXiv id used to download the PDF. Quote it (e.g. `"2412.19437"`). |
+| `arxiv_id` | string | arXiv id used to fetch HTML or the fallback PDF. Quote it (e.g. `"2412.19437"`). |
 
 ### 🧬 `embedding`
 
@@ -188,9 +188,8 @@ differently-shaped paper list (surveys, shorter position papers, non-ML PDFs, ..
 | `noise_ratio` | float | `0.4` | Fraction of numeric/punctuation tokens in an unnumbered section body that flags it as figure/plot noise. |
 | `extra_skip_titles` | list[string] | `[]` | Extra case-insensitive regexes for section titles to always drop, appended to the built-in list (references, TOCs, acknowledgements, ...). |
 
-Changing these doesn't retroactively rechunk already-ingested papers — like the embedder,
-it only affects papers indexed after the change (delete `paths.rag_db` and re-ingest to
-apply retroactively).
+Changing these doesn't retroactively rechunk already-ingested papers. Run
+`paperlens-ingest --reindex` to apply them to the current corpus while preserving tags.
 
 Incoherent combinations (`overlap_tokens >= max_tokens`, `noise_ratio` outside `[0, 1]`,
 `retrieval.min_k > retrieval.max_k`, `retrieval.max_k > retrieval.candidates`,
@@ -201,8 +200,15 @@ degrading the index.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `ocr_enabled` | bool | `false` | Turn on for scanned/no-text-layer PDFs. arXiv PDFs have a real text layer, so this is off by default — enabling it also triggers a Docling OCR model download. |
-| `render_images` | bool | `true` | Crop each figure to its own image for the paper viewer — display-only, never chunked/embedded/retrieved. Rides the same Docling conversion pass as the RAG text (measured: no meaningful added time), written to a sibling `<paper_id>_display.md` + `<paper_id>.assets/` next to the plain `<paper_id>.md` chunking reads. Duplicate crops (a per-page watermark/logo, most often) are deduped by content hash. |
+| `backend` | `auto` · `html` · `docling` | `auto` | `auto` fetches arXiv HTML first and falls back to PDF/Docling if unavailable or structurally invalid. `html` is strict (no fallback); `docling` forces the PDF path. |
+| `ocr_enabled` | bool | `false` | Docling path only. Turn on for scanned/no-text-layer PDFs; enabling it can trigger an OCR model download. |
+| `render_images` | bool | `true` | Create `<paper_id>_display.md` + `<paper_id>.assets/` for the viewer — display-only, never chunked/embedded/retrieved. HTML downloads figure URLs; Docling crops figures and deduplicates repeated crops by content hash. |
+
+Every successful extraction writes canonical `<paper_id>.md`. HTML extraction additionally
+caches `<paper_id>.html`; Docling caches `<paper_id>.pdf`. The manifest records
+`extraction_source`, `source_url`, `arxiv_version`, and any fallback/LaTeXML warnings.
+Ordinary ingest and `--reindex` reuse canonical markdown. Use `--reextract` to refresh the
+source and deliberately replace the corpus text.
 
 ### 🔍 `retrieval`
 
@@ -289,6 +295,7 @@ use the console script for eval.
 | `uv run paperlens-ingest` | `python -m rag.ingest` | Ingest every configured paper not yet in the DB (headless, same pipeline as the worker). |
 | `uv run paperlens-ingest --retag` | — | Regenerate tags for already-ingested papers (no re-index). |
 | `uv run paperlens-ingest --reindex` | — | Re-chunk/re-embed every already-ingested paper under the current config, cleaning up chunks orphaned by a chunking change. Tags are left untouched — `--retag` and `--reindex` each do one job and don't combine in a single invocation, so run `--retag` as a separate follow-up command if you also want fresh tags. |
+| `uv run paperlens-ingest --reextract` | — | Refresh each already-ingested paper through the configured extraction backend, replace its canonical/display artifacts, and reindex it. Tags are preserved. Regenerate the pool's eval set afterward. |
 | `uv run paperlens-{serve,ingest} --config_path <path>` | — | Use a specific config file. |
 | `uv run paperlens-eval <command> --config <path>` | — | Run the per-pool eval harness. Commands are `gen`, `run`, `screen`, `sweep`, `confirm`, `per-paper`, and `comparative`; see [Eval harness](harness.md). |
 
@@ -330,7 +337,7 @@ Served under `/api`; any other path falls through to the SPA.
 | GET | `/api/admin/status` | Paper/chunk counts, pending papers, ingestion progress. |
 | POST | `/api/admin/rescan` | Trigger ingestion for pending papers in the server's in-memory config. This does not reload a file edited on disk. |
 | POST | `/api/admin/papers` | Add one or more papers from a list of arXiv ids/URLs: per-line queued/duplicate/invalid/error status, one ingestion trigger for the batch. |
-| DELETE | `/api/admin/papers/{paper_id}` | Remove a paper: manifest entry, Chroma chunks, cached PDF/markdown, annotations, and its `config.yaml` entry. |
+| DELETE | `/api/admin/papers/{paper_id}` | Remove a paper: manifest entry, Chroma chunks, cached HTML/PDF/markdown and figures, annotations, and its `config.yaml` entry. |
 | GET | `/api/chats` | List chat sessions. |
 | POST | `/api/chats` | Create a chat session. |
 | GET | `/api/chats/{chat_id}` | Fetch one chat session. |

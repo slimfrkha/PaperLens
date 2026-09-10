@@ -42,7 +42,7 @@ llm:
     api_key_env: ${llm.tagging.api_key_env}
 
 retrieval:
-  candidates: 50 # tuned via paperlens-eval confirm; default 20 measurably under-recalls on this pool
+  candidates: 50 # reconfirmed on HTML pool (paperlens-eval, fp 6589ab19); 20 no longer under-recalls, 50 kept as headroom
   # loose cutoff elbow values
   elbow_mad_multiplier: 7.0
   elbow_prominence: 0.5

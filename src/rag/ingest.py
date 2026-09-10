@@ -4,6 +4,7 @@
     python -m rag.ingest --config_path other.yaml
     python -m rag.ingest --retag                  # regenerate tags for ingested papers
     python -m rag.ingest --reindex                 # re-chunk/re-embed ingested papers (tags kept)
+    python -m rag.ingest --reextract               # refresh source text and reindex (tags kept)
 
 Accepts draccus per-field overrides too (e.g. ``--llm.tagging.model=...``). Same
 code path the app's background worker uses.
@@ -55,10 +56,14 @@ def _normalize_step(cfg: IngestConfig, manifest: Manifest) -> None:
 
 
 def main() -> None:
-    # --retag/--reindex are CLI actions, not config fields; pull them out before draccus parses.
-    argv = [a for a in sys.argv[1:] if a not in ("--retag", "--reindex")]
+    # These are CLI actions, not config fields; pull them out before draccus parses.
+    actions = {a for a in sys.argv[1:] if a in ("--retag", "--reindex", "--reextract")}
+    if len(actions) > 1:
+        raise SystemExit("Choose only one of --retag, --reindex, or --reextract.")
+    argv = [a for a in sys.argv[1:] if a not in actions]
     do_retag = "--retag" in sys.argv[1:]
     do_reindex = "--reindex" in sys.argv[1:]
+    do_reextract = "--reextract" in sys.argv[1:]
 
     cfg = parse_config(argv).for_ingest()
     manifest = Manifest(cfg.paths.rag_db)
@@ -68,12 +73,14 @@ def main() -> None:
         retag(cfg, manifest)
         return
 
-    if do_reindex:
+    if do_reindex or do_reextract:
         papers = [p for p in cfg.papers if manifest.is_ingested(p.name)]
         if not papers:
-            print("Nothing to reindex — no configured papers are in the DB yet.")
+            action = "reextract" if do_reextract else "reindex"
+            print(f"Nothing to {action} — no configured papers are in the DB yet.")
             return
-        print(f"== Reindexing {len(papers)} paper(s) under the current config ==")
+        action = "Re-extracting" if do_reextract else "Reindexing"
+        print(f"== {action} {len(papers)} paper(s) under the current config ==")
 
         def _on_start(paper):
             print(f"\n-- {paper.name} ({paper.arxiv_id}) --")
@@ -94,6 +101,7 @@ def main() -> None:
             on_stage=_on_stage,
             on_paper_done=_on_done,
             retag=False,
+            force_extract=do_reextract,
         )
         print("\nDone.")
         return

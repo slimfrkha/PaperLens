@@ -22,6 +22,8 @@ def load_pool(markdown_dir: str) -> dict[str, str]:
     pool: dict[str, str] = {}
     for path in sorted(glob.glob(os.path.join(markdown_dir, "*.md"))):
         paper_id = os.path.splitext(os.path.basename(path))[0]
+        if paper_id.endswith("_display"):
+            continue
         with open(path, encoding="utf-8") as f:
             pool[paper_id] = f.read()
     return pool

@@ -9,6 +9,7 @@ import pytest
 
 from rag import pipeline
 from rag.config import ExtractionCfg, Paper
+from rag.extract import ExtractionResult
 from rag.manifest import Manifest
 from rag.pipeline import _title, backfill_paper_images, normalize_manifest_tags, pending_papers
 
@@ -74,9 +75,18 @@ def test_normalize_manifest_tags_survives_failure(make_config, monkeypatch):
 
 
 def _fake_ingest(rec_for=lambda paper: {"paper_id": paper.name, "tags": [], "n_chunks": 1}):
-    def _ingest(paper, cfg, embedder, collection, manifest, on_stage=None, retag=True):
+    def _ingest(
+        paper,
+        cfg,
+        embedder,
+        collection,
+        manifest,
+        on_stage=None,
+        retag=True,
+        force_extract=False,
+    ):
         if on_stage:
-            on_stage("download", 0.0)
+            on_stage("extract", 0.0)
             on_stage("done", 1.0)
         return rec_for(paper)
 
@@ -155,11 +165,11 @@ def test_run_batch_fires_hooks_in_order_with_correct_args(make_config, monkeypat
 
     assert calls == [
         ("start", "a"),
-        ("stage", "a", "download", 0.0),
+        ("stage", "a", "extract", 0.0),
         ("stage", "a", "done", 1.0),
         ("done", "a", True, None),
         ("start", "b"),
-        ("stage", "b", "download", 0.0),
+        ("stage", "b", "extract", 0.0),
         ("stage", "b", "done", 1.0),
         ("done", "b", True, None),
     ]
@@ -243,12 +253,30 @@ def _seed_paper_files(cfg, name: str) -> None:
     (Path(cfg.paths.markdown_dir) / f"{name}.md").write_text("text")
 
 
+def _fake_image_extractor(calls: list[str], *, fail: str | None = None):
+    def _extract(arxiv_id: str, paper_id: str, **kwargs) -> ExtractionResult:
+        calls.append(paper_id)
+        if paper_id == fail:
+            raise RuntimeError("boom")
+        display_path = Path(kwargs["display_md_path"])
+        display_path.write_text("display")
+        return ExtractionResult(
+            markdown="text",
+            display_markdown="display",
+            source="html",
+            source_url=f"https://arxiv.org/html/{arxiv_id}",
+            arxiv_version=arxiv_id,
+        )
+
+    return _extract
+
+
 def test_backfill_paper_images_noop_when_disabled(make_config, monkeypatch):
     cfg = make_config(extraction=ExtractionCfg(render_images=False)).for_ingest()
     manifest = Manifest(cfg.paths.rag_db)
     manifest.upsert({"paper_id": "a", "tags": [], "n_chunks": 1})
     calls = []
-    monkeypatch.setattr(pipeline, "pdf_to_markdown", lambda *a, **k: calls.append(1) or "md")
+    monkeypatch.setattr(pipeline, "extract_paper", _fake_image_extractor(calls))
 
     backfill_paper_images(cfg, manifest)
     assert calls == []
@@ -257,20 +285,79 @@ def test_backfill_paper_images_noop_when_disabled(make_config, monkeypatch):
 def test_backfill_paper_images_renders_missing_display_only(make_config, monkeypatch):
     cfg = make_config(extraction=ExtractionCfg(render_images=True)).for_ingest()
     manifest = Manifest(cfg.paths.rag_db)
-    manifest.upsert({"paper_id": "a", "tags": [], "n_chunks": 1})
-    manifest.upsert({"paper_id": "b", "tags": [], "n_chunks": 1})
+    manifest.upsert({"paper_id": "a", "arxiv_id": "1", "tags": [], "n_chunks": 1})
+    manifest.upsert({"paper_id": "b", "arxiv_id": "2", "tags": [], "n_chunks": 1})
     _seed_paper_files(cfg, "a")
     _seed_paper_files(cfg, "b")
     # "b" already has its display file — must be skipped, "a" doesn't.
     (Path(cfg.paths.markdown_dir) / "b_display.md").write_text("already rendered")
 
     calls = []
-    monkeypatch.setattr(
-        pipeline, "pdf_to_markdown", lambda pdf_path, **kw: calls.append(kw["paper_id"]) or "md"
-    )
+    monkeypatch.setattr(pipeline, "extract_paper", _fake_image_extractor(calls))
 
     backfill_paper_images(cfg, manifest)
     assert calls == ["a"]
+
+
+def test_backfill_paper_images_pins_recorded_extraction_source(make_config, monkeypatch):
+    cfg = make_config(extraction=ExtractionCfg(backend="auto", render_images=True)).for_ingest()
+    manifest = Manifest(cfg.paths.rag_db)
+    manifest.upsert(
+        {
+            "paper_id": "a",
+            "arxiv_id": "1",
+            "extraction_source": "docling",
+            "tags": [],
+            "n_chunks": 1,
+        }
+    )
+    _seed_paper_files(cfg, "a")
+    # Even if an HTML artifact happens to exist, recorded Docling provenance wins.
+    (Path(cfg.paths.markdown_dir) / "a.html").write_text("cached HTML from another attempt")
+    backends = []
+
+    def capture_backend(arxiv_id, paper_id, **kwargs):
+        backends.append(kwargs["backend"])
+        Path(kwargs["display_md_path"]).write_text("display")
+        return ExtractionResult(
+            markdown="text",
+            display_markdown="display",
+            source="docling",
+            source_url=f"https://arxiv.org/pdf/{arxiv_id}",
+            arxiv_version=arxiv_id,
+        )
+
+    monkeypatch.setattr(pipeline, "extract_paper", capture_backend)
+
+    backfill_paper_images(cfg, manifest)
+
+    assert backends == ["docling"]
+
+
+def test_backfill_paper_images_infers_source_for_legacy_manifest_record(make_config, monkeypatch):
+    cfg = make_config(extraction=ExtractionCfg(backend="auto", render_images=True)).for_ingest()
+    manifest = Manifest(cfg.paths.rag_db)
+    manifest.upsert({"paper_id": "a", "arxiv_id": "1", "tags": [], "n_chunks": 1})
+    _seed_paper_files(cfg, "a")
+    (Path(cfg.paths.markdown_dir) / "a.html").write_text("cached HTML")
+    backends = []
+
+    def capture_backend(arxiv_id, paper_id, **kwargs):
+        backends.append(kwargs["backend"])
+        Path(kwargs["display_md_path"]).write_text("display")
+        return ExtractionResult(
+            markdown="text",
+            display_markdown="display",
+            source="html",
+            source_url=f"https://arxiv.org/html/{arxiv_id}",
+            arxiv_version=arxiv_id,
+        )
+
+    monkeypatch.setattr(pipeline, "extract_paper", capture_backend)
+
+    backfill_paper_images(cfg, manifest)
+
+    assert backends == ["html"]
 
 
 def test_backfill_paper_images_skips_paper_missing_source_files(make_config, monkeypatch):
@@ -279,7 +366,7 @@ def test_backfill_paper_images_skips_paper_missing_source_files(make_config, mon
     manifest.upsert({"paper_id": "a", "tags": [], "n_chunks": 1})  # no pdf/md ever written
 
     calls = []
-    monkeypatch.setattr(pipeline, "pdf_to_markdown", lambda *a, **k: calls.append(1) or "md")
+    monkeypatch.setattr(pipeline, "extract_paper", _fake_image_extractor(calls))
     backfill_paper_images(cfg, manifest)
     assert calls == []
 
@@ -289,20 +376,14 @@ def test_backfill_paper_images_survives_per_paper_failure(make_config, monkeypat
     # must not raise out of the call — backfill_paper_images is a one-shot, best-effort pass.
     cfg = make_config(extraction=ExtractionCfg(render_images=True)).for_ingest()
     manifest = Manifest(cfg.paths.rag_db)
-    manifest.upsert({"paper_id": "a", "tags": [], "n_chunks": 1})
-    manifest.upsert({"paper_id": "b", "tags": [], "n_chunks": 1})
+    manifest.upsert({"paper_id": "a", "arxiv_id": "1", "tags": [], "n_chunks": 1})
+    manifest.upsert({"paper_id": "b", "arxiv_id": "2", "tags": [], "n_chunks": 1})
     _seed_paper_files(cfg, "a")
     _seed_paper_files(cfg, "b")
 
     calls = []
 
-    def _fake(pdf_path, **kw):
-        calls.append(kw["paper_id"])
-        if kw["paper_id"] == "a":
-            raise RuntimeError("boom")
-        return "md"
-
-    monkeypatch.setattr(pipeline, "pdf_to_markdown", _fake)
+    monkeypatch.setattr(pipeline, "extract_paper", _fake_image_extractor(calls, fail="a"))
 
     backfill_paper_images(cfg, manifest)  # must not raise
     assert calls == ["a", "b"]
@@ -311,9 +392,9 @@ def test_backfill_paper_images_survives_per_paper_failure(make_config, monkeypat
 def test_backfill_paper_images_reports_stage_per_paper(make_config, monkeypatch):
     cfg = make_config(extraction=ExtractionCfg(render_images=True)).for_ingest()
     manifest = Manifest(cfg.paths.rag_db)
-    manifest.upsert({"paper_id": "a", "tags": [], "n_chunks": 1})
+    manifest.upsert({"paper_id": "a", "arxiv_id": "1", "tags": [], "n_chunks": 1})
     _seed_paper_files(cfg, "a")
-    monkeypatch.setattr(pipeline, "pdf_to_markdown", lambda *a, **k: "md")
+    monkeypatch.setattr(pipeline, "extract_paper", _fake_image_extractor([]))
 
     stages = []
     backfill_paper_images(cfg, manifest, on_paper_stage=stages.append)

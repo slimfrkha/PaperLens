@@ -1011,10 +1011,12 @@ def test_remove_paper_route_cleans_manifest_chunks_files_and_config(make_config,
     Path(cfg.paths.pdf_dir).mkdir(parents=True, exist_ok=True)
     Path(cfg.paths.markdown_dir).mkdir(parents=True, exist_ok=True)
     pdf_path = Path(cfg.paths.pdf_dir) / "paper-a.pdf"
+    html_path = Path(cfg.paths.markdown_dir) / "paper-a.html"
     md_path = Path(cfg.paths.markdown_dir) / "paper-a.md"
     display_path = Path(cfg.paths.markdown_dir) / "paper-a_display.md"
     assets_dir = Path(cfg.paths.markdown_dir) / "paper-a.assets"
     pdf_path.write_bytes(b"%PDF")
+    html_path.write_text("<article class='ltx_document'></article>")
     md_path.write_text("## Paper A")
     display_path.write_text("## Paper A\n\n![Image](paper-a.assets/image_000000_x.png)")
     assets_dir.mkdir()
@@ -1040,6 +1042,7 @@ def test_remove_paper_route_cleans_manifest_chunks_files_and_config(make_config,
     assert manifest.get("paper-a") is None
     assert collection.get(where={"paper_id": "paper-a"}, include=[])["ids"] == []
     assert not pdf_path.exists()
+    assert not html_path.exists()
     assert not md_path.exists()
     assert not display_path.exists()
     assert not assets_dir.exists()

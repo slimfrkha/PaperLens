@@ -27,8 +27,8 @@ collection: arxiv_papers # Chroma collection name; also namespaces the data path
 # (e.g. `data/rag_db`, un-namespaced), not a derived one. Edit freely.
 paths:
   rag_db: ${data_path}/${collection}/rag_db # Chroma persistent dir + papers.json manifest
-  pdf_dir: ${data_path}/${collection}/papers/pdf # downloaded PDFs (<paper_id>.pdf)
-  markdown_dir: ${data_path}/${collection}/papers/text # Docling-extracted markdown (<paper_id>.md)
+  pdf_dir: ${data_path}/${collection}/papers/pdf # PDFs cached only when Docling fallback runs
+  markdown_dir: ${data_path}/${collection}/papers/text # canonical .md + cached HTML/display assets
   chat_history: ${data_path}/${collection}/chat_history # per-session chat JSON files
   annotations: ${data_path}/${collection}/annotations # per-paper annotation JSON files
   web_dist: web/dist # built frontend SPA served by the backend
@@ -119,10 +119,11 @@ chunking:
   extra_skip_titles: [] # extra case-insensitive regexes for section titles to always drop
     # - "author contributions"
 
-# --- Extraction: PDF -> markdown via Docling ---
+# --- Extraction: arXiv HTML -> markdown, with PDF/Docling fallback ---
 extraction:
-  ocr_enabled: false # turn on for scanned/no-text-layer PDFs (slower, extra model download)
-  render_images: true # crop figures for the paper viewer (display-only, never RAGed)
+  backend: auto # auto (HTML then fallback) | html (strict) | docling (force PDF path)
+  ocr_enabled: false # Docling fallback only; turn on for scanned/no-text-layer PDFs
+  render_images: true # download/crop figures for the viewer (display-only, never RAGed)
 
 # --- Retrieval: the agentic search loop ---
 retrieval:
@@ -165,6 +166,6 @@ server:
 
 # --- The paper list. Anything already in the DB is skipped. ---
 #   name      human name AND the paper_id (filename stem, manifest key, search filter)
-#   arxiv_id  arXiv id used to download the PDF (quote it)
+#   arxiv_id  arXiv id used to fetch the paper (quote it)
 papers: []
   # - { name: deepseek-v3, arxiv_id: "2412.19437" }

@@ -1949,6 +1949,7 @@ name = "paperlens"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "beautifulsoup4" },
     { name = "chromadb" },
     { name = "docling" },
     { name = "draccus" },
@@ -1981,6 +1982,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "beautifulsoup4", specifier = ">=4.12" },
     { name = "chromadb", specifier = ">=1.5" },
     { name = "docling", specifier = ">=2.108" },
     { name = "draccus", specifier = ">=0.11,<0.12" },

@@ -18,7 +18,8 @@ that only exist once something runs unattended or serves multiple people at once
 ## 🛠️ How it works
 
 ```text
-config.yaml ─┬─> ingestion worker: download → markdown (Docling) → index (Chroma) ‖ LLM tags
+config.yaml ─┬─> ingestion worker: arXiv HTML → markdown → index (Chroma) ‖ LLM tags
+             │                         └─ PDF/Docling fallback
              └─> FastAPI backend ── agentic RAG ──> LLM (Anthropic | Gemini | OpenAI-compatible)
                        │  tool: search_papers → Searcher (embedder + reranker)
                        └─> React + Vite + Mantine UI: Chat · Papers · Notes · Admin

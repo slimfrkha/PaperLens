@@ -283,6 +283,7 @@ def create_app(cfg: Config) -> FastAPI:
         manifest.remove(paper_id)
         annotations.remove_paper(paper_id)
         Path(cfg.paths.pdf_dir, f"{paper_id}.pdf").unlink(missing_ok=True)
+        Path(cfg.paths.markdown_dir, f"{paper_id}.html").unlink(missing_ok=True)
         Path(cfg.paths.markdown_dir, f"{paper_id}.md").unlink(missing_ok=True)
         Path(cfg.paths.markdown_dir, f"{paper_id}_display.md").unlink(missing_ok=True)
         shutil.rmtree(Path(cfg.paths.markdown_dir, f"{paper_id}.assets"), ignore_errors=True)

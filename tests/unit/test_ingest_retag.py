@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from rag import ingest
+from rag.config import Paper
 from rag.manifest import Manifest
 
 
@@ -50,3 +51,25 @@ def test_retag_failure_is_logged(monkeypatch, capsys, make_config, tmp_path):
     ingest.retag(cfg, manifest)
 
     assert "[warn]" in capsys.readouterr().out
+
+
+def test_reextract_refreshes_and_reindexes_but_preserves_tags(monkeypatch, make_config):
+    cfg = make_config(papers=[Paper(name="paper-a", arxiv_id="1234.5678")])
+    manifest = Manifest(cfg.paths.rag_db)
+    manifest.upsert({"paper_id": "paper-a", "tags": ["kept"], "n_chunks": 1})
+    calls = []
+
+    monkeypatch.setattr(ingest, "parse_config", lambda argv: cfg)
+    monkeypatch.setattr(
+        ingest,
+        "run_batch",
+        lambda config, current_manifest, papers, **kwargs: calls.append((papers, kwargs)),
+    )
+    monkeypatch.setattr(ingest.sys, "argv", ["paperlens-ingest", "--reextract"])
+
+    ingest.main()
+
+    papers, kwargs = calls[0]
+    assert [paper.name for paper in papers] == ["paper-a"]
+    assert kwargs["force_extract"] is True
+    assert kwargs["retag"] is False

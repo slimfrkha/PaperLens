@@ -5,6 +5,7 @@
 > why the pieces fit together, see [Architecture](architecture.md).
 
 - 📄 [Add papers](#add-papers)
+- 🔄 [Re-extract papers](#re-extract-papers)
 - 🏷️ [Re-tag papers](#re-tag-papers)
 - 📋 [Export an answer](#export-an-answer)
 - 🎛️ [Tune retrieval config for your pool (the eval harness)](#tune-retrieval-config-for-your-pool)
@@ -48,6 +49,33 @@ To choose a human-readable `paper_id`, edit `papers` in your config instead:
 
 3. ✅ Verify: the paper appears on the **Papers** page with tags, and the Admin chunk count
    rises. Ask a question the new paper should answer and check the citations point to it.
+
+---
+
+## Re-extract papers
+
+Existing canonical markdown is intentionally reused, even after the default extraction
+backend changes. To refresh already-ingested papers through the current backend and reindex
+them while preserving tags:
+
+```bash
+uv run paperlens-ingest --config_path configs/my-setup.yaml --reextract
+```
+
+With the default `extraction.backend: auto`, this tries semantic arXiv HTML first and uses
+PDF/Docling only when HTML is unavailable or structurally invalid. Use `backend: html` to
+make missing/invalid HTML fail rather than fall back, or `backend: docling` to force the old
+PDF path. The manifest records which source was used and any fallback warnings.
+
+Re-extraction changes the evaluation corpus. Regenerate its eval set before comparing
+retrieval metrics:
+
+```bash
+uv run paperlens-eval gen --config configs/my-setup.yaml
+```
+
+✅ Verify: `<paper_id>.html` appears beside `<paper_id>.md` for HTML-backed papers, the
+manifest's `extraction_source` is `html`, and the command reports fresh chunk counts.
 
 ---
 

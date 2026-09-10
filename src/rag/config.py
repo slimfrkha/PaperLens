@@ -80,11 +80,15 @@ class ChunkingCfg:
 
 @dataclass
 class ExtractionCfg:
-    ocr_enabled: bool = False  # turn on for scanned/no-text-layer PDFs
-    # Crop each figure to its own image for the paper viewer (display-only — never
-    # chunked/embedded/retrieved). Cheap: picture cropping reads already-rasterized page
-    # regions, adding no measurable time to the conversion that already runs.
+    backend: str = "auto"  # auto (HTML -> Docling fallback) | html | docling
+    ocr_enabled: bool = False  # Docling only; turn on for scanned/no-text-layer PDFs
+    # Save figures for the paper viewer (display-only — never chunked/embedded/retrieved).
+    # HTML downloads source figures directly; Docling crops them from rendered pages.
     render_images: bool = True
+
+    def __post_init__(self) -> None:
+        if self.backend not in {"auto", "html", "docling"}:
+            raise ValueError("extraction.backend must be one of: auto, html, docling")
 
 
 # --- Embedder: a `type` string selects the variant; each carries only its fields ---
@@ -363,6 +367,10 @@ class ServerCfg:
 class Paper:
     name: str = ""
     arxiv_id: str = ""
+
+    def __post_init__(self) -> None:
+        if self.name.endswith("_display"):
+            raise ValueError("paper name uses reserved suffix '_display'")
 
 
 @dataclass(frozen=True)

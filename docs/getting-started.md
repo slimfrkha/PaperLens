@@ -70,7 +70,7 @@ uv run paperlens-serve --config_path configs/my-setup.yaml
 ```
 
 This serves `http://127.0.0.1:8000` **and** auto-starts the ingestion worker, which begins
-downloading and indexing the papers from the config. On first run the database is empty,
+extracting and indexing the papers from the config. On first run the database is empty,
 so the UI says so while papers ingest.
 
 > 💡 `make serve CONFIG=configs/my-setup.yaml` runs exactly this.

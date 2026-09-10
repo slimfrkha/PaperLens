@@ -10,7 +10,7 @@ at ``index_markdown``, the layer production ingestion (``pipeline.ingest_paper``
 from __future__ import annotations
 
 from rag.config import ChunkingCfg
-from rag.index import index_markdown, open_collection, remove_paper_chunks
+from rag.index import collect_chunks, index_markdown, open_collection, remove_paper_chunks
 
 # Same body shape as test_eval_index_isolated.py's _POOL: one long numbered section that
 # packs into fewer chunks at a large max_tokens than at a small one, so chunk count is
@@ -94,3 +94,33 @@ def test_remove_paper_chunks_unknown_paper_is_a_noop(tmp_path, fake_embedder):
     remove_paper_chunks(collection, "no-such-paper")
 
     assert collection.count() == n
+
+
+def test_collect_chunks_ignores_display_markdown(tmp_path):
+    (tmp_path / "paper-a.md").write_text(_MARKDOWN)
+    (tmp_path / "paper-a_display.md").write_text(_MARKDOWN + "\n![Figure](paper-a.assets/x.png)")
+
+    chunks = collect_chunks(str(tmp_path))
+
+    assert chunks
+    assert {chunk.metadata["paper_id"] for chunk in chunks} == {"paper-a"}
+
+
+def test_index_markdown_accepts_repeated_unnumbered_section_titles(tmp_path, fake_embedder):
+    repeated = " ".join(["distinct section content"] * 20)
+    path = tmp_path / "paper-a.md"
+    path.write_text(
+        f"## Paper A\n\n## Agent.\n\nfirst {repeated}\n\n## Agent.\n\nsecond {repeated}\n"
+    )
+    collection = open_collection(str(tmp_path / "db"), "papers", embedder_name=fake_embedder.name())
+
+    n_chunks = index_markdown(
+        collection,
+        fake_embedder,
+        str(path),
+        "paper-a",
+        chunking=ChunkingCfg(),
+    )
+
+    assert n_chunks == 2
+    assert collection.count() == 2

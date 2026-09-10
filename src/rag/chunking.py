@@ -1,11 +1,10 @@
-"""Section-aware chunking for Docling-extracted arXiv papers.
+"""Section-aware chunking for canonical arXiv paper markdown.
 
-Docling flattens every heading to `##`, but the section *numbering*
-(`2`, `2.1`, `2.1.1`) preserves the true hierarchy in the heading text.
-We split on `##` boundaries, rebuild that hierarchy into a breadcrumb,
-prepend it to each chunk (so the embedding carries context), and
-normalize the size tails: big sections are split on paragraph/table
-boundaries with overlap, tiny/noise sections are dropped or merged.
+Both extraction paths emit every heading as `##`; the section *numbering*
+(`2`, `2.1`, `2.1.1`) preserves the true hierarchy in the heading text. We split on
+those boundaries, rebuild that hierarchy into a breadcrumb, prepend it to each chunk
+(so the embedding carries context), and normalize the size tails: big sections are split
+on paragraph/table boundaries with overlap, tiny/noise sections are dropped or merged.
 """
 
 from __future__ import annotations
@@ -187,7 +186,7 @@ def chunk_markdown(
     hier = _Hierarchy(paper_title)
     chunks: list[Chunk] = []
 
-    for heading, body in sections:
+    for section_index, (heading, body) in enumerate(sections):
         m = _NUMBERED.match(heading)
         number, title = (m.group(1), m.group(2)) if m else (None, heading)
 
@@ -217,6 +216,9 @@ def chunk_markdown(
                         "paper_title": paper_title,
                         "section_number": number or "",
                         "section_title": title,
+                        # Position disambiguates legitimate repeated unnumbered headings
+                        # (for example, separate "Agent." subsections in one paper).
+                        "section_index": section_index,
                         "breadcrumb": breadcrumb,
                         "body": sub,  # the reader reads this back; don't re-derive it downstream
                         "part": i,
