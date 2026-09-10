@@ -212,9 +212,10 @@ tempCodeRunnerFile.py
 
 
 # Runtime data: downloaded PDFs, extracted markdown, Chroma vector DB + manifest,
-# and chat history — all regenerable via `paperlens-ingest`.
-data/
-evals/
+# and chat history — all regenerable via `paperlens-ingest`. Root-anchored so it
+# does not swallow committed test fixtures under tests/data/.
+/data/
+/evals/
 
 # Frontend
 web/node_modules/
