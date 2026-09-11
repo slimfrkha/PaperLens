@@ -209,6 +209,26 @@ def test_run_turn_persists_partial_text_from_a_stopped_agent(tmp_path):
     assert saved["turns"][-1]["answer"] == "partial answ"
 
 
+def test_run_turn_persists_the_request_scope_on_the_first_turn(tmp_path):
+    # Scope (tags/papers) is fixed for the conversation, so it's recorded from the first
+    # turn's request and restored on reload — otherwise a reopened chat silently widens to
+    # the whole library.
+    store = ChatStore(str(tmp_path))
+    chat = store.create()
+    req = ChatRequest(
+        messages=[ChatMessage(role="user", content="hi")],
+        chat_id=chat["id"],
+        tags=["survey"],
+        papers=["p1", "p2"],
+    )
+
+    run_turn(lambda: _RecordingAgent(), store, req, lambda *a: None, _TAGGING)
+
+    saved = store.get(chat["id"])
+    assert saved["tags"] == ["survey"]
+    assert saved["papers"] == ["p1", "p2"]
+
+
 def test_run_turn_abandons_an_agent_that_never_returns_once_stopped(tmp_path):
     # The agent's run() here never returns on its own — simulates being stuck deep
     # inside a blocking call (e.g. slow local-model prefill, or retrieval) that a stop

@@ -100,6 +100,45 @@ def test_truncate_before_accepts_zero_and_rejects_invalid_turns(tmp_path):
         store.truncate_before(chat_id, 1)
 
 
+def test_create_initializes_empty_scope(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat = store.create()
+    assert chat["tags"] == []
+    assert chat["papers"] == []
+
+
+def test_first_turn_records_the_request_scope(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat_id = store.create()["id"]
+    saved = store.append_turn(chat_id, turn(), tags=["survey"], papers=["p1", "p2"])
+
+    assert saved["tags"] == ["survey"]
+    assert saved["papers"] == ["p1", "p2"]
+    assert store.get(chat_id)["papers"] == ["p1", "p2"]
+
+
+def test_later_turns_do_not_change_the_recorded_scope(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat_id = store.create()["id"]
+    store.append_turn(chat_id, turn("q1"), tags=[], papers=["p1"])
+    # The composer locks scope after turn 1, so a later request can't legitimately carry a
+    # different scope — but the store must not silently widen it even if one does.
+    saved = store.append_turn(chat_id, turn("q2"), tags=["other"], papers=["p2", "p3"])
+
+    assert saved["tags"] == []
+    assert saved["papers"] == ["p1"]
+
+
+def test_editing_the_first_turn_rewrites_the_scope(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat_id = store.create()["id"]
+    store.append_turn(chat_id, turn("q1"), tags=[], papers=["p1"])
+    store.truncate_before(chat_id, 0)  # edit turn 0 -> back to empty, so the re-append is first
+    saved = store.append_turn(chat_id, turn("q1b"), tags=[], papers=["p9"])
+
+    assert saved["papers"] == ["p9"]
+
+
 def test_list_and_delete_sessions(tmp_path):
     store = ChatStore(str(tmp_path))
     first = store.append_turn(store.create()["id"], turn(), name="First")

@@ -1617,3 +1617,70 @@ describe("ChatPage side-by-side paper panel", () => {
     expect(screen.queryByLabelText("Widen paper")).not.toBeInTheDocument();
   });
 });
+
+describe("ChatPage scope persistence", () => {
+  beforeEach(() => {
+    Element.prototype.scrollIntoView = vi.fn();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const scopedSession = {
+    id: "test-id",
+    name: "Test",
+    tags: [],
+    papers: ["p1"],
+    turns: [storedTurn("q", "regression marker text")],
+  };
+  const papers = [
+    { paper_id: "p1", title: "Paper One", tags: [] },
+    { paper_id: "p2", title: "Paper Two", tags: [] },
+  ];
+
+  it("restores the saved paper scope and reuses it on the next turn", async () => {
+    // Regression: scope wasn't persisted, so a reloaded chat reset its filters to empty and
+    // the next turn silently searched the whole library instead of the chosen papers.
+    const sse = "event: citations\ndata: []\n\nevent: done\ndata: \n\n";
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      void init;
+      const url = String(input);
+      if (url === "/api/chat") return Promise.resolve(mockStreamResponse(sse));
+      const body =
+        url === "/api/chats/test-id"
+          ? scopedSession
+          : url === "/api/papers"
+            ? papers
+            : url.startsWith("/api/tags") || url.startsWith("/api/chats")
+              ? []
+              : {};
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+    await screen.findByText(/regression marker text/i);
+    // The restored scope shows as a selected pill in the (locked) papers filter, not blank.
+    const labels = await screen.findAllByText("Paper One");
+    expect(labels.some((el) => el.className.includes("Pill"))).toBe(true);
+
+    fireEvent.change(screen.getByPlaceholderText("Ask about a paper or a concept…"), {
+      target: { value: "follow up" },
+    });
+    fireEvent.click(screen.getByLabelText("Send"));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/chat", expect.anything()));
+    const call = fetchMock.mock.calls.find(([u]) => String(u) === "/api/chat")!;
+    const sent = JSON.parse((call[1] as RequestInit).body as string);
+    expect(sent.papers).toEqual(["p1"]);
+  });
+});

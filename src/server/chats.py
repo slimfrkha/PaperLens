@@ -110,23 +110,40 @@ class ChatStore:
             "name": "",
             "created_at": _now(),
             "updated_at": _now(),
+            "tags": [],
+            "papers": [],
             "turns": [],
         }
         self._write(chat)
         return chat
 
-    def append_turn(self, chat_id: str, turn: StoredTurn, name: str | None = None) -> dict:
+    def append_turn(
+        self,
+        chat_id: str,
+        turn: StoredTurn,
+        name: str | None = None,
+        tags: list[str] | None = None,
+        papers: list[str] | None = None,
+    ) -> dict:
         """Append a completed exchange."""
         with self._lock:
             chat = self._read(chat_id) or {
                 "id": chat_id,
                 "name": "",
                 "created_at": _now(),
+                "tags": [],
+                "papers": [],
                 "turns": [],
             }
+            first_turn = not chat["turns"]
             chat["turns"].append(turn)
             if name is not None:
                 chat["name"] = name
+            # Scope is fixed for the conversation (the composer locks it after turn 1) —
+            # record it from the first turn's request so a reload can restore it.
+            if first_turn and tags is not None:
+                chat["tags"] = list(tags)
+                chat["papers"] = list(papers or [])
             chat["updated_at"] = _now()
             self._write(chat)
             return chat

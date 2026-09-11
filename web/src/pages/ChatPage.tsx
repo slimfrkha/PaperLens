@@ -176,10 +176,10 @@ export default function ChatPage() {
     getChat(chatId)
       .then((s) => {
         setTurns(s.turns);
-        // Filters aren't persisted per chat; reset so a reopened chat never shows
-        // another session's stale (and now locked) filter values.
-        setTags([]);
-        setPapers([]);
+        // Restore the conversation's locked retrieval scope so a reload keeps searching the
+        // same papers (empty for chats predating scope persistence, i.e. the whole library).
+        setTags(s.tags ?? []);
+        setPapers(s.papers ?? []);
         // Neither toggle is a locked filter — each should reflect what the conversation's
         // latest message actually used, not silently reset to a default that may not
         // match (e.g. reloading a chat whose last message used per-paper mode would

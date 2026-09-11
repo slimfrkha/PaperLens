@@ -62,7 +62,8 @@ session list collapses to make room; the standalone paper view (below) is unchan
 ### Search scope and answer modes
 
 You can restrict retrieval by paper, tag, or both before the first turn in a conversation.
-The selected scope stays fixed for that conversation.
+The selected scope stays fixed for that conversation — it is saved with the chat and restored
+when you reopen it, so later turns keep searching the same papers.
 
 PaperLens offers three answer modes:
 

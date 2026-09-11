@@ -104,6 +104,10 @@ export interface CompareRow {
 export interface ChatSession {
   id: string;
   name: string;
+  // The conversation's locked retrieval scope, persisted from its first turn. Optional:
+  // chats created before scope was persisted don't carry these (treated as no filter).
+  tags?: string[];
+  papers?: string[];
   turns: StoredTurn[];
 }
 

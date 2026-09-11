@@ -283,7 +283,9 @@ def run_turn(
                 "compare_results": compare_results,
                 "auto": req.auto,
             }
-            saved = chats.append_turn(req.chat_id, turn, name=name)
+            saved = chats.append_turn(
+                req.chat_id, turn, name=name, tags=req.tags, papers=req.papers
+            )
             emit("meta", json.dumps({"chat_id": saved["id"], "name": saved["name"]}))
     except Exception as e:  # surface errors to the client
         emit("error", f"{type(e).__name__}: {e}")
