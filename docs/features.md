@@ -93,6 +93,12 @@ The Admin page lets you add one or more modern arXiv IDs or arXiv URLs. It repor
 duplicate, invalid, and failed inputs separately, updates the active config, and triggers one
 ingestion run for the batch.
 
+**Suggested from your pool** grows the library from what it already cites. The Admin page lists
+the arXiv papers referenced across your ingested papers but not yet in the pool, ranked by how
+many pooled papers cite each, with a reference label per row. Tick any and add them in one
+batch — they flow through the same add path as a manual arXiv ID. Only references carrying an
+explicit arXiv ID are surfaced; blogs, model cards, and non-arXiv works are not.
+
 It also shows:
 
 - paper, chunk, and pending-paper counts;

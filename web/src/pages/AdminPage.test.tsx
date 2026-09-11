@@ -223,3 +223,178 @@ describe("AdminPage add paper", () => {
     );
   });
 });
+
+interface Suggested {
+  arxiv_id: string;
+  cited_by: number;
+  label: string;
+}
+
+function stubFetchWithSuggested(suggested: Suggested[], addResults: unknown[] = []) {
+  const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === "/api/admin/status") {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(status) } as Response);
+    }
+    if (url === "/api/admin/suggested") {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(suggested) } as Response);
+    }
+    if (url === "/api/admin/papers" && init?.method === "POST") {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ results: addResults }),
+      } as Response);
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({}) } as Response);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+function stubSuggestedWithStatus(suggested: Suggested[], getStatus: () => unknown) {
+  const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === "/api/admin/status") {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(getStatus()) } as Response);
+    }
+    if (url === "/api/admin/suggested") {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(suggested) } as Response);
+    }
+    if (url === "/api/admin/papers" && init?.method === "POST") {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ results: [] }),
+      } as Response);
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({}) } as Response);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+describe("AdminPage suggested papers", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("adds only the checked suggestion ids", async () => {
+    const fetchMock = stubFetchWithSuggested([
+      { arxiv_id: "3333.33333", cited_by: 2, label: "Foo et al. Title one." },
+      { arxiv_id: "4444.44444", cited_by: 1, label: "Bar et al. Title two." },
+    ]);
+    renderAdminPage();
+
+    await screen.findByText(/suggested from your pool/i);
+    expect(screen.getByRole("button", { name: /add 0 selected/i })).toBeDisabled();
+
+    fireEvent.click(screen.getByLabelText("Select 3333.33333"));
+    fireEvent.click(await screen.findByRole("button", { name: /add 1 selected/i }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/admin/papers",
+        expect.objectContaining({
+          body: JSON.stringify({ arxiv_ids_or_urls: ["3333.33333"] }),
+        }),
+      ),
+    );
+  });
+
+  it("greys a just-added suggestion immediately, before pending catches up", async () => {
+    // Anti-flicker: right after the click, `pending` is still empty (the poll hasn't
+    // landed), but the row must not read as selectable. `justAdded` covers the gap.
+    stubSuggestedWithStatus(
+      [{ arxiv_id: "3333.33333", cited_by: 2, label: "Foo et al." }],
+      () => status, // pending stays [] throughout
+    );
+    renderAdminPage();
+    await screen.findByText(/suggested from your pool/i);
+
+    const checkbox = () => screen.getByLabelText("Select 3333.33333");
+    expect(checkbox()).not.toBeDisabled();
+
+    fireEvent.click(checkbox());
+    fireEvent.click(await screen.findByRole("button", { name: /add 1 selected/i }));
+
+    await waitFor(() => expect(checkbox()).toBeDisabled()); // greyed via justAdded, not pending
+  });
+
+  it("hides the section when nothing is suggested", async () => {
+    stubFetchWithSuggested([]);
+    renderAdminPage();
+
+    await screen.findByText(/^Add paper$/);
+    expect(screen.queryByText(/suggested from your pool/i)).not.toBeInTheDocument();
+  });
+
+  it("greys out and blocks a suggestion still queued for ingestion", async () => {
+    // `pending` lists an added-but-not-yet-ingested paper by name (= its arxiv_id).
+    const pendingStatus = { ...status, pending: ["3333.33333"] };
+    stubSuggestedWithStatus(
+      [{ arxiv_id: "3333.33333", cited_by: 2, label: "Foo et al. Title." }],
+      () => pendingStatus,
+    );
+    renderAdminPage();
+
+    await screen.findByText(/suggested from your pool/i);
+    expect(screen.getByLabelText("Select 3333.33333")).toBeDisabled();
+    await screen.findByText(/^queued$/i); // the row shows a "queued" badge, not the id
+  });
+
+  it("refetches suggestions and scrolls to top when an ingestion run completes", async () => {
+    vi.useFakeTimers();
+    // jsdom doesn't implement Element.scrollTo — provide a spy so the reset is observable.
+    const scrollTo = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollTo", {
+      value: scrollTo,
+      writable: true,
+      configurable: true,
+    });
+    let state = "running";
+    const fetchMock = stubSuggestedWithStatus(
+      [{ arxiv_id: "3333.33333", cited_by: 1, label: "Foo et al." }],
+      () => ({ ...status, ingestion: { ...status.ingestion, state } }),
+    );
+    try {
+      renderAdminPage();
+      await vi.runOnlyPendingTimersAsync(); // mount: status(running) + suggested
+      const suggestedCalls = () =>
+        fetchMock.mock.calls.filter(([u]) => String(u) === "/api/admin/suggested").length;
+      expect(suggestedCalls()).toBe(1);
+      expect(scrollTo).not.toHaveBeenCalled(); // not on mount
+
+      state = "idle"; // run finished; the next poll observes running -> idle
+      await vi.advanceTimersByTimeAsync(1600);
+      expect(suggestedCalls()).toBe(2); // suggestions were refetched on completion
+      expect(scrollTo).toHaveBeenCalledWith({ top: 0 }); // scroll box reset to top
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not refetch suggestions on the 1.5s status poll", async () => {
+    vi.useFakeTimers();
+    const fetchMock = stubFetchWithSuggested([
+      { arxiv_id: "3333.33333", cited_by: 1, label: "Foo et al." },
+    ]);
+    try {
+      renderAdminPage();
+      await vi.runOnlyPendingTimersAsync(); // flush the mount fetches
+      const suggestedCalls = () =>
+        fetchMock.mock.calls.filter(([u]) => String(u) === "/api/admin/suggested").length;
+      const statusCalls = () =>
+        fetchMock.mock.calls.filter(([u]) => String(u) === "/api/admin/status").length;
+
+      expect(suggestedCalls()).toBe(1);
+      const statusBefore = statusCalls();
+      await vi.advanceTimersByTimeAsync(5000); // several poll ticks
+
+      expect(statusCalls()).toBeGreaterThan(statusBefore); // status kept polling
+      expect(suggestedCalls()).toBe(1); // suggestions did not
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

@@ -1148,3 +1148,59 @@ def test_get_paper_asset_blocks_path_traversal(make_config, attack):
     resp = client.get(attack)
 
     assert "TOPSECRET" not in resp.text
+
+
+def test_admin_suggested_ranks_by_cited_by_and_excludes_pooled(make_config):
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    md_dir = Path(cfg.paths.markdown_dir)
+    md_dir.mkdir(parents=True, exist_ok=True)
+    manifest = Manifest(cfg.paths.rag_db)
+    manifest.upsert({"paper_id": "paper-a", "title": "A", "tags": [], "arxiv_id": "1111.11111"})
+    manifest.upsert({"paper_id": "paper-b", "title": "B", "tags": [], "arxiv_id": "2222.22222"})
+    # 3333 is cited by both papers; 4444 by one; 2222 is already in the pool (paper-b's
+    # own id) so it must be excluded even though paper-a "cites" it.
+    (md_dir / "paper-a.md").write_text(
+        "## References\n"
+        "- one. arXiv:3333.33333\n"
+        "- two. arXiv:4444.44444\n"
+        "- three. arXiv:2222.22222\n"
+    )
+    (md_dir / "paper-b.md").write_text("## References\n- one. arXiv:3333.33333\n")
+    client = TestClient(create_app(cfg))
+
+    body = client.get("/api/admin/suggested").json()
+    assert [s["arxiv_id"] for s in body] == ["3333.33333", "4444.44444"]
+    assert body[0]["cited_by"] == 2
+    assert body[1]["cited_by"] == 1
+    assert "2222.22222" not in {s["arxiv_id"] for s in body}
+    assert body[0]["label"]  # a human-readable reference line came through
+
+
+def test_admin_suggested_skips_paper_with_missing_markdown(make_config):
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    md_dir = Path(cfg.paths.markdown_dir)
+    md_dir.mkdir(parents=True, exist_ok=True)
+    manifest = Manifest(cfg.paths.rag_db)
+    manifest.upsert({"paper_id": "has-md", "title": "A", "tags": [], "arxiv_id": "1111.11111"})
+    manifest.upsert({"paper_id": "no-md", "title": "B", "tags": [], "arxiv_id": "2222.22222"})
+    (md_dir / "has-md.md").write_text("- cite. arXiv:3333.33333\n")  # no-md.md absent
+    client = TestClient(create_app(cfg))
+
+    body = client.get("/api/admin/suggested").json()
+    assert [s["arxiv_id"] for s in body] == ["3333.33333"]
+
+
+def test_admin_suggested_empty_when_pool_cites_nothing_new(make_config):
+    cfg = make_config()
+    Path(cfg.paths.web_dist).mkdir(parents=True, exist_ok=True)
+    md_dir = Path(cfg.paths.markdown_dir)
+    md_dir.mkdir(parents=True, exist_ok=True)
+    Manifest(cfg.paths.rag_db).upsert(
+        {"paper_id": "paper-a", "title": "A", "tags": [], "arxiv_id": "1111.11111"}
+    )
+    (md_dir / "paper-a.md").write_text("## Intro\n\nNo references worth citing.\n")
+    client = TestClient(create_app(cfg))
+
+    assert client.get("/api/admin/suggested").json() == []

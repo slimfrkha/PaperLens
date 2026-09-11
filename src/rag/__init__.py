@@ -6,7 +6,7 @@ internal detail and may change.
 
 Module layering — imports flow one way (top -> bottom); there are no cycles::
 
-    config  chunking  extract  manifest  sparse  config_writer   (leaves: no intra-rag deps)
+    config  chunking  extract  manifest  sparse  config_writer  cited_papers  (leaves)
        |        |         |         |        |         |
     embedders(config)   llm(config)   index(chunking, embedders)   reranker(config, llm)
        |                                              |
@@ -37,6 +37,7 @@ from __future__ import annotations
 
 from . import config_writer
 from .chunking import Chunk, chunk_markdown
+from .cited_papers import CitedPaper, extract_cited_arxiv_ids
 from .config import (
     AnthropicSpec,
     BM25Cfg,
@@ -96,6 +97,7 @@ __all__ = [
     "BM25Index",
     "Chunk",
     "ChunkingCfg",
+    "CitedPaper",
     "Config",
     "Embedder",
     "config_writer",
@@ -140,6 +142,7 @@ __all__ = [
     "build_reranker",
     "build_sparse_index",
     "chunk_markdown",
+    "extract_cited_arxiv_ids",
     "generate_paraphrases",
     "generate_tags",
     "index_markdown",

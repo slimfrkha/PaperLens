@@ -199,6 +199,15 @@ export const removePaper = (paperId: string) =>
     jOrError<void>,
   );
 
+/** One arXiv paper cited by the current pool but not yet in it. `cited_by` is how many
+ *  pooled papers reference it; `label` is the reference line it was found on. */
+export interface SuggestedPaper {
+  arxiv_id: string;
+  cited_by: number;
+  label: string;
+}
+export const getSuggestedPapers = () => fetch("/api/admin/suggested").then(j<SuggestedPaper[]>);
+
 export const listChats = () => fetch("/api/chats").then(j<ChatSummary[]>);
 export const getChat = (id: string) =>
   fetch(`/api/chats/${encodeURIComponent(id)}`).then(j<ChatSession>);

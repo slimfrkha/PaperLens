@@ -260,6 +260,21 @@ the paper at the cited passage.
 - `_Avoid_:` reference number, footnote, source id. The marker is a `ref`; the rendered
   clickable thing is a `citation`.
 
+### 📚 Cited paper
+
+An arXiv paper referenced in a pooled paper's bibliography, identified by an arXiv id
+regexed out of the already-extracted markdown (an `arXiv:` tag, an `arxiv.org/abs/` URL, or
+a `10.48550/arXiv.` DOI — a bare number is deliberately not matched). Powers the Admin
+"Suggested from your pool" list: the cited papers **not** yet in the pool, ranked by
+`cited_by` (how many pooled papers cite each), one click to add through the existing
+add-paper path. References without an arXiv id (blogs, model cards, conference/journal-only
+works) are not surfaced.
+
+- Code: `CitedPaper` / `extract_cited_arxiv_ids` in `src/rag/cited_papers.py`; the
+  `GET /api/admin/suggested` route in `src/server/main.py`.
+- `_Avoid_:` citation / ref (those are the `[rN]` answer marker above — a different concept),
+  reference (alone — ambiguous), related paper.
+
 ### 🖍️ Annotation
 
 A user-saved passage in the Paper Viewer, with an optional personal note attached. Anchored

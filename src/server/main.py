@@ -13,7 +13,7 @@ from fastapi import FastAPI, Response
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from sse_starlette.sse import EventSourceResponse
 
-from rag import config_writer
+from rag import config_writer, extract_cited_arxiv_ids
 from rag.config import BM25Cfg, Config, HFEmbeddingCfg, Paper, parse_config
 from rag.index import open_collection, remove_paper_chunks
 from rag.llm import build_llm
@@ -223,6 +223,32 @@ def create_app(cfg: Config) -> FastAPI:
     @app.post("/api/admin/rescan")
     def admin_rescan():
         return {"started": worker.trigger()}
+
+    @app.get("/api/admin/suggested")
+    def admin_suggested():
+        # Papers cited (by arXiv id) across the whole pool, ranked by how many pooled
+        # papers cite each — a "grow the pool from what you already have" worklist.
+        # Read straight from the on-disk `{paper_id}.md` (references live there; they're
+        # only excluded from the index): no manifest storage, computed on demand. A
+        # paper whose markdown is missing/half-cleaned is skipped, not fatal.
+        papers = manifest.papers()
+        pool_ids = {rec.get("arxiv_id") for rec in papers}  # also excludes self-cites
+        counts: dict[str, int] = {}
+        labels: dict[str, str] = {}
+        for rec in papers:
+            path = Path(cfg.paths.markdown_dir) / f"{rec['paper_id']}.md"
+            if not path.exists():
+                continue
+            for cited in extract_cited_arxiv_ids(path.read_text()):
+                if cited.arxiv_id in pool_ids:
+                    continue
+                counts[cited.arxiv_id] = counts.get(cited.arxiv_id, 0) + 1
+                labels.setdefault(cited.arxiv_id, cited.label)
+        suggestions = [
+            {"arxiv_id": aid, "cited_by": n, "label": labels[aid]} for aid, n in counts.items()
+        ]
+        suggestions.sort(key=lambda s: (-s["cited_by"], s["arxiv_id"]))
+        return suggestions
 
     def _add_one_paper(raw: str) -> dict:
         """Normalize, dedupe, and queue a single arXiv id/URL — one line of an

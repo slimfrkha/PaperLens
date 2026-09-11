@@ -336,6 +336,7 @@ Served under `/api`; any other path falls through to the SPA.
 | GET | `/api/tags` | Tags with paper counts, excluding any tag present on every paper (no filtering value). |
 | GET | `/api/admin/status` | Paper/chunk counts, pending papers, ingestion progress. |
 | POST | `/api/admin/rescan` | Trigger ingestion for pending papers in the server's in-memory config. This does not reload a file edited on disk. |
+| GET | `/api/admin/suggested` | arXiv papers cited across the pool but not yet in it, each with a `cited_by` count and a reference label, ranked most-cited first. Computed on demand from ingested markdown. |
 | POST | `/api/admin/papers` | Add one or more papers from a list of arXiv ids/URLs: per-line queued/duplicate/invalid/error status, one ingestion trigger for the batch. |
 | DELETE | `/api/admin/papers/{paper_id}` | Remove a paper: manifest entry, Chroma chunks, cached HTML/PDF/markdown and figures, annotations, and its `config.yaml` entry. |
 | GET | `/api/chats` | List chat sessions. |

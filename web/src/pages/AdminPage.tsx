@@ -1,13 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Alert,
   Badge,
   Button,
   Card,
   Center,
+  Checkbox,
   Group,
   Loader,
   Progress,
+  ScrollArea,
   SimpleGrid,
   Stack,
   TagsInput,
@@ -15,7 +17,15 @@ import {
   Title,
 } from "@mantine/core";
 import { IconPlus, IconRescan } from "../components/Icons";
-import { addPapers, getStatus, rescan, type AdminStatus, type AddPaperResult } from "../api";
+import {
+  addPapers,
+  getStatus,
+  getSuggestedPapers,
+  rescan,
+  type AdminStatus,
+  type AddPaperResult,
+  type SuggestedPaper,
+} from "../api";
 
 const statusGlyph = (s: AddPaperResult["status"]) =>
   s === "queued" ? "✓" : s === "duplicate" ? "⚠" : "✗";
@@ -35,17 +45,58 @@ export default function AdminPage() {
   const [addError, setAddError] = useState<string | null>(null);
   const [addResults, setAddResults] = useState<AddPaperResult[] | null>(null);
   const [adding, setAdding] = useState(false);
+  const [suggested, setSuggested] = useState<SuggestedPaper[] | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [addingSuggested, setAddingSuggested] = useState(false);
+  // Suggestions added this session but not yet reconciled away by a completion refresh.
+  // Keeps a row greyed continuously from the click until the list is rebuilt, so it never
+  // flickers back to selectable in the gap between `pending` clearing and the refetch.
+  const [justAdded, setJustAdded] = useState<Set<string>>(new Set());
 
   const load = () =>
     getStatus()
       .then(setStatus)
       .catch(() => {});
 
+  // Fetched once on mount and re-fetched after an add — deliberately NOT on the 1.5s
+  // status poll: it re-reads and regexes every paper's markdown, cheap now but O(pool).
+  const loadSuggested = () =>
+    getSuggestedPapers()
+      .then(setSuggested)
+      .catch(() => setSuggested([]));
+
   useEffect(() => {
     load();
+    loadSuggested();
     const iv = setInterval(load, 1500);
     return () => clearInterval(iv);
   }, []);
+
+  // Refresh suggestions when an ingestion run finishes (running -> idle): a just-added
+  // paper leaves the list (it's now in the pool), and the papers *it* cites join it.
+  // The list content changes underfoot, so send the scroll box back to the top.
+  const prevIngState = useRef<string | null>(null);
+  const suggestedViewport = useRef<HTMLDivElement>(null);
+  const ingState = status?.ingestion.state ?? null;
+  useEffect(() => {
+    if (prevIngState.current === "running" && ingState === "idle") {
+      // Do the un-grey, scroll reset, and list swap together, once the new list is in —
+      // not piecemeal as `pending` and the fetch land at different times.
+      loadSuggested().then(() => {
+        suggestedViewport.current?.scrollTo?.({ top: 0 });
+        setJustAdded(new Set());
+      });
+    }
+    prevIngState.current = ingState;
+  }, [ingState]);
+
+  const toggle = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
 
   // Text typed but not yet turned into a pill (no Enter/Tab/Space/comma pressed) —
   // included below in both the disabled check and the submitted list, so clicking
@@ -65,10 +116,31 @@ export default function AdminPage() {
       setAddResults(results);
       setPaperIds([]);
       load(); // show the new pending paper(s) without waiting for the next poll tick
+      loadSuggested(); // a manually-added paper drops off the suggested list
     } catch (e) {
       setAddError(e instanceof Error ? e.message : "failed to add paper(s)");
     } finally {
       setAdding(false);
+    }
+  };
+
+  const handleAddSuggested = async () => {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    setAddingSuggested(true);
+    setAddError(null);
+    setAddResults(null);
+    try {
+      const { results } = await addPapers(ids);
+      setAddResults(results);
+      setSelected(new Set());
+      setJustAdded((prev) => new Set([...prev, ...ids])); // keep these rows greyed until reconciled
+      load();
+      loadSuggested();
+    } catch (e) {
+      setAddError(e instanceof Error ? e.message : "failed to add paper(s)");
+    } finally {
+      setAddingSuggested(false);
     }
   };
 
@@ -94,6 +166,9 @@ export default function AdminPage() {
 
   const ing = status.ingestion;
   const pct = ing.total ? Math.round(((ing.done + (ing.current?.pct ?? 0)) / ing.total) * 100) : 0;
+  // Papers added but not yet ingested — queued or in progress. `pending` lists them by
+  // name, which for an added paper equals its arxiv_id, so it keys the suggested rows.
+  const inFlight = new Set(status.pending);
 
   return (
     <Stack gap="lg">
@@ -145,6 +220,70 @@ export default function AdminPage() {
           </Stack>
         )}
       </Card>
+
+      {suggested && suggested.length > 0 && (
+        <Card withBorder radius="md">
+          <Group justify="space-between" mb="sm">
+            <Text fw={600}>Suggested from your pool ({suggested.length})</Text>
+            <Button
+              size="xs"
+              leftSection={<IconPlus size={14} />}
+              onClick={handleAddSuggested}
+              loading={addingSuggested}
+              disabled={selected.size === 0}
+            >
+              Add {selected.size} selected
+            </Button>
+          </Group>
+          <Text size="xs" c="dimmed" mb="sm">
+            arXiv papers cited by your pool but not yet in it, most-cited first.
+          </Text>
+          {/* Fixed-height scroll box: the full list is kept (a big pool has a long
+              tail of papers cited once), just bounded so it never dominates the page. */}
+          <ScrollArea.Autosize mah={320} type="auto" viewportRef={suggestedViewport}>
+            <Stack gap={8} pr="sm">
+              {suggested.map((s) => {
+                // Already added and still ingesting: `pending` lists it (arxiv_id=name)
+                // once the poll catches up, and `justAdded` covers the gap right after the
+                // click. Grey it and block re-adding, which would just return a "duplicate".
+                const queued = inFlight.has(s.arxiv_id) || justAdded.has(s.arxiv_id);
+                return (
+                  <Group
+                    key={s.arxiv_id}
+                    gap="sm"
+                    wrap="nowrap"
+                    align="flex-start"
+                    style={{ opacity: queued ? 0.55 : 1 }}
+                  >
+                    <Checkbox
+                      checked={selected.has(s.arxiv_id)}
+                      onChange={() => toggle(s.arxiv_id)}
+                      disabled={queued}
+                      aria-label={`Select ${s.arxiv_id}`}
+                      mt={2}
+                    />
+                    <Badge variant="light" color="gray" radius="sm" className="tnum">
+                      {s.cited_by}×
+                    </Badge>
+                    <Text size="sm" style={{ flex: 1 }} lineClamp={2}>
+                      {s.label}
+                    </Text>
+                    {queued ? (
+                      <Badge variant="light" color="yellow" radius="sm">
+                        queued
+                      </Badge>
+                    ) : (
+                      <Text size="xs" c="dimmed" className="tnum">
+                        {s.arxiv_id}
+                      </Text>
+                    )}
+                  </Group>
+                );
+              })}
+            </Stack>
+          </ScrollArea.Autosize>
+        </Card>
+      )}
 
       <SimpleGrid cols={{ base: 1, sm: 3 }} spacing="md">
         <Stat label="Papers" value={status.db.n_papers} />
