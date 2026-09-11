@@ -70,7 +70,8 @@ turns are stored with the conversation and restore on reload.
 - Browse ingested papers with their titles, tags, and chunk counts.
 - Read rendered Markdown with tables, mathematics, heading links, and figures extracted
   during ingestion.
-- Follow a citation directly to its highlighted passage.
+- Follow a citation directly to its highlighted passage. If the cited paper has since been
+  removed, the viewer shows a "no longer available" message instead of loading indefinitely.
 - Use the generated contents rail to jump between sections.
 - Remove a paper after confirmation; PaperLens removes its config entry, index chunks,
   cached files, annotations, and manifest record.

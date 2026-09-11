@@ -174,6 +174,23 @@ describe("PaperViewer annotations", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/papers/paper1/annotations"));
   });
 
+  it("shows a removed-paper message instead of hanging when the paper 404s", async () => {
+    // A citation in an old chat can point at a paper that has since been deleted (chat
+    // history isn't rewritten on delete) — getPaper then rejects, and without an error
+    // branch the viewer would stay on the loader forever.
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/papers/paper1")
+        return Promise.resolve({ ok: false, status: 404, statusText: "Not Found" } as Response);
+      return Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderPaperViewer();
+
+    expect(await screen.findByText(/no longer available/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /back to papers/i })).toBeInTheDocument();
+  });
+
   it("shows a floating hint to select text when the paper has no annotations yet", async () => {
     // Deliberately not asserting anything about scroll position or fixed placement —
     // jsdom has no layout — just that the hint (rendered via Affix, a portal) exists and

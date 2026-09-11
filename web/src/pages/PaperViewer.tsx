@@ -65,6 +65,10 @@ export default function PaperViewer() {
     state?: { highlight?: string; section?: string };
   };
   const [data, setData] = useState<PaperData | null>(null);
+  // A citation in an old chat can point at a paper that has since been deleted (chat
+  // history isn't rewritten on delete); getPaper then rejects. Without this, `data` stays
+  // null and the loader below spins forever — the reported "freeze".
+  const [loadError, setLoadError] = useState(false);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   // Annotation ids whose snippet failed to re-anchor (paper re-extracted with different
   // text) — real state, not a render-time read of highlight.ts's registry, so the Notes
@@ -84,7 +88,14 @@ export default function PaperViewer() {
   const registeredIds = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    if (id) getPaper(id).then(setData);
+    if (!id) return;
+    // Clearing a stale error when the route param changes (navigated to a different paper)
+    // synchronizes with navigation, not a render-time-derivable value.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setLoadError(false);
+    getPaper(id)
+      .then(setData)
+      .catch(() => setLoadError(true));
     return clearHighlight;
   }, [id]);
 
@@ -291,6 +302,18 @@ export default function PaperViewer() {
       block: "center",
     });
   }
+
+  if (loadError)
+    return (
+      <Center mih="60vh">
+        <Stack align="center" gap="sm">
+          <Text c="dimmed">This paper is no longer available — it may have been removed.</Text>
+          <Anchor component="button" onClick={() => navigate("/papers")}>
+            Back to papers
+          </Anchor>
+        </Stack>
+      </Center>
+    );
 
   if (!data)
     return (
