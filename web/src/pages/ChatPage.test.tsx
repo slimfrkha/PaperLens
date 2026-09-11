@@ -1488,6 +1488,7 @@ describe("ChatPage side-by-side paper panel", () => {
       const url = String(input);
       let body: unknown = {};
       if (url === "/api/chats/test-id") body = citedSession;
+      else if (url === "/api/chats/other-id") body = { id: "other-id", name: "Other", turns: [] };
       else if (url === "/api/papers/p1") body = paperData("p1", "Paper One");
       else if (url === "/api/papers/p2") body = paperData("p2", "Paper Two");
       else if (url === "/api/papers/p1/annotations" || url === "/api/papers/p2/annotations")
