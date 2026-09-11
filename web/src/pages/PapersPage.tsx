@@ -43,7 +43,7 @@ export default function PapersPage() {
   };
 
   return (
-    <Stack gap="lg">
+    <Stack gap="lg" maw={1180} mx="auto">
       <Group align="baseline" gap="sm">
         <Title order={2}>Papers</Title>
         <Text c="dimmed" className="tnum">

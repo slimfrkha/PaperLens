@@ -89,6 +89,29 @@ export const IconChevron = (p: IconProps) => (
   </Svg>
 );
 
+/** Split-view snap glyphs — a pane with its divider parked left / center / right, so the
+ *  bigger side reads at a glance (divider left ⇒ the right pane is wide, and so on). */
+export const IconPanelLeft = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M8 4v16" />
+  </Svg>
+);
+
+export const IconPanelCenter = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M12 4v16" />
+  </Svg>
+);
+
+export const IconPanelRight = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M16 4v16" />
+  </Svg>
+);
+
 export const IconRescan = (p: IconProps) => (
   <Svg {...p}>
     <path d="M20 11a8 8 0 1 0-.9 3.7" />

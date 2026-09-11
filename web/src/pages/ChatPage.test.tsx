@@ -1,7 +1,7 @@
 import { MantineProvider } from "@mantine/core";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import ChatPage from "./ChatPage";
 
 const chatSession = {
@@ -1417,5 +1417,203 @@ describe("ChatPage edit-and-resume", () => {
     );
     // The original turn's plain text is back (not swallowed by the edit box closing).
     expect(screen.getByText("first question")).toBeInTheDocument();
+  });
+});
+
+describe("ChatPage side-by-side paper panel", () => {
+  // jsdom lacks the CSS Custom Highlight API — a minimal polyfill so PaperPanel's
+  // highlight-on-open effect doesn't throw (mirrors PaperViewer.test.tsx).
+  class FakeHighlight {
+    ranges = new Set<Range>();
+    constructor(...ranges: Range[]) {
+      ranges.forEach((r) => this.ranges.add(r));
+    }
+    add(range: Range) {
+      this.ranges.add(range);
+      return this;
+    }
+    delete(range: Range) {
+      return this.ranges.delete(range);
+    }
+    clear() {
+      this.ranges.clear();
+    }
+  }
+
+  beforeAll(() => {
+    (window as unknown as { Highlight: typeof FakeHighlight }).Highlight = FakeHighlight;
+    const registry = new Map<string, FakeHighlight>();
+    (CSS as unknown as { highlights: unknown }).highlights = {
+      set(name: string, hl: FakeHighlight) {
+        registry.set(name, hl);
+        return this;
+      },
+      delete: (name: string) => registry.delete(name),
+      get: (name: string) => registry.get(name),
+    };
+  });
+
+  const cite = (ref: string, paperId: string, title: string, snippet: string, section: string) => ({
+    ref,
+    paper_id: paperId,
+    title,
+    breadcrumb: "",
+    section_title: section,
+    snippet,
+  });
+
+  const citedSession = {
+    id: "test-id",
+    name: "Test",
+    turns: [
+      storedTurn("q", "First point [r1]. Second point [r2].", {
+        citations: [
+          cite("r1", "p1", "Paper One", "passage one", "Sec A"),
+          cite("r2", "p2", "Paper Two", "passage two", "Sec B"),
+        ],
+      }),
+    ],
+  };
+
+  const paperData = (id: string, title: string) => ({
+    paper_id: id,
+    title,
+    tags: [],
+    arxiv_id: undefined,
+    markdown: `## ${title}\n\nSome body text for ${title}.`,
+  });
+
+  function splitFetch() {
+    return vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      let body: unknown = {};
+      if (url === "/api/chats/test-id") body = citedSession;
+      else if (url === "/api/papers/p1") body = paperData("p1", "Paper One");
+      else if (url === "/api/papers/p2") body = paperData("p2", "Paper Two");
+      else if (url === "/api/papers/p1/annotations" || url === "/api/papers/p2/annotations")
+        body = [];
+      else if (url === "/api/papers" || url.startsWith("/api/tags") || url.startsWith("/api/chats"))
+        body = [];
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
+    });
+  }
+
+  function setViewportWide(wide: boolean) {
+    window.matchMedia = ((query: string) => ({
+      matches: wide && query.includes("min-width"),
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })) as unknown as typeof window.matchMedia;
+  }
+
+  beforeEach(() => {
+    Element.prototype.scrollIntoView = vi.fn();
+    Range.prototype.getBoundingClientRect = () =>
+      ({ x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }) as DOMRect;
+    setViewportWide(true);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function renderChat(routes?: React.ReactNode) {
+    return render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+            {routes}
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+  }
+
+  it("clicking a citation opens the paper panel and collapses the session sidebar", async () => {
+    vi.stubGlobal("fetch", splitFetch());
+    const { container } = renderChat();
+    await screen.findByText(/First point/);
+    // Sidebar is present before the panel opens.
+    expect(screen.getByRole("button", { name: /New chat/i })).toBeInTheDocument();
+
+    fireEvent.click(container.querySelector("a.cite")!); // r1's inline badge
+
+    expect(await screen.findByText(/Some body text for Paper One/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Widen paper")).toBeInTheDocument();
+    // Session list collapsed out of the way while the panel is open.
+    expect(screen.queryByRole("button", { name: /New chat/i })).not.toBeInTheDocument();
+  });
+
+  it("steps prev/next through the answer's cited passages", async () => {
+    vi.stubGlobal("fetch", splitFetch());
+    const { container } = renderChat();
+    await screen.findByText(/First point/);
+
+    fireEvent.click(container.querySelector("a.cite")!); // r1 → Paper One
+    expect(await screen.findByText(/Some body text for Paper One/)).toBeInTheDocument();
+    expect(screen.getByText("1/2")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText("Next citation"));
+    expect(await screen.findByText(/Some body text for Paper Two/)).toBeInTheDocument();
+    expect(screen.getByText("2/2")).toBeInTheDocument();
+  });
+
+  it("keeps the panel mounted when snapped to chat-dominant", async () => {
+    vi.stubGlobal("fetch", splitFetch());
+    const { container } = renderChat();
+    await screen.findByText(/First point/);
+
+    fireEvent.click(container.querySelector("a.cite")!);
+    await screen.findByText(/Some body text for Paper One/);
+
+    fireEvent.click(screen.getByLabelText("Widen chat")); // "chat" snap → paper column 0-width
+    // The panel stays mounted (its content is still in the DOM), so scroll/notes survive.
+    expect(screen.getByText(/Some body text for Paper One/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Widen paper")).toBeInTheDocument();
+  });
+
+  it("closes the paper panel when the conversation changes", async () => {
+    // Regression: the panel's paper + citation pointer belong to the chat you opened them
+    // from. Switching conversations (here via an in-app navigation, e.g. browser back) must
+    // close it, or the pointer would reference the new chat's turns.
+    function Go({ to }: { to: string }) {
+      const navigate = useNavigate();
+      return <button onClick={() => navigate(to)}>go elsewhere</button>;
+    }
+    vi.stubGlobal("fetch", splitFetch());
+    const { container } = render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Go to="/c/other-id" />
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+    await screen.findByText(/First point/);
+    fireEvent.click(container.querySelector("a.cite")!);
+    await screen.findByText(/Some body text for Paper One/);
+
+    fireEvent.click(screen.getByText("go elsewhere"));
+    await waitFor(() => expect(screen.queryByLabelText("Widen paper")).not.toBeInTheDocument());
+  });
+
+  it("on a narrow viewport a citation navigates to the paper route instead of opening the panel", async () => {
+    setViewportWide(false);
+    vi.stubGlobal("fetch", splitFetch());
+    const { container } = renderChat(<Route path="/papers/:id" element={<div>PAPER ROUTE</div>} />);
+    await screen.findByText(/First point/);
+
+    fireEvent.click(container.querySelector("a.cite")!);
+
+    expect(await screen.findByText("PAPER ROUTE")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Widen paper")).not.toBeInTheDocument();
   });
 });

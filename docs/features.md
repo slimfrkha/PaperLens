@@ -27,7 +27,9 @@ for the structural assumptions.
 - Answers stream into the browser over Server-Sent Events (SSE).
 - The agent can make several focused `search_papers` calls before answering. Small talk can
   skip retrieval.
-- Each `[rN]` citation opens the cited paper at the highlighted passage.
+- Each `[rN]` citation opens the cited paper at the highlighted passage — beside the
+  conversation in a side-by-side panel on a wide screen (see
+  [Side-by-side reading](#side-by-side-reading)), or the full paper view on a narrow one.
 - Source cards group used citations by paper and identify semantic, keyword, or combined
   retrieval provenance.
 - A collapsible Thought → Action → Observation trace shows the searches and passages the
@@ -35,6 +37,27 @@ for the structural assumptions.
 - Each completed turn shows token usage when the backend reports it and the total latency.
 - You can stop a running turn. PaperLens persists the text already streamed and unlocks the
   conversation for the next message.
+
+### Side-by-side reading
+
+On a wide screen, following a citation opens the paper beside the conversation instead of
+navigating away, so you can verify a source without losing your place in the answer. The
+session list collapses to make room; the standalone paper view (below) is unchanged.
+
+- A movable divider splits chat and paper. Three snap controls — widen chat, split evenly,
+  widen paper — and their keyboard shortcuts (`[`, `\`, `]`) switch layouts without dragging;
+  drag the divider for any width in between. Widening to read remembers the width you last
+  took a note at, so it reopens there.
+- Step through the answer's cited passages with the panel's previous/next controls, without
+  hunting for each `[rN]` in the text.
+- The panel is its own workspace: a picker opens any paper in the pool, independent of what
+  the chat cited, and when it drifts from the cited passage a "back to citation" control
+  returns you. Papers outside this conversation's search scope stay openable for reading but
+  are marked as not in the chat, since opening one to read does not change what the chat
+  searches. A new answer never pulls the panel away from what you are reading; it offers its
+  new citations as an opt-in instead.
+- Highlighting and notes work in the panel exactly as they do in the full paper view.
+- On a narrow screen, a citation opens the standalone paper view instead of the panel.
 
 ### Search scope and answer modes
 

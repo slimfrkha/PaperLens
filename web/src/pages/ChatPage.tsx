@@ -1,14 +1,16 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActionIcon,
   Alert,
   Badge,
   Box,
+  Button,
   Chip,
   Group,
   Loader,
   MultiSelect,
   SegmentedControl,
+  Select,
   Stack,
   Text,
   Textarea,
@@ -16,7 +18,18 @@ import {
   Tooltip,
 } from "@mantine/core";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { IconCheck, IconEdit, IconSend, IconSidebar, IconStop, IconX } from "../components/Icons";
+import {
+  IconChevron,
+  IconCheck,
+  IconEdit,
+  IconPanelCenter,
+  IconPanelLeft,
+  IconPanelRight,
+  IconSend,
+  IconSidebar,
+  IconStop,
+  IconX,
+} from "../components/Icons";
 import {
   chat,
   classifyMode,
@@ -36,6 +49,7 @@ import {
   type TagCount,
   type UsageInfo,
 } from "../api";
+import PaperPanel, { type HighlightTarget } from "../components/PaperPanel";
 import Answer from "../components/Answer";
 import AnswerActions from "../components/AnswerActions";
 import ChatSidebar from "../components/ChatSidebar";
@@ -43,7 +57,7 @@ import ComparePanel from "../components/ComparePanel";
 import FeedbackControl from "../components/FeedbackControl";
 import SourceCards from "../components/SourceCards";
 import TraceBox from "../components/TraceBox";
-import { resolveScopeSize } from "../compareScope";
+import { resolveScopeIds, resolveScopeSize } from "../compareScope";
 import { citedCitations } from "../exportAnswer";
 
 // Above this resolved-paper-count, Compare (N sequential search+answer sub-runs plus a
@@ -76,6 +90,34 @@ export default function ChatPage() {
   const [empty, setEmpty] = useState(false);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editDraft, setEditDraft] = useState("");
+  // Side-by-side paper panel. `openPaperId` is the paper the panel currently shows — its own
+  // cursor, deliberately decoupled from the citation trace so the picker/scrolling can drift
+  // from what the chat cited. `activeCitation` remembers which turn's citation opened the
+  // panel, driving prev/next stepping and the "back to citation" affordance. `panelHighlight`
+  // is the passage to scroll to; a fresh object (identity) on each focus re-triggers the jump.
+  const [openPaperId, setOpenPaperId] = useState<string | null>(null);
+  const [panelHighlight, setPanelHighlight] = useState<HighlightTarget | null>(null);
+  const [activeCitation, setActiveCitation] = useState<{ turnIndex: number; ref: string } | null>(
+    null,
+  );
+  // Divider snap state. `snap` is the named preset; `dragRatio` (paper's fraction of the
+  // split width, 0..1) is a live drag that overrides it until the next snap. `readWidth`
+  // remembers the width the user last annotated at, so "Read" reopens at their reading width.
+  const [snap, setSnap] = useState<"chat" | "split" | "read">("split");
+  const [dragRatio, setDragRatio] = useState<number | null>(null);
+  const [readWidth, setReadWidth] = useState(0.7);
+  const splitRef = useRef<HTMLDivElement>(null);
+  // Column refs + a live paper-fraction ref: the divider drag writes flex-grow straight to
+  // these nodes each pointermove (no per-frame React render — the paper markdown is
+  // expensive to re-render), committing to state only on release.
+  const chatColRef = useRef<HTMLDivElement>(null);
+  const paperColRef = useRef<HTMLDivElement>(null);
+  const paperFracRef = useRef(0.55);
+  // Desktop-only side-by-side; below this a citation click falls back to navigating to the
+  // standalone paper route (the split can't breathe on a narrow screen).
+  const [wide, setWide] = useState(() =>
+    typeof window !== "undefined" ? window.matchMedia("(min-width: 900px)").matches : true,
+  );
   const loadedId = useRef<string | null>(null); // which chat's turns are in state
   const bottomRef = useRef<HTMLDivElement>(null);
   // The in-flight request's abort handle + the chat_id it's running against — refs, not
@@ -108,6 +150,11 @@ export default function ChatPage() {
   const [prevChatId, setPrevChatId] = useState(chatId);
   if (chatId !== prevChatId) {
     setPrevChatId(chatId);
+    // The open paper panel and its citation pointer belong to the conversation you were in —
+    // a switch (or a fresh chat) makes them stale against the new turns, so close it.
+    setOpenPaperId(null);
+    setPanelHighlight(null);
+    setActiveCitation(null);
     if (!chatId) {
       setTurns([]);
       setTags([]);
@@ -411,6 +458,10 @@ export default function ChatPage() {
     if (!resolved.send) return;
 
     setEditingIndex(null);
+    // A resend from `index` discards that turn and everything after it, so a citation
+    // pointer into the discarded range no longer identifies the same answer — drop it (the
+    // panel's own paper stays open; only prev/next context is cleared).
+    if (activeCitation && activeCitation.turnIndex >= index) setActiveCitation(null);
     await runTurn(prefix, q, chatId, index, resolved.compare, resolved.auto);
   }
 
@@ -434,6 +485,142 @@ export default function ChatPage() {
   // manifest-fallback scope resolution (agent.py) over the already-fetched paper list,
   // so Compare can disable itself / warn without a new request per keystroke.
   const scopeSize = resolveScopeSize(allPapers, tags, papers);
+  // The chat's active retrieval scope, for marking papers the picker can open but this
+  // conversation won't search. `null` = no filter set (everything is in scope).
+  const scopeIds = resolveScopeIds(allPapers, tags, papers);
+  const scopeSet = scopeIds ? new Set(scopeIds) : null;
+
+  // ---- Side-by-side paper panel ----
+  const panelOpen = openPaperId !== null;
+
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 900px)");
+    const onChange = () => setWide(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+
+  // The turn the panel was opened from, and its cited passages in order — the set prev/next
+  // walks. Recomputed from the turn each render so an edit/resend that changes a turn's
+  // citations is reflected (the pointer is by ref; it simply lands in the new set or drops).
+  const activeTurn = activeCitation ? turns[activeCitation.turnIndex] : undefined;
+  const activeCited = activeTurn ? citedCitations(activeTurn.answer, activeTurn.citations) : [];
+  const activeIdx = activeCitation
+    ? activeCited.findIndex((c) => c.ref === activeCitation.ref)
+    : -1;
+  const citedTarget = activeIdx >= 0 ? activeCited[activeIdx] : undefined;
+  // Panel drifted off the cited paper (picker, or opening a card) — offer one click back.
+  // Paper-level drift is what we can detect; scroll-away within a paper isn't tracked.
+  const offCitation = !!citedTarget && openPaperId !== citedTarget.paper_id;
+  // A newer finished turn cited papers after the one the panel is anchored to — a quiet,
+  // opt-in nudge rather than yanking the panel away from what the user is reading.
+  const lastIdx = turns.length - 1;
+  const lastCited =
+    lastIdx >= 0 && !turns[lastIdx].streaming
+      ? citedCitations(turns[lastIdx].answer, turns[lastIdx].citations)
+      : [];
+  const hasNewerCitations =
+    panelOpen && !!activeCitation && lastIdx > activeCitation.turnIndex && lastCited.length > 0;
+
+  // paper's fraction of the split width for the current snap (or live committed drag).
+  const paperFrac = dragRatio ?? (snap === "chat" ? 0 : snap === "read" ? readWidth : 0.55);
+  // Keep the live ref in sync with the committed fraction (the drag writes it directly, and
+  // `paperFrac` is stable through a drag, so this never fires mid-drag to clobber it).
+  useEffect(() => {
+    paperFracRef.current = paperFrac;
+  }, [paperFrac]);
+
+  function focusPaper(paperId: string, snippet?: string, section?: string) {
+    setOpenPaperId(paperId);
+    // A fresh object each call — its identity change is what re-triggers the panel's
+    // scroll-and-highlight effect, even for the same snippet.
+    setPanelHighlight(snippet ? { snippet, section } : null);
+  }
+
+  function openCitation(
+    target: { paperId: string; ref?: string; snippet?: string; section?: string },
+    turnIndex: number,
+  ) {
+    focusPaper(target.paperId, target.snippet, target.section);
+    setActiveCitation(target.ref ? { turnIndex, ref: target.ref } : null);
+    setSnap("split");
+    setDragRatio(null);
+  }
+
+  function stepCitation(delta: number) {
+    if (!activeCitation || activeIdx < 0) return;
+    const next = activeCited[activeIdx + delta];
+    if (!next) return;
+    focusPaper(next.paper_id, next.snippet, next.section_title);
+    setActiveCitation({ turnIndex: activeCitation.turnIndex, ref: next.ref });
+  }
+
+  function backToCitation() {
+    if (!citedTarget) return;
+    focusPaper(citedTarget.paper_id, citedTarget.snippet, citedTarget.section_title);
+  }
+
+  function closePanel() {
+    setOpenPaperId(null);
+    setPanelHighlight(null);
+    setActiveCitation(null);
+  }
+
+  function snapTo(s: "chat" | "split" | "read") {
+    setSnap(s);
+    setDragRatio(null);
+  }
+
+  // "Read" reopens at the width the user last annotated at (only remember genuine reading
+  // widths, not a sliver where a stray selection happened). Stable identity — it's passed to
+  // the memoized PaperPanel; reads the live fraction from a ref instead of render scope.
+  const rememberReadWidth = useCallback(() => {
+    if (paperFracRef.current >= 0.4) setReadWidth(paperFracRef.current);
+  }, []);
+
+  // Apply a paper fraction straight to the two column nodes — the drag's hot path, kept off
+  // React so a resize doesn't re-render the conversation or re-parse the paper each frame.
+  function applyFrac(frac: number) {
+    paperFracRef.current = frac;
+    if (chatColRef.current) chatColRef.current.style.flexGrow = String(1 - frac);
+    if (paperColRef.current) paperColRef.current.style.flexGrow = String(frac);
+  }
+
+  function startDrag(e: React.PointerEvent) {
+    e.preventDefault();
+    const container = splitRef.current;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+    let latest = paperFracRef.current;
+    function onMove(ev: PointerEvent) {
+      const fromLeft = (ev.clientX - rect.left) / rect.width;
+      latest = Math.min(0.92, Math.max(0.08, 1 - fromLeft));
+      applyFrac(latest);
+    }
+    function onUp() {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      setDragRatio(latest); // commit once, so subsequent renders agree with the DOM
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
+  // Snap shortcuts: [ widen chat · \ split · ] widen paper · Esc close. Ignored while typing.
+  useEffect(() => {
+    if (!panelOpen) return;
+    function onKey(e: KeyboardEvent) {
+      const el = document.activeElement as HTMLElement | null;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable))
+        return;
+      if (e.key === "[") snapTo("chat");
+      else if (e.key === "\\") snapTo("split");
+      else if (e.key === "]") snapTo("read");
+      else if (e.key === "Escape") closePanel();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [panelOpen]);
 
   const composer = (
     <Box className="composer" p={6}>
@@ -538,208 +725,463 @@ export default function ChatPage() {
   );
 
   return (
-    <Group
-      align="stretch"
-      gap="lg"
-      wrap="nowrap"
-      style={{ minHeight: "calc(100vh - 60px - 3rem)" }}
-    >
-      {sidebarOpen && (
-        <ChatSidebar
-          sessions={sessions}
-          activeId={chatId}
-          onNew={newChat}
-          onSelect={(id) => navigate(`/c/${id}`)}
-          onDelete={onDelete}
-        />
-      )}
-      <Stack style={{ flex: 1, minWidth: 0 }} gap="md">
-        <Group gap="xs" justify="space-between">
-          <Tooltip label={sidebarOpen ? "Hide chats" : "Show chats"}>
-            <ActionIcon variant="subtle" color="gray" onClick={() => setSidebarOpen((o) => !o)}>
-              <IconSidebar size={18} />
-            </ActionIcon>
-          </Tooltip>
-          <Tooltip
-            label="Filters are fixed once the conversation starts — use New chat to change them"
-            disabled={turns.length === 0}
-            multiline
-            w={240}
-          >
-            <Group gap="xs" wrap="wrap" justify="flex-end" style={{ flex: 1 }}>
-              <MultiSelect
-                data={paperOptions}
-                value={papers}
-                onChange={setPapers}
-                placeholder={papers.length ? "" : "All papers"}
-                disabled={turns.length > 0}
-                searchable
-                clearable
-                size="xs"
-                variant="filled"
-                style={{ maxWidth: 300, flex: "0 1 300px" }}
-                aria-label="Restrict search to papers"
-              />
-              <MultiSelect
-                data={tagOptions}
-                value={tags}
-                onChange={setTags}
-                placeholder={tags.length ? "" : "All tags"}
-                disabled={turns.length > 0}
-                searchable
-                clearable
-                size="xs"
-                variant="filled"
-                style={{ maxWidth: 260, flex: "0 1 260px" }}
-                aria-label="Restrict search to tags"
-              />
-            </Group>
-          </Tooltip>
-        </Group>
-
-        {empty && (
-          <Alert color="yellow" variant="light" title="The library is empty" radius="md">
-            No papers indexed yet — ingestion may still be running. Check the{" "}
-            <Link to="/admin">Admin</Link> page.
-          </Alert>
+    <div style={{ maxWidth: panelOpen ? "none" : 1180, margin: "0 auto" }}>
+      <Group
+        ref={splitRef}
+        align="stretch"
+        gap={panelOpen ? 0 : "lg"}
+        wrap="nowrap"
+        style={
+          panelOpen
+            ? { height: "calc(100vh - 60px - 3rem)", overflow: "hidden" }
+            : { minHeight: "calc(100vh - 60px - 3rem)" }
+        }
+      >
+        {/* Session list collapses out of the way while the paper panel is open. */}
+        {!panelOpen && sidebarOpen && (
+          <ChatSidebar
+            sessions={sessions}
+            activeId={chatId}
+            onNew={newChat}
+            onSelect={(id) => navigate(`/c/${id}`)}
+            onDelete={onDelete}
+          />
         )}
+        <Stack
+          ref={chatColRef}
+          gap="md"
+          style={{
+            flexGrow: panelOpen ? 1 - paperFrac : 1,
+            flexBasis: 0,
+            minWidth: 0,
+            ...(panelOpen ? { height: "100%", overflowY: "auto" } : {}),
+          }}
+        >
+          <Group gap="xs" justify="space-between">
+            <Tooltip label={sidebarOpen ? "Hide chats" : "Show chats"}>
+              <ActionIcon variant="subtle" color="gray" onClick={() => setSidebarOpen((o) => !o)}>
+                <IconSidebar size={18} />
+              </ActionIcon>
+            </Tooltip>
+            <Tooltip
+              label="Filters are fixed once the conversation starts — use New chat to change them"
+              disabled={turns.length === 0}
+              multiline
+              w={240}
+            >
+              <Group gap="xs" wrap="wrap" justify="flex-end" style={{ flex: 1 }}>
+                <MultiSelect
+                  data={paperOptions}
+                  value={papers}
+                  onChange={setPapers}
+                  placeholder={papers.length ? "" : "All papers"}
+                  disabled={turns.length > 0}
+                  searchable
+                  clearable
+                  size="xs"
+                  variant="filled"
+                  style={{ maxWidth: 300, flex: "0 1 300px" }}
+                  aria-label="Restrict search to papers"
+                />
+                <MultiSelect
+                  data={tagOptions}
+                  value={tags}
+                  onChange={setTags}
+                  placeholder={tags.length ? "" : "All tags"}
+                  disabled={turns.length > 0}
+                  searchable
+                  clearable
+                  size="xs"
+                  variant="filled"
+                  style={{ maxWidth: 260, flex: "0 1 260px" }}
+                  aria-label="Restrict search to tags"
+                />
+              </Group>
+            </Tooltip>
+          </Group>
 
-        {turns.length === 0 ? (
-          <EmptyHero />
-        ) : (
-          <Stack gap="xl" style={{ flex: 1 }}>
-            {turns.map((t, i) => (
-              <Box key={i}>
-                <Group justify="flex-end" align="center" gap={4}>
-                  {editingIndex === i ? (
-                    <Box style={{ maxWidth: "82%", width: "100%" }}>
-                      <Textarea
-                        autosize
-                        minRows={1}
-                        maxRows={8}
-                        autoFocus
-                        value={editDraft}
-                        onChange={(e) => setEditDraft(e.currentTarget.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" && !e.shiftKey) {
-                            e.preventDefault();
-                            sendEdit(i, editDraft);
-                          } else if (e.key === "Escape") {
-                            cancelEdit();
-                          }
-                        }}
-                      />
-                      <Group gap={4} justify="flex-end" mt={4}>
+          {empty && (
+            <Alert color="yellow" variant="light" title="The library is empty" radius="md">
+              No papers indexed yet — ingestion may still be running. Check the{" "}
+              <Link to="/admin">Admin</Link> page.
+            </Alert>
+          )}
+
+          {turns.length === 0 ? (
+            <EmptyHero />
+          ) : (
+            <Stack gap="xl" style={{ flex: 1 }}>
+              {turns.map((t, i) => (
+                <Box key={i}>
+                  <Group justify="flex-end" align="center" gap={4}>
+                    {editingIndex === i ? (
+                      <Box style={{ maxWidth: "82%", width: "100%" }}>
+                        <Textarea
+                          autosize
+                          minRows={1}
+                          maxRows={8}
+                          autoFocus
+                          value={editDraft}
+                          onChange={(e) => setEditDraft(e.currentTarget.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && !e.shiftKey) {
+                              e.preventDefault();
+                              sendEdit(i, editDraft);
+                            } else if (e.key === "Escape") {
+                              cancelEdit();
+                            }
+                          }}
+                        />
+                        <Group gap={4} justify="flex-end" mt={4}>
+                          <ActionIcon
+                            size="sm"
+                            variant="subtle"
+                            color="gray"
+                            aria-label="Cancel edit"
+                            onClick={cancelEdit}
+                          >
+                            <IconX size={14} />
+                          </ActionIcon>
+                          <ActionIcon
+                            size="sm"
+                            variant="subtle"
+                            aria-label="Save and resend"
+                            disabled={!editDraft.trim() || busy}
+                            onClick={() => sendEdit(i, editDraft)}
+                          >
+                            <IconCheck size={14} />
+                          </ActionIcon>
+                        </Group>
+                      </Box>
+                    ) : (
+                      <>
                         <ActionIcon
                           size="sm"
                           variant="subtle"
                           color="gray"
-                          aria-label="Cancel edit"
-                          onClick={cancelEdit}
+                          aria-label="Edit message"
+                          disabled={busy}
+                          onClick={() => startEdit(i, t.question)}
                         >
-                          <IconX size={14} />
+                          <IconEdit size={14} />
                         </ActionIcon>
-                        <ActionIcon
-                          size="sm"
-                          variant="subtle"
-                          aria-label="Save and resend"
-                          disabled={!editDraft.trim() || busy}
-                          onClick={() => sendEdit(i, editDraft)}
+                        <Box
+                          px="md"
+                          py="xs"
+                          style={{
+                            maxWidth: "82%",
+                            background: "var(--pl-surface-2)",
+                            border: "1px solid var(--pl-border)",
+                            borderRadius: 14,
+                            borderBottomRightRadius: 4,
+                          }}
                         >
-                          <IconCheck size={14} />
-                        </ActionIcon>
+                          <Text style={{ whiteSpace: "pre-wrap" }}>{t.question}</Text>
+                        </Box>
+                      </>
+                    )}
+                  </Group>
+                  <Box mt="sm">
+                    {t.auto && (
+                      <Badge size="xs" variant="outline" color="gray" mb={4}>
+                        Auto
+                      </Badge>
+                    )}
+                    {t.compare ? (
+                      <ComparePanel
+                        rows={t.compare_results ?? []}
+                        totalPapers={t.compareTotal ?? t.compare_results?.length ?? 0}
+                        streaming={t.streaming}
+                        // The synthesis pass's own text streams through the same `answer`
+                        // field a normal answer uses — the moment any of it has arrived,
+                        // every per-paper sub-run is done and synthesis has started.
+                        synthesizing={t.streaming && !!t.answer}
+                      />
+                    ) : (
+                      <TraceBox entries={t.trace} streaming={t.streaming} />
+                    )}
+                    {t.answer ? (
+                      <Answer
+                        text={t.answer}
+                        citations={t.citations}
+                        onOpenCitation={wide ? (target) => openCitation(target, i) : undefined}
+                      />
+                    ) : t.streaming ? (
+                      <Group gap="xs">
+                        <Loader size="sm" type="dots" color="accent" />
+                        <Text size="sm" c="dimmed">
+                          Thinking…
+                        </Text>
                       </Group>
-                    </Box>
-                  ) : (
-                    <>
-                      <ActionIcon
-                        size="sm"
-                        variant="subtle"
-                        color="gray"
-                        aria-label="Edit message"
-                        disabled={busy}
-                        onClick={() => startEdit(i, t.question)}
-                      >
-                        <IconEdit size={14} />
-                      </ActionIcon>
-                      <Box
-                        px="md"
-                        py="xs"
-                        style={{
-                          maxWidth: "82%",
-                          background: "var(--pl-surface-2)",
-                          border: "1px solid var(--pl-border)",
-                          borderRadius: 14,
-                          borderBottomRightRadius: 4,
-                        }}
-                      >
-                        <Text style={{ whiteSpace: "pre-wrap" }}>{t.question}</Text>
-                      </Box>
-                    </>
-                  )}
-                </Group>
-                <Box mt="sm">
-                  {t.auto && (
-                    <Badge size="xs" variant="outline" color="gray" mb={4}>
-                      Auto
-                    </Badge>
-                  )}
-                  {t.compare ? (
-                    <ComparePanel
-                      rows={t.compare_results ?? []}
-                      totalPapers={t.compareTotal ?? t.compare_results?.length ?? 0}
-                      streaming={t.streaming}
-                      // The synthesis pass's own text streams through the same `answer`
-                      // field a normal answer uses — the moment any of it has arrived,
-                      // every per-paper sub-run is done and synthesis has started.
-                      synthesizing={t.streaming && !!t.answer}
-                    />
-                  ) : (
-                    <TraceBox entries={t.trace} streaming={t.streaming} />
-                  )}
-                  {t.answer ? (
-                    <Answer text={t.answer} citations={t.citations} />
-                  ) : t.streaming ? (
-                    <Group gap="xs">
-                      <Loader size="sm" type="dots" color="accent" />
-                      <Text size="sm" c="dimmed">
-                        Thinking…
+                    ) : null}
+                    {!t.streaming && (
+                      <SourceCards
+                        citations={citedCitations(t.answer, t.citations)}
+                        onOpenCitation={wide ? (target) => openCitation(target, i) : undefined}
+                      />
+                    )}
+                    {!t.streaming && t.usage && (
+                      <Text size="xs" c="dimmed" mt={4}>
+                        {formatUsage(t.usage)}
                       </Text>
-                    </Group>
-                  ) : null}
-                  {!t.streaming && (
-                    <SourceCards citations={citedCitations(t.answer, t.citations)} />
-                  )}
-                  {!t.streaming && t.usage && (
-                    <Text size="xs" c="dimmed" mt={4}>
-                      {formatUsage(t.usage)}
-                    </Text>
-                  )}
-                  {!t.streaming && t.answer && chatId && (
-                    <FeedbackControl
-                      // Scoped to chatId, not just the array index — otherwise switching
-                      // chats reuses this component instance (ChatPage doesn't remount on
-                      // a chatId param change) and its local draft/note-open state leaks
-                      // from the previous chat's turn at the same index.
-                      key={`${chatId}-${i}`}
-                      vote={t.feedback?.vote ?? null}
-                      note={t.feedback?.note ?? null}
-                      onChange={(vote, note) => onFeedback(i, vote, note)}
-                    />
-                  )}
-                  {!t.streaming && t.answer && (
-                    <AnswerActions text={t.answer} citations={t.citations} />
-                  )}
+                    )}
+                    {!t.streaming && t.answer && chatId && (
+                      <FeedbackControl
+                        // Scoped to chatId, not just the array index — otherwise switching
+                        // chats reuses this component instance (ChatPage doesn't remount on
+                        // a chatId param change) and its local draft/note-open state leaks
+                        // from the previous chat's turn at the same index.
+                        key={`${chatId}-${i}`}
+                        vote={t.feedback?.vote ?? null}
+                        note={t.feedback?.note ?? null}
+                        onChange={(vote, note) => onFeedback(i, vote, note)}
+                      />
+                    )}
+                    {!t.streaming && t.answer && (
+                      <AnswerActions text={t.answer} citations={t.citations} />
+                    )}
+                  </Box>
                 </Box>
-              </Box>
-            ))}
-            <div ref={bottomRef} />
-          </Stack>
-        )}
+              ))}
+              <div ref={bottomRef} />
+            </Stack>
+          )}
 
-        <Box style={{ position: "sticky", bottom: 0, paddingBottom: 4 }}>{composer}</Box>
-      </Stack>
-    </Group>
+          <Box style={{ position: "sticky", bottom: 0, paddingBottom: 4 }}>{composer}</Box>
+        </Stack>
+        {panelOpen && openPaperId && (
+          <>
+            {/* Divider: a hairline splitter with the controls floating on it, so they stay
+              reachable at every snap (even "chat", where the paper column is 0-width). Drag
+              anywhere on the rail to resize; the controls stop the drag from starting. */}
+            <Box
+              className="split-rail"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize the paper panel"
+              onPointerDown={startDrag}
+              style={{
+                width: 38,
+                flexShrink: 0,
+                position: "relative",
+                userSelect: "none",
+              }}
+            >
+              <Box
+                className="split-rail-line"
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  bottom: 0,
+                  left: "50%",
+                  width: 1,
+                  transform: "translateX(-50%)",
+                }}
+              />
+              <Box
+                onPointerDown={(e) => e.stopPropagation()}
+                style={{
+                  position: "absolute",
+                  top: 6,
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  background: "var(--mantine-color-body)",
+                  padding: "2px 0",
+                }}
+              >
+                <Tooltip label="Close paper (Esc)" position="left">
+                  <ActionIcon
+                    variant="subtle"
+                    color="gray"
+                    size="sm"
+                    aria-label="Close paper"
+                    onClick={closePanel}
+                  >
+                    <IconX size={15} />
+                  </ActionIcon>
+                </Tooltip>
+              </Box>
+              <Box
+                onPointerDown={(e) => e.stopPropagation()}
+                style={{
+                  position: "absolute",
+                  top: "50%",
+                  left: "50%",
+                  transform: "translate(-50%, -50%)",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 2,
+                  padding: 3,
+                  background: "var(--mantine-color-body)",
+                  border: "1px solid var(--pl-border)",
+                  borderRadius: "var(--mantine-radius-xl)",
+                }}
+              >
+                {(
+                  [
+                    ["read", <IconPanelLeft size={15} />, "Widen paper ( ] )"],
+                    ["split", <IconPanelCenter size={15} />, "Split evenly ( \\ )"],
+                    ["chat", <IconPanelRight size={15} />, "Widen chat ( [ )"],
+                  ] as const
+                ).map(([value, icon, label]) => {
+                  const active = snap === value && dragRatio === null;
+                  return (
+                    <Tooltip key={value} label={label} position="left">
+                      <ActionIcon
+                        variant={active ? "light" : "subtle"}
+                        color={active ? "accent" : "gray"}
+                        size="sm"
+                        radius="xl"
+                        aria-label={label.split(" (")[0]}
+                        onClick={() => snapTo(value)}
+                      >
+                        {icon}
+                      </ActionIcon>
+                    </Tooltip>
+                  );
+                })}
+              </Box>
+            </Box>
+            <Box
+              ref={paperColRef}
+              style={{
+                flexGrow: paperFrac,
+                flexBasis: 0,
+                minWidth: 0,
+                height: "100%",
+                display: "flex",
+                flexDirection: "column",
+                overflow: "hidden",
+              }}
+            >
+              <Group
+                gap={6}
+                wrap="nowrap"
+                px="sm"
+                py={7}
+                style={{ flexShrink: 0, borderBottom: "1px solid var(--pl-border)" }}
+              >
+                <Group gap={2} wrap="nowrap" style={{ flexShrink: 0 }}>
+                  <Tooltip label="Previous citation">
+                    <ActionIcon
+                      variant="subtle"
+                      color="gray"
+                      size="sm"
+                      aria-label="Previous citation"
+                      disabled={activeIdx <= 0}
+                      onClick={() => stepCitation(-1)}
+                    >
+                      <IconChevron size={15} style={{ transform: "rotate(180deg)" }} />
+                    </ActionIcon>
+                  </Tooltip>
+                  <Text size="xs" c="dimmed" className="tnum" ta="center" style={{ minWidth: 26 }}>
+                    {activeIdx >= 0 ? `${activeIdx + 1}/${activeCited.length}` : "—"}
+                  </Text>
+                  <Tooltip label="Next citation">
+                    <ActionIcon
+                      variant="subtle"
+                      color="gray"
+                      size="sm"
+                      aria-label="Next citation"
+                      disabled={activeIdx < 0 || activeIdx >= activeCited.length - 1}
+                      onClick={() => stepCitation(1)}
+                    >
+                      <IconChevron size={15} />
+                    </ActionIcon>
+                  </Tooltip>
+                </Group>
+                <Select
+                  data={paperOptions}
+                  value={openPaperId}
+                  onChange={(pid) => pid && focusPaper(pid)}
+                  size="xs"
+                  variant="filled"
+                  searchable
+                  allowDeselect={false}
+                  aria-label="Open a paper"
+                  style={{ flex: 1, minWidth: 0 }}
+                  // Mark papers this conversation's filter excludes: openable for reading,
+                  // but not part of what the chat searches. Only when a filter is active.
+                  renderOption={
+                    scopeSet
+                      ? ({ option }) => {
+                          const outOfScope = !scopeSet.has(option.value);
+                          return (
+                            <Group
+                              gap="xs"
+                              justify="space-between"
+                              wrap="nowrap"
+                              style={{ flex: 1, minWidth: 0 }}
+                            >
+                              <Text size="xs" lineClamp={1} c={outOfScope ? "dimmed" : undefined}>
+                                {option.label}
+                              </Text>
+                              {outOfScope && (
+                                <Text size="10px" c="dimmed" style={{ flexShrink: 0 }}>
+                                  not in this chat
+                                </Text>
+                              )}
+                            </Group>
+                          );
+                        }
+                      : undefined
+                  }
+                />
+                {offCitation && (
+                  <Tooltip label="Back to the cited passage">
+                    <Button
+                      size="compact-xs"
+                      variant="light"
+                      color="accent"
+                      leftSection={
+                        <IconChevron size={12} style={{ transform: "rotate(180deg)" }} />
+                      }
+                      onClick={backToCitation}
+                      className="tnum"
+                      style={{ flexShrink: 0 }}
+                    >
+                      {activeIdx + 1}/{activeCited.length}
+                    </Button>
+                  </Tooltip>
+                )}
+                {hasNewerCitations && (
+                  <Tooltip label="Jump to the latest answer's citations">
+                    <Button
+                      size="compact-xs"
+                      variant="light"
+                      color="accent"
+                      onClick={() =>
+                        openCitation(
+                          {
+                            paperId: lastCited[0].paper_id,
+                            ref: lastCited[0].ref,
+                            snippet: lastCited[0].snippet,
+                            section: lastCited[0].section_title,
+                          },
+                          lastIdx,
+                        )
+                      }
+                      style={{ flexShrink: 0 }}
+                    >
+                      {lastCited.length} new
+                    </Button>
+                  </Tooltip>
+                )}
+              </Group>
+              <Box style={{ flex: 1, minHeight: 0 }}>
+                <PaperPanel
+                  key={openPaperId}
+                  paperId={openPaperId}
+                  variant="panel"
+                  highlight={panelHighlight}
+                  onNoteSaved={rememberReadWidth}
+                />
+              </Box>
+            </Box>
+          </>
+        )}
+      </Group>
+    </div>
   );
 }
 

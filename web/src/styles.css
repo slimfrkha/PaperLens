@@ -255,6 +255,19 @@ body {
   background: var(--pl-surface-2);
 }
 
+/* Side-by-side divider: a hairline splitter whose line tints to the accent while the rail
+   is hovered/grabbed, so the drag affordance reads without adding a heavy toolbar surface. */
+.split-rail {
+  cursor: col-resize;
+}
+.split-rail-line {
+  background: var(--pl-border);
+  transition: background-color 120ms ease;
+}
+.split-rail:hover .split-rail-line {
+  background: var(--mantine-color-accent-filled);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

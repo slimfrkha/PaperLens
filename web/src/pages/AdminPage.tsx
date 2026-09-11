@@ -171,7 +171,7 @@ export default function AdminPage() {
   const inFlight = new Set(status.pending);
 
   return (
-    <Stack gap="lg">
+    <Stack gap="lg" maw={1180} mx="auto">
       <Group justify="space-between">
         <Title order={2}>Admin</Title>
         <Button variant="default" leftSection={<IconRescan size={16} />} onClick={() => rescan()}>

@@ -12,9 +12,28 @@ import {
   splitSentencesWithOffsets,
 } from "../faithfulness";
 
+/** A cited passage to open. Structurally shared with SourceCards and ChatPage's
+ *  side-by-side handler (no named import needed — the shapes match). */
+export interface OpenCitationTarget {
+  paperId: string;
+  ref?: string;
+  snippet?: string;
+  section?: string;
+}
+
 /** Renders an assistant answer as markdown, turning [rN] markers into clickable
- *  citation badges that open the cited paper with the passage highlighted. */
-export default function Answer({ text, citations }: { text: string; citations: Citation[] }) {
+ *  citation badges that open the cited paper with the passage highlighted. When
+ *  `onOpenCitation` is given (the chat side-by-side view), a click opens the paper in the
+ *  panel; otherwise it navigates to the standalone paper route. */
+export default function Answer({
+  text,
+  citations,
+  onOpenCitation,
+}: {
+  text: string;
+  citations: Citation[];
+  onOpenCitation?: (target: OpenCitationTarget) => void;
+}) {
   const navigate = useNavigate();
   const byRef = new Map(citations.map((c) => [c.ref, c]));
   const citedRefs = new Set(extractCitedRefs(text, byRef));
@@ -95,9 +114,16 @@ export default function Answer({ text, citations }: { text: string; citations: C
                   : undefined
               }
               onClick={() =>
-                navigate(`/papers/${c.paper_id}`, {
-                  state: { highlight: c.snippet, section: c.section_title },
-                })
+                onOpenCitation
+                  ? onOpenCitation({
+                      paperId: c.paper_id,
+                      ref: c.ref,
+                      snippet: c.snippet,
+                      section: c.section_title,
+                    })
+                  : navigate(`/papers/${c.paper_id}`, {
+                      state: { highlight: c.snippet, section: c.section_title },
+                    })
               }
             >
               {n}

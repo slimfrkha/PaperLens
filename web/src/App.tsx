@@ -98,16 +98,17 @@ export default function App() {
         </Group>
       </AppShell.Header>
       <AppShell.Main>
-        <div style={{ maxWidth: 1180, margin: "0 auto" }}>
-          <Routes>
-            <Route path="/" element={<ChatPage />} />
-            <Route path="/c/:chatId" element={<ChatPage />} />
-            <Route path="/papers" element={<PapersPage />} />
-            <Route path="/papers/:id" element={<PaperViewer />} />
-            <Route path="/notes" element={<NotesPage />} />
-            <Route path="/admin" element={<AdminPage />} />
-          </Routes>
-        </div>
+        {/* No shared max-width wrapper here: the chat page owns its own width so its
+            side-by-side paper panel can span full-bleed. Every other page centers itself
+            (see each page's outer wrapper / the paper reader's own centering). */}
+        <Routes>
+          <Route path="/" element={<ChatPage />} />
+          <Route path="/c/:chatId" element={<ChatPage />} />
+          <Route path="/papers" element={<PapersPage />} />
+          <Route path="/papers/:id" element={<PaperViewer />} />
+          <Route path="/notes" element={<NotesPage />} />
+          <Route path="/admin" element={<AdminPage />} />
+        </Routes>
       </AppShell.Main>
     </AppShell>
   );

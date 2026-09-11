@@ -2,6 +2,7 @@ import { Badge, Group, Stack, Text, Tooltip, UnstyledButton } from "@mantine/cor
 import { Fragment, type MouseEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import type { Citation, FaithfulnessLabel, RetrievalSource } from "../api";
+import type { OpenCitationTarget } from "./Answer";
 import {
   faithfulnessColor,
   faithfulnessMessage,
@@ -34,8 +35,16 @@ interface Source {
  *  the papers this answer stood on. Each number opens the paper at its own cited
  *  passage (same target as that number's inline [n] marker in Answer); the rest of
  *  the card opens the paper plain, with no passage highlighted — several numbers on
- *  one card can point at different passages, so the card itself picks none of them. */
-export default function SourceCards({ citations }: { citations: Citation[] }) {
+ *  one card can point at different passages, so the card itself picks none of them.
+ *  When `onOpenCitation` is given (the chat side-by-side view), clicks open the paper in
+ *  the panel; otherwise they navigate to the standalone paper route. */
+export default function SourceCards({
+  citations,
+  onOpenCitation,
+}: {
+  citations: Citation[];
+  onOpenCitation?: (target: OpenCitationTarget) => void;
+}) {
   const navigate = useNavigate();
   if (citations.length === 0) return null;
 
@@ -83,7 +92,11 @@ export default function SourceCards({ citations }: { citations: Citation[] }) {
           <UnstyledButton
             key={s.paper_id}
             className="paper-card"
-            onClick={() => navigate(`/papers/${s.paper_id}`)}
+            onClick={() =>
+              onOpenCitation
+                ? onOpenCitation({ paperId: s.paper_id })
+                : navigate(`/papers/${s.paper_id}`)
+            }
             style={{
               flex: "1 1 200px",
               maxWidth: 280,
@@ -111,9 +124,18 @@ export default function SourceCards({ citations }: { citations: Citation[] }) {
                       // Own passage, not the card's — several numbers on one card can
                       // point at different sections of the same paper.
                       e.stopPropagation();
-                      navigate(`/papers/${s.paper_id}`, {
-                        state: { highlight: n.snippet, section: n.section_title },
-                      });
+                      if (onOpenCitation) {
+                        onOpenCitation({
+                          paperId: s.paper_id,
+                          ref: `r${n.num}`,
+                          snippet: n.snippet,
+                          section: n.section_title,
+                        });
+                      } else {
+                        navigate(`/papers/${s.paper_id}`, {
+                          state: { highlight: n.snippet, section: n.section_title },
+                        });
+                      }
                     }}
                   >
                     {n.num}
