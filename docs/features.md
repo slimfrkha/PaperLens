@@ -86,6 +86,15 @@ turns are stored with the conversation and restore on reload.
 - Rate an answer with thumbs up or down and attach an optional note.
 - Copy an answer as Markdown footnotes or as one BibTeX entry per cited paper. BibTeX export
   omits authors because the manifest does not store them.
+- Export the whole conversation as a downloaded Markdown file. On browsers that support it a
+  native Save dialog opens to choose the folder and edit the file name; elsewhere it downloads
+  with a suggested name. It reads as a clean question →
+  answer skim: only the question and the answer are shown for each turn. Everything secondary —
+  the reasoning trace, the cited sources (each passage grouped by paper, with its faithfulness
+  flag), and, in compare mode, each compared paper's own answer — is tucked into a collapsible
+  section that expands to a plain code block, so the answer stays prominent. Cited sources are
+  also collected into one References section at the end, and each turn keeps its usage and any
+  feedback you left.
 
 ## Read and annotate papers
 

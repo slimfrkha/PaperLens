@@ -21,6 +21,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   IconChevron,
   IconCheck,
+  IconDownload,
   IconEdit,
   IconPanelCenter,
   IconPanelLeft,
@@ -59,6 +60,8 @@ import SourceCards from "../components/SourceCards";
 import TraceBox from "../components/TraceBox";
 import { resolveScopeIds, resolveScopeSize } from "../compareScope";
 import { citedCitations } from "../exportAnswer";
+import { conversationToMarkdown } from "../exportConversation";
+import { downloadTextFile, slugFilename } from "../download";
 
 // Above this resolved-paper-count, Compare (N sequential search+answer sub-runs plus a
 // synthesis pass) is confirmed before sending — a tooltip alone isn't a guard against an
@@ -788,11 +791,34 @@ export default function ChatPage() {
           }}
         >
           <Group gap="xs" justify="space-between">
-            <Tooltip label={sidebarOpen ? "Hide chats" : "Show chats"}>
-              <ActionIcon variant="subtle" color="gray" onClick={() => setSidebarOpen((o) => !o)}>
-                <IconSidebar size={18} />
-              </ActionIcon>
-            </Tooltip>
+            <Group gap="xs">
+              <Tooltip label={sidebarOpen ? "Hide chats" : "Show chats"}>
+                <ActionIcon variant="subtle" color="gray" onClick={() => setSidebarOpen((o) => !o)}>
+                  <IconSidebar size={18} />
+                </ActionIcon>
+              </Tooltip>
+              <Tooltip label="Export conversation as Markdown">
+                {/* Disabled ActionIcon drops pointer events; wrap in a span so the
+                    tooltip still fires on hover (same workaround as AnswerActions). */}
+                <span>
+                  <ActionIcon
+                    variant="subtle"
+                    color="gray"
+                    aria-label="Export conversation as Markdown"
+                    disabled={turns.length === 0 || busy}
+                    onClick={() => {
+                      const name = sessions.find((s) => s.id === chatId)?.name ?? "Chat";
+                      downloadTextFile(
+                        `${slugFilename(name, chatId ?? "chat")}.md`,
+                        conversationToMarkdown(turns, name),
+                      ).catch((e) => console.error("Export failed", e));
+                    }}
+                  >
+                    <IconDownload size={18} />
+                  </ActionIcon>
+                </span>
+              </Tooltip>
+            </Group>
             <Tooltip
               label="Filters are fixed once the conversation starts — use New chat to change them"
               disabled={turns.length === 0}
