@@ -14,9 +14,9 @@ here when you want to go deeper.
   `ChoiceRegistry` variants) is the source of truth for both flows.
 - **Ingestion.** arXiv HTML (PDF/Docling fallback) → Markdown → section-aware chunk →
   embed → Chroma index → LLM tags → manifest.
-- **Retrieval.** A FastAPI `ChatAgent` runs a **ReAct loop** with one `search_papers`
-  tool over a **two-stage `Searcher`** (dense recall → cross-encoder/LLM rerank), with
-  opt-in hybrid dense+BM25 fusion and multi-query paraphrase expansion.
+- **Retrieval.** A FastAPI `ChatAgent` runs a **ReAct loop** with a primary
+  `search_papers` tool over a **two-stage `Searcher`** (dense recall →
+  cross-encoder/LLM rerank), plus optional web search for gaps outside the paper pool.
 - **Pluggable backends.** Embedders (`hf` · `openai` · `gemini` · `voyage` · `ollama`),
   rerankers (`hf` cross-encoder · `llm` · `voyage`), and LLM providers — each selected by
   config.
@@ -41,6 +41,7 @@ here when you want to go deeper.
 | ⚙️ Look up a `config.yaml` key, a command, or an API route | [Configuration & commands](configuration.md) | Reference |
 | 🧩 Add a paper, swap the LLM/embedder, use a cloud provider, re-tag, tune retrieval config | [How-to guides](how-to.md) | How-to |
 | 🏛️ Understand chunking, two-stage retrieval, and the agent loop | [Architecture](architecture.md) | Explanation |
+| 🌐 Understand the deferred richer-grounding design for web search | [Advanced web search](web-advanced.md) | Design notes |
 | 🎛️ Optimize config for your pool — why the eval harness works the way it does | [Eval harness](harness.md) | Explanation + Reference |
 | 🤝 Set up a dev environment and contribute | [CONTRIBUTING](../CONTRIBUTING.md) | Reference |
 | 📖 Learn the project's vocabulary | [CONTEXT (glossary)](../CONTEXT.md) | Reference |
@@ -51,7 +52,7 @@ here when you want to go deeper.
 config.yaml ─┬─> ingestion worker: arXiv HTML → markdown → index (Chroma) → LLM tags
              │                         └─ PDF/Docling fallback
              └─> FastAPI backend ── agentic RAG ──> LLM (Anthropic | Gemini | OpenAI-compatible)
-                       │  tool: search_papers → Searcher (embedder + reranker)
+                       │  tools: search_papers → Searcher; optional web_search → DuckDuckGo
                        └─> React + Vite + Mantine UI: Chat · Papers · Notes · Admin
 ```
 

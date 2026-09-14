@@ -78,6 +78,20 @@ PaperLens offers three answer modes:
 Compare tolerates one paper-level failure and preserves the other results. Compare and Auto
 turns are stored with the conversation and restore on reload.
 
+### Web search
+
+For questions the paper pool doesn't cover — an out-of-scope concept, or a non-arXiv source a
+paper only cites (a blog or docs page the library can't ingest) — the assistant can search
+the public web (keyless DuckDuckGo, no API key). Web results are treated as **external**:
+they are cited to their source URL, shown as separate "From the web" source cards that open
+the link (not the paper viewer), and are not faithfulness-checked. The assistant is guided to
+search your papers first and only reach for the web to fill genuine gaps, labeling web-sourced
+claims as external.
+
+A **Web search** toggle in the composer controls it per message. It is **on by default**;
+turn it off for a strictly library-only answer. It is hidden in Compare mode (Compare stays
+library-only). Administrators can disable it entirely in config (`web_search.enabled: false`).
+
 ### Conversation controls
 
 - Create, resume, and delete saved conversations.

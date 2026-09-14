@@ -24,6 +24,7 @@ from rag.faithfulness import (
 from rag.llm import Usage, build_llm
 from rag.manifest import Manifest
 from rag.search import Searcher
+from rag.web_search import WebSearcher, build_web_searcher
 
 
 def _search_tool() -> dict:
@@ -58,6 +59,47 @@ def _search_tool() -> dict:
             "required": ["query"],
         },
     }
+
+
+def _web_search_tool() -> dict:
+    return {
+        "name": "web_search",
+        "description": (
+            "Search the public web and return the most relevant results. Use this ONLY "
+            "for what the paper library doesn't cover — a concept or term that no paper in "
+            "scope defines, or a non-arXiv source (a blog, docs page) a paper only cites. "
+            "Always try `search_papers` first; the library is the primary source. Each web "
+            "result carries a unique `ref` (e.g. r7, numbered once across the whole "
+            "conversation) and a URL — cite it exactly as shown. Web facts are EXTERNAL: "
+            "label them as not from the library, and never attach a web ref to a claim about "
+            "a paper or a paper ref to a web claim. Do NOT call this for greetings."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "A focused natural-language web search query.",
+                },
+            },
+            "required": ["query"],
+        },
+    }
+
+
+# Appended to SYSTEM_PROMPT when the turn is web-armed (config-enabled + not toggled off).
+# Kept separate rather than baked in so a library-only turn's prompt never mentions a tool
+# the model can't call.
+WEB_SEARCH_SYSTEM_CLAUSE = """
+
+A `web_search` tool is also available for what the papers in scope do NOT cover. Search \
+the papers first — they are the primary source. Reach for `web_search` only when the \
+library genuinely lacks the answer: a term or concept no paper in scope defines, or a \
+non-arXiv source (e.g. a blog or docs page) a paper merely cites. Treat web results as \
+EXTERNAL knowledge: state clearly that such a claim comes from the web, not the library, \
+cite it with its [rN] marker and name the source, and NEVER present a web fact as a paper's \
+content or attach a paper ref to it (or vice-versa). If the papers already answer the \
+question, do not web-search at all."""
 
 
 SYSTEM_PROMPT = """You are a research assistant for a library of arXiv papers. \
@@ -223,6 +265,7 @@ class ChatAgent:
         manifest: Manifest,
         client=None,
         faithfulness: FaithfulnessChecker | None = None,
+        web_searcher: WebSearcher | None = None,
     ):
         self.cfg = cfg
         self.searcher = searcher
@@ -232,7 +275,11 @@ class ChatAgent:
         # Inject a faithfulness checker to run offline (tests); default per cfg.faithfulness,
         # gated at call time by cfg.faithfulness.enabled — same pattern as reranker.enabled.
         self.faithfulness = faithfulness or build_faithfulness_checker(cfg.faithfulness)
+        # Inject a web searcher to run offline (tests); default per cfg.web_search, gated at
+        # call time by cfg.web_search.enabled AND the per-turn `web_search` flag.
+        self.web_searcher = web_searcher or build_web_searcher(cfg.web_search)
         self.search_tool = _search_tool()
+        self.web_search_tool = _web_search_tool()
 
     def _papers_catalog(self, paper_ids: list[str] | None) -> str:
         """Formats the papers in `paper_ids` (or every manifest paper if `None`) as
@@ -261,7 +308,9 @@ class ChatAgent:
 
         return ", ".join(f"{p['paper_id']} ({p['title']}{topical(p)})" for p in recs) or "(none)"
 
-    def _system(self, paper_ids: list[str] | None, search_budget: int) -> str:
+    def _system(
+        self, paper_ids: list[str] | None, search_budget: int, web_armed: bool = False
+    ) -> str:
         papers = self._papers_catalog(paper_ids)
         # "papers in scope" is the one phrase the prompt uses everywhere it needs to talk
         # about what's searchable — this note is the only place that defines it, so a
@@ -276,7 +325,10 @@ class ChatAgent:
             )
         else:
             note = "No paper/tag filter is active; 'papers in scope' means the entire library."
-        return SYSTEM_PROMPT.format(filter_note=note, papers=papers, search_budget=search_budget)
+        prompt = SYSTEM_PROMPT.format(filter_note=note, papers=papers, search_budget=search_budget)
+        if web_armed:
+            prompt += WEB_SEARCH_SYSTEM_CLAUSE
+        return prompt
 
     def _resolve_paper_ids(
         self, tags: list[str], papers: list[str], fallback_to_manifest: bool = False
@@ -382,20 +434,22 @@ class ChatAgent:
         """
         searches_used = {"n": 0}
 
-        def execute(name: str, args: dict) -> str:
-            if name != "search_papers":
-                return f"Unknown tool: {name}"
-            query = (args.get("query") or "").strip()
+        def _consume_budget() -> int | None:
+            """Bump the shared per-turn search counter (paper and web searches draw on the
+            same budget) and return how many remain, or None when no budget is tracked
+            (compare's defensive synthesis search). Reported in the tool result so the model
+            reads the countdown instead of self-counting a long interleaved trace."""
+            if search_budget is None:
+                return None
+            searches_used["n"] += 1
+            return max(search_budget - searches_used["n"], 0)
+
+        def _paper_search(query: str, args: dict) -> str:
             if not query:
                 return "Error: empty query."
             action: dict = {"type": "action", "query": query, "paper": args.get("paper") or None}
-            remaining: int | None = None
-            if search_budget is not None:
-                searches_used["n"] += 1
-                # Told to the model in the tool result (not just the system prompt) so it
-                # doesn't have to self-count tool calls across a long interleaved trace —
-                # a read, not a memory task.
-                remaining = max(search_budget - searches_used["n"], 0)
+            remaining = _consume_budget()
+            if remaining is not None:
                 action["per_paper"] = per_paper
             on_trace(action)
             outcome = self.searcher.search(
@@ -428,6 +482,7 @@ class ChatAgent:
                 citations.append(
                     {
                         "ref": ref,
+                        "source_kind": "paper",
                         "paper_id": r.paper_id,
                         "title": rec["title"] if rec else r.paper_id,
                         "arxiv_id": rec.get("arxiv_id") if rec else None,
@@ -452,6 +507,56 @@ class ChatAgent:
             on_trace({"type": "observation", "text": observation})
             return observation
 
+        def _web_search(query: str) -> str:
+            if not query:
+                return "Error: empty query."
+            action: dict = {"type": "action", "query": query, "kind": "web"}
+            remaining = _consume_budget()
+            on_trace(action)
+            # WebSearcher degrades to [] rather than raising (see web_search.py), so a
+            # rate-limited or offline DDG becomes a graceful "answer from the papers"
+            # observation, never a crashed turn.
+            results = self.web_searcher.search(query)
+            if not results:
+                msg = (
+                    "Web search returned no results or is unavailable — answer from the "
+                    "papers in scope if you can, otherwise say the library doesn't cover this."
+                )
+                on_trace({"type": "observation", "text": msg})
+                if remaining is not None:
+                    return f"{msg} [{remaining} searches remaining this turn]"
+                return msg
+            blocks = []
+            for r in results:
+                ref_counter["n"] += 1
+                ref = f"r{ref_counter['n']}"
+                citations.append(
+                    {
+                        "ref": ref,
+                        "source_kind": "web",
+                        "url": r.url,
+                        "title": r.title,
+                        "snippet": r.snippet,
+                    }
+                )
+                blocks.append(f'[{ref}] web  title="{r.title}"  url={r.url}\n{r.snippet}')
+            observation = (
+                "[web results — EXTERNAL, not from the library; cite the URL and say the "
+                "claim is from the web]\n\n" + "\n\n".join(blocks)
+            )
+            if remaining is not None:
+                observation = f"[{remaining} searches remaining this turn]\n\n" + observation
+            on_trace({"type": "observation", "text": observation})
+            return observation
+
+        def execute(name: str, args: dict) -> str:
+            query = (args.get("query") or "").strip()
+            if name == "search_papers":
+                return _paper_search(query, args)
+            if name == "web_search":
+                return _web_search(query)
+            return f"Unknown tool: {name}"
+
         return execute
 
     def run(
@@ -463,6 +568,7 @@ class ChatAgent:
         on_trace=None,
         ref_start: int = 0,
         per_paper: bool = False,
+        web_search: bool = False,
         stop_check: Callable[[], bool] | None = None,
     ) -> tuple[str, list[dict], Usage]:
         """Returns (answer_text, citations[], usage).
@@ -483,6 +589,11 @@ class ChatAgent:
         `per_paper` (see `Searcher.search`) applies uniformly to every `search_papers`
         call made during this turn's ReAct loop — the user toggles it per message, not
         the model per call.
+
+        `web_search`, when True and `cfg.web_search.enabled`, also offers the model a
+        `web_search` tool (external results, cited by URL) for what the pool doesn't cover;
+        it shares this turn's `search_budget` with paper searches. Off by the per-message
+        toggle even when config-enabled — a library-only turn never sees the tool.
 
         `stop_check`, if given, is polled by the LLM backend between/within streaming
         rounds; once it returns True the backend returns whatever text has streamed so
@@ -509,19 +620,25 @@ class ChatAgent:
             search_budget=search_budget,
         )
 
+        web_armed = web_search and self.cfg.web_search.enabled
+        tools = [self.search_tool, self.web_search_tool] if web_armed else [self.search_tool]
+
         text, usage = self.client.run_tools(
-            system=self._system(paper_ids, search_budget),
+            system=self._system(paper_ids, search_budget, web_armed=web_armed),
             messages=[dict(m) for m in messages],
-            tools=[self.search_tool],
+            tools=tools,
             execute=execute,
             on_text=on_text,
             on_reasoning=lambda t: trace({"type": "thought", "text": t}),
             max_rounds=self.cfg.retrieval.max_rounds,
             stop_check=stop_check,
         )
-        if self.cfg.faithfulness.enabled and citations:
-            registry = {c["ref"]: c for c in citations}
-            bodies = {c["ref"]: c["body"] for c in citations}
+        # Faithfulness scores claims against a cited passage's body; web refs carry no body
+        # (v1 cites the snippet + URL, not a fetched passage), so check only paper refs.
+        paper_cites = [c for c in citations if c.get("source_kind") != "web" and "body" in c]
+        if self.cfg.faithfulness.enabled and paper_cites:
+            registry = {c["ref"]: c for c in paper_cites}
+            bodies = {c["ref"]: c["body"] for c in paper_cites}
             self._check_faithfulness(text, registry, bodies)
         return text, citations, usage
 

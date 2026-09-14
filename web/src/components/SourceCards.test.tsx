@@ -2,14 +2,14 @@ import { MantineProvider } from "@mantine/core";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { describe, expect, it } from "vitest";
-import type { Citation } from "../api";
+import type { Citation, PaperCitation, WebCitation } from "../api";
 import SourceCards from "./SourceCards";
 
 const cite = (
   ref: string,
   paper_id: string,
   title: string,
-  source?: Citation["source"],
+  source?: PaperCitation["source"],
   section_title = "Method",
   snippet = "some passage",
 ): Citation => ({
@@ -108,5 +108,38 @@ describe("SourceCards", () => {
     fireEvent.click(screen.getByText("Paper One"));
     // react-router gives an un-navigated-with-state location a `null` state, not `undefined`.
     expect(screen.getByTestId("probe").textContent).toBe(JSON.stringify(null));
+  });
+
+  it("renders a web citation as a separate 'From the web' card linking out to its URL", () => {
+    const web: WebCitation = {
+      ref: "r2",
+      source_kind: "web",
+      url: "https://example.com/external-reference",
+      title: "External Reference",
+      snippet: "external snippet",
+    };
+    renderCards([cite("r1", "p1", "Paper One"), web]);
+
+    // Two labelled sections; the web card links to the URL in a new tab, not a paper route.
+    expect(screen.getByText("Sources")).toBeInTheDocument();
+    expect(screen.getByText("From the web")).toBeInTheDocument();
+    const link = screen.getByText("External Reference").closest("a")!;
+    expect(link).toHaveAttribute("href", web.url);
+    expect(link).toHaveAttribute("target", "_blank");
+    // Hostname subtitle, www stripped.
+    expect(screen.getByText("example.com")).toBeInTheDocument();
+  });
+
+  it("shows only the web section when every citation is a web result", () => {
+    const web: WebCitation = {
+      ref: "r1",
+      source_kind: "web",
+      url: "https://example.com/x",
+      title: "Example",
+      snippet: "s",
+    };
+    renderCards([web]);
+    expect(screen.queryByText("Sources")).not.toBeInTheDocument();
+    expect(screen.getByText("From the web")).toBeInTheDocument();
   });
 });

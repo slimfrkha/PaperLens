@@ -36,7 +36,7 @@ describe("chat", () => {
     const onCitations = vi.fn();
     const onDone = vi.fn();
 
-    await chat([], [], [], false, false, null, { onToken, onCitations, onDone });
+    await chat([], [], [], false, false, false, null, { onToken, onCitations, onDone });
 
     expect(onToken).toHaveBeenCalledWith("Hello");
     expect(onCitations).toHaveBeenCalledWith([
@@ -50,7 +50,7 @@ describe("chat", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockStreamResponse(sse)));
 
     const onUsage = vi.fn();
-    await chat([], [], [], false, false, null, {
+    await chat([], [], [], false, false, false, null, {
       onToken: vi.fn(),
       onCitations: vi.fn(),
       onUsage,
@@ -68,7 +68,7 @@ describe("chat", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockStreamResponse(sse)));
 
     const onToken = vi.fn();
-    await chat([], [], [], false, false, null, { onToken, onCitations: vi.fn() });
+    await chat([], [], [], false, false, false, null, { onToken, onCitations: vi.fn() });
 
     expect(onToken).toHaveBeenCalledWith("Hi");
   });
@@ -86,7 +86,7 @@ describe("chat", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockStreamResponse(sse)));
 
     const onCompareRow = vi.fn();
-    await chat([], [], [], false, true, null, {
+    await chat([], [], [], false, false, true, null, {
       onToken: vi.fn(),
       onCitations: vi.fn(),
       onCompareRow,
@@ -99,7 +99,17 @@ describe("chat", () => {
     const fetchMock = vi.fn().mockResolvedValue(mockStreamResponse("event: done\ndata: \n\n"));
     vi.stubGlobal("fetch", fetchMock);
 
-    await chat([], [], [], false, false, "c1", { onToken: vi.fn(), onCitations: vi.fn() }, 2);
+    await chat(
+      [],
+      [],
+      [],
+      false,
+      false,
+      false,
+      "c1",
+      { onToken: vi.fn(), onCitations: vi.fn() },
+      2,
+    );
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/chat",
@@ -109,6 +119,7 @@ describe("chat", () => {
           tags: [],
           papers: [],
           per_paper: false,
+          web_search: false,
           compare: false,
           auto: false,
           chat_id: "c1",
@@ -122,7 +133,7 @@ describe("chat", () => {
     const fetchMock = vi.fn().mockResolvedValue(mockStreamResponse("event: done\ndata: \n\n"));
     vi.stubGlobal("fetch", fetchMock);
 
-    await chat([], [], [], false, false, "c1", { onToken: vi.fn(), onCitations: vi.fn() });
+    await chat([], [], [], false, false, false, "c1", { onToken: vi.fn(), onCitations: vi.fn() });
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/chat",
@@ -132,6 +143,7 @@ describe("chat", () => {
           tags: [],
           papers: [],
           per_paper: false,
+          web_search: false,
           compare: false,
           auto: false,
           chat_id: "c1",
@@ -145,7 +157,7 @@ describe("chat", () => {
     const fetchMock = vi.fn().mockResolvedValue(mockStreamResponse("event: done\ndata: \n\n"));
     vi.stubGlobal("fetch", fetchMock);
 
-    await chat([], [], [], true, false, "c1", { onToken: vi.fn(), onCitations: vi.fn() });
+    await chat([], [], [], true, false, false, "c1", { onToken: vi.fn(), onCitations: vi.fn() });
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/chat",
@@ -155,6 +167,7 @@ describe("chat", () => {
           tags: [],
           papers: [],
           per_paper: true,
+          web_search: false,
           compare: false,
           auto: false,
           chat_id: "c1",
@@ -168,7 +181,7 @@ describe("chat", () => {
     const fetchMock = vi.fn().mockResolvedValue(mockStreamResponse("event: done\ndata: \n\n"));
     vi.stubGlobal("fetch", fetchMock);
 
-    await chat([], [], [], false, true, "c1", { onToken: vi.fn(), onCitations: vi.fn() });
+    await chat([], [], [], false, false, true, "c1", { onToken: vi.fn(), onCitations: vi.fn() });
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/chat",
@@ -178,7 +191,32 @@ describe("chat", () => {
           tags: [],
           papers: [],
           per_paper: false,
+          web_search: false,
           compare: true,
+          auto: false,
+          chat_id: "c1",
+          edit_turn: null,
+        }),
+      }),
+    );
+  });
+
+  it("sends web_search: true in the request body when passed", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockStreamResponse("event: done\ndata: \n\n"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await chat([], [], [], false, true, false, "c1", { onToken: vi.fn(), onCitations: vi.fn() });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/chat",
+      expect.objectContaining({
+        body: JSON.stringify({
+          messages: [],
+          tags: [],
+          papers: [],
+          per_paper: false,
+          web_search: true,
+          compare: false,
           auto: false,
           chat_id: "c1",
           edit_turn: null,
@@ -196,6 +234,7 @@ describe("chat", () => {
       [],
       [],
       false,
+      false,
       true,
       "c1",
       { onToken: vi.fn(), onCitations: vi.fn() },
@@ -212,6 +251,7 @@ describe("chat", () => {
           tags: [],
           papers: [],
           per_paper: false,
+          web_search: false,
           compare: true,
           auto: true,
           chat_id: "c1",
@@ -232,7 +272,7 @@ describe("chat", () => {
 
     const onError = vi.fn();
     const onDone = vi.fn();
-    await chat([], [], [], false, false, "c1", {
+    await chat([], [], [], false, false, false, "c1", {
       onToken: vi.fn(),
       onCitations: vi.fn(),
       onError,
@@ -254,6 +294,7 @@ describe("chat", () => {
       [],
       false,
       false,
+      false,
       "c1",
       { onToken: vi.fn(), onCitations: vi.fn() },
       0,
@@ -271,7 +312,7 @@ describe("chat", () => {
 
     const onError = vi.fn();
     const onDone = vi.fn();
-    await chat([], [], [], false, false, "c1", {
+    await chat([], [], [], false, false, false, "c1", {
       onToken: vi.fn(),
       onCitations: vi.fn(),
       onError,
@@ -298,7 +339,7 @@ describe("chat", () => {
 
     const onError = vi.fn();
     const onDone = vi.fn();
-    await chat([], [], [], false, false, "c1", {
+    await chat([], [], [], false, false, false, "c1", {
       onToken: vi.fn(),
       onCitations: vi.fn(),
       onError,

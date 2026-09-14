@@ -16,9 +16,11 @@ Module layering — imports flow one way (top -> bottom); there are no cycles::
                               |
                          ingest(pipeline, index, manifest, tagger)
 
-``faithfulness(config)`` is a sibling leaf-plus-config module like ``embedders``/
-``llm`` (depends only on ``config``), but isn't part of the retrieval flow above —
-it's composed directly by ``server.agent``, not by ``search``/``pipeline``.
+``faithfulness(config)`` and ``web_search(config)`` are sibling leaf-plus-config modules
+like ``embedders``/``llm`` (each depends only on ``config``), but aren't part of the
+retrieval flow above — they're composed directly by ``server.agent`` (faithfulness scores
+citations; web_search backs the agent's out-of-scope ``web_search`` tool), not by
+``search``/``pipeline``.
 
 ``config_writer`` is a leaf like ``sparse`` (no intra-rag deps — it round-trips
 config.yaml directly, not through the ``Config`` dataclass), composed only by the
@@ -63,6 +65,7 @@ from .config import (
     SGLangSpec,
     SparseCfg,
     VLLMSpec,
+    WebSearchCfg,
     load_config,
     parse_config,
 )
@@ -90,6 +93,7 @@ from .reranker import Reranker, build_reranker
 from .search import Result, Searcher
 from .sparse import BM25Index, build_sparse_index, reciprocal_rank_fusion, rrf_scores
 from .tagger import generate_tags
+from .web_search import WebResult, WebSearcher, build_web_searcher
 
 __all__ = [
     "AnthropicSpec",
@@ -134,6 +138,9 @@ __all__ = [
     "Usage",
     "VLLMSpec",
     "Verdict",
+    "WebResult",
+    "WebSearchCfg",
+    "WebSearcher",
     "best_support",
     "build_embedder",
     "build_embedder_from_config",
@@ -141,6 +148,7 @@ __all__ = [
     "build_llm",
     "build_reranker",
     "build_sparse_index",
+    "build_web_searcher",
     "chunk_markdown",
     "extract_cited_arxiv_ids",
     "generate_paraphrases",

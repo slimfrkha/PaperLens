@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -19,6 +20,23 @@ from .schemas import ChatRequest
 # agent thread — the bound on how long Stop takes to unlock the chat, regardless of what
 # the agent thread is actually blocked on.
 _ABANDON_POLL_INTERVAL_S = 0.1
+
+_ERROR_MAX_LEN = 300
+
+
+def _sanitize_error(e: Exception) -> str:
+    """A short, single-line error string safe to show in the chat.
+
+    Provider backends (e.g. a local OpenAI-compatible server) can raise with a whole HTML
+    error page as the message; LiteLLM passes it straight through. Dumped verbatim into the
+    answer that is ugly and can be huge, so strip any HTML tags, collapse whitespace, and
+    truncate — keeping the exception type and a readable head of the message for debugging."""
+    raw = f"{type(e).__name__}: {e}"
+    text = re.sub(r"<[^>]+>", " ", raw)  # drop HTML tags (e.g. a 500 error page body)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > _ERROR_MAX_LEN:
+        text = text[:_ERROR_MAX_LEN].rstrip() + "…"
+    return text
 
 
 @dataclass
@@ -135,6 +153,7 @@ def _run_agent(
             on_trace=guarded_on_trace,
             ref_start=ref_start,
             per_paper=req.per_paper,
+            web_search=req.web_search,
             stop_check=stop_check,
         )
         return _InvocationResult(text, citations, usage)
@@ -279,6 +298,9 @@ def run_turn(
                 # The secondary knob is hidden/unsendable under Compare (see ChatPage), but
                 # the backend doesn't trust the client alone: never persist both as true.
                 "per_paper": req.per_paper and not ran_compare,
+                # Web search never runs under Compare (its per-paper sub-runs leave the tool
+                # off), so persist it false there — same reflect-what-actually-ran rule.
+                "web_search": req.web_search and not ran_compare,
                 "compare": ran_compare,
                 "compare_results": compare_results,
                 "auto": req.auto,
@@ -288,6 +310,6 @@ def run_turn(
             )
             emit("meta", json.dumps({"chat_id": saved["id"], "name": saved["name"]}))
     except Exception as e:  # surface errors to the client
-        emit("error", f"{type(e).__name__}: {e}")
+        emit("error", _sanitize_error(e))
     finally:
         emit("done", "")

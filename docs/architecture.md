@@ -201,10 +201,11 @@ badge in the frontend's source cards.
 ## 🤖 The agent: retrieval as a tool
 
 Chat is **agentic RAG** (`src/server/agent.py`): a ReAct loop over the model's native tool
-calling, not a fixed retrieve-then-generate chain. The agent has exactly one tool,
-`search_papers`. The final call allowed by `retrieval.max_rounds` is deliberately tool-free,
-so the cap always ends in an answer synthesized from passages already gathered rather than
-an unfulfilled tool call.
+calling, not a fixed retrieve-then-generate chain. The agent's primary tool is
+`search_papers`; when `web_search.enabled` and the turn opts in (see below), it also holds a
+second tool, `web_search`. The final call allowed by `retrieval.max_rounds` is deliberately
+tool-free, so the cap always ends in an answer synthesized from passages already gathered
+rather than an unfulfilled tool call.
 
 ```mermaid
 sequenceDiagram
@@ -239,6 +240,32 @@ Why a tool instead of always retrieving:
 - **Citations are grounded by construction.** Each returned passage gets a **ref** (`r1`,
   `r2`, …); the agent must cite the refs it received, and the frontend turns each into a
   clickable **citation** that opens the paper at that passage.
+
+### 🌐 The web_search tool
+
+The pool can't answer everything: a concept no paper in scope defines, or a non-arXiv source
+a paper only cites (a blog, a docs page — which the arXiv-only "suggested papers" feature
+can't ingest). For those, the agent can call **`web_search`** (`src/rag/web_search.py`,
+keyless DuckDuckGo via `ddgs`) alongside `search_papers`. It's a `rag` leaf-plus-config
+module composed directly by the agent, exactly like the faithfulness checker.
+
+Web knowledge is deliberately kept **separate from the library**, so the two never blur:
+
+- **External by construction.** The system prompt biases the model to search the papers
+  first and reach for the web only for genuine gaps, to label web-sourced claims as external,
+  and to never attach a paper `[rN]` to a web fact or vice-versa. Web results get their own
+  refs but a `source_kind: "web"` + `url`; the frontend renders them as distinct "From the
+  web" cards that open the URL (never the paper viewer), and they are **not**
+  faithfulness-checked (there's no paper passage to score against).
+- **On by default, human-gated.** `web_search.enabled` (config) defaults on, but a
+  per-message toggle — the request's `web_search` flag — turns it off for a library-only
+  answer; when off, the tool isn't offered at all. The rationale: the user knows better than
+  the model whether a question is in their pool. Web search never runs under **Compare** (its
+  per-paper sub-runs stay library-only), and web and paper searches share the one per-turn
+  `retrieval.max_rounds` budget.
+- **Degrades, never crashes.** `ddgs` is rate-limited and brittle; a failed search returns
+  no results and the agent answers from the papers instead — the same degrade-don't-fail
+  contract the reranker has.
 
 ## ✅ Post-generation faithfulness check
 

@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import type { Components } from "react-markdown";
 import Markdown from "./Markdown";
 import type { Citation, FaithfulnessClaim } from "../api";
+import { isSafeExternalUrl, isWebCitation } from "../api";
 import { REF_ID, REF_MARKER, extractCitedRefs, refNumber } from "../exportAnswer";
 import {
   createClaimResolver,
@@ -70,6 +71,60 @@ export default function Answer({
         const c = byRef.get(ref);
         if (!c) return <>{children}</>;
         const n = refNumber(c);
+        // A web citation opens its source URL in a new tab — never the paper panel — and
+        // carries no faithfulness/section metadata, so it gets its own simpler badge.
+        if (isWebCitation(c)) {
+          // The backend rejects non-HTTP(S) results. Keep this second check for old or
+          // manually-edited saved chats, which still flow into this renderer.
+          if (!isSafeExternalUrl(c.url)) {
+            return (
+              <Text
+                component="span"
+                className="cite cite-web"
+                aria-label={`web citation ${n}: invalid source URL omitted`}
+              >
+                {n}
+              </Text>
+            );
+          }
+          return (
+            <Tooltip
+              color="dark.8"
+              label={
+                <Box style={{ maxWidth: 300 }}>
+                  <Text size="xs" fw={600} lh={1.3} c="white">
+                    {c.title}
+                  </Text>
+                  <Text size="xs" c="gray.4" mt={2}>
+                    Web source · {c.url}
+                  </Text>
+                  {c.snippet && (
+                    <Text size="xs" c="gray.3" mt={6} lineClamp={3} fs="italic">
+                      “{c.snippet}”
+                    </Text>
+                  )}
+                  <Text size="10px" c="gray.5" mt={6}>
+                    Click to open the source
+                  </Text>
+                </Box>
+              }
+              multiline
+              withArrow
+              radius="md"
+            >
+              <Text
+                component="a"
+                href={c.url}
+                target="_blank"
+                rel="noreferrer"
+                className="cite cite-web"
+                aria-label={`web citation ${n}: opens ${c.url}`}
+              >
+                {n}
+              </Text>
+            </Tooltip>
+          );
+        }
         const claim = instanceClaims[Number(idxStr)];
         // Stay silent on entailment — the thresholds behind it are a starting
         // calibration, not a validated guarantee, so only flag concerns.

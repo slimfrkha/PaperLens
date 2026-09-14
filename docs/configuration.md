@@ -247,6 +247,28 @@ enabled, every `search_papers` call pays one extra LLM completion plus
 | `n_paraphrases` | int | `3` | Paraphrases requested per query. Must be `>= 1`. |
 | `fetch_multiplier` | int | `3` | Each variant (dense, plus sparse if hybrid is also on) over-fetches `fetch_multiplier × candidates` before the flat RRF fuse — independent of `sparse.fetch_multiplier`, so multi-query has fusion headroom even when hybrid is off. Must be `>= 1`. |
 
+### 🌐 `web_search`
+
+Lets the chat agent call a `web_search` tool for what the paper pool doesn't cover —
+out-of-scope concepts, or non-arXiv sources a paper only cites (which the citation-following
+"suggested papers" feature can't ingest). Backed by keyless DuckDuckGo (`ddgs`) — no API
+key. Web results are **external**: they're cited to their URL and rendered as separate
+"From the web" source cards, never mixed with paper `[rN]` citations, and they aren't
+faithfulness-checked. The model is prompted to search the papers first and reach for the web
+only for genuine gaps.
+
+`enabled` defaults to `true` (on), but it's still **off by default per turn's toggle only
+when the user flips it** — the `web_search` UI chip (and the request's `web_search` flag)
+turns it off for a library-only answer. Set `enabled: false` to remove the tool entirely for
+a curated pool. Web search never runs under Compare mode. Web and paper searches share the
+same per-turn `retrieval.max_rounds` budget.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `true` | Offer the `web_search` tool. `false` forces library-only for every turn. |
+| `k` | int | `5` | Results requested per `web_search` call. Must be `>= 1`. |
+| `timeout` | float | `10.0` | Seconds for the DuckDuckGo query; `<= 0` uses the library default. |
+
 ### 🏷️ `tagger`
 
 Shapes the prompt `generate_tags` sends to `llm.tagging` — the model itself is configured

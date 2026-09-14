@@ -13,6 +13,7 @@ from server.agent import InsufficientScopeError
 from server.chat_turn import (
     _InvocationResult,
     _run_in_thread_with_abandon,
+    _sanitize_error,
     _TurnInvocation,
     run_turn,
 )
@@ -20,6 +21,21 @@ from server.chats import ChatStore
 from server.schemas import ChatMessage, ChatRequest
 
 _TAGGING = OpenAISpec(api_base="http://x")  # generate_name falls back to "New chat" on failure
+
+
+def test_sanitize_error_strips_an_html_error_page_and_truncates():
+    # A local OpenAI-compatible server can 500 with a whole HTML page as the message, which
+    # LiteLLM passes through — it must never be dumped verbatim into the chat answer.
+    html = "<!DOCTYPE html><html><body><pre>Internal Server Error</pre></body></html>" * 20
+    out = _sanitize_error(RuntimeError(html))
+    assert "<" not in out and ">" not in out
+    assert out.startswith("RuntimeError:")
+    assert "Internal Server Error" in out
+    assert len(out) <= 301  # 300-char cap + the single ellipsis char
+
+
+def test_sanitize_error_leaves_a_short_plain_message_intact():
+    assert _sanitize_error(ValueError("bad input")) == "ValueError: bad input"
 
 
 def test_run_in_thread_with_abandon_returns_true_when_thread_finishes():
@@ -90,6 +106,7 @@ class _TwoTokenAgent:
         on_trace=None,
         ref_start=0,
         per_paper=False,
+        web_search=False,
         stop_check=None,
     ):
         on_text("foo")
@@ -110,6 +127,7 @@ class _RefStartAgent:
         on_trace=None,
         ref_start=0,
         per_paper=False,
+        web_search=False,
         stop_check=None,
     ):
         ref = f"r{ref_start + 1}"
@@ -124,6 +142,7 @@ class _RecordingAgent:
 
     def __init__(self):
         self.received_per_paper = None
+        self.received_web_search = None
         self.received_stop_check = None
 
     def run(
@@ -135,9 +154,11 @@ class _RecordingAgent:
         on_trace=None,
         ref_start=0,
         per_paper=False,
+        web_search=False,
         stop_check=None,
     ):
         self.received_per_paper = per_paper
+        self.received_web_search = web_search
         self.received_stop_check = stop_check
         on_text("ok")
         return "ok", [], Usage(10, 5)
@@ -168,6 +189,15 @@ def test_run_turn_threads_per_paper_to_agent(tmp_path):
     assert agent.received_per_paper is True
 
 
+def test_run_turn_threads_web_search_to_agent(tmp_path):
+    agent = _RecordingAgent()
+    # Defaults on (schema default), and an explicit False threads through as-is.
+    for want in (True, False):
+        req = ChatRequest(messages=[ChatMessage(role="user", content="hi")], web_search=want)
+        run_turn(lambda: agent, ChatStore(str(tmp_path)), req, lambda *a: None, _TAGGING)
+        assert agent.received_web_search is want
+
+
 def test_run_turn_threads_stop_check_to_agent(tmp_path):
     agent = _RecordingAgent()
     req = ChatRequest(messages=[ChatMessage(role="user", content="hi")])
@@ -192,6 +222,7 @@ def test_run_turn_persists_partial_text_from_a_stopped_agent(tmp_path):
             on_trace=None,
             ref_start=0,
             per_paper=False,
+            web_search=False,
             stop_check=None,
         ):
             on_text("partial answ")
@@ -244,6 +275,7 @@ def test_run_turn_abandons_an_agent_that_never_returns_once_stopped(tmp_path):
             on_trace=None,
             ref_start=0,
             per_paper=False,
+            web_search=False,
             stop_check=None,
         ):
             on_text("partial")
@@ -289,6 +321,7 @@ def test_run_turn_never_persists_the_abandoned_agents_late_result(tmp_path):
             on_trace=None,
             ref_start=0,
             per_paper=False,
+            web_search=False,
             stop_check=None,
         ):
             on_text("partial")
@@ -328,6 +361,7 @@ def test_run_turn_stops_forwarding_tokens_and_trace_after_abandonment(tmp_path):
             on_trace=None,
             ref_start=0,
             per_paper=False,
+            web_search=False,
             stop_check=None,
         ):
             on_text("before")
@@ -370,6 +404,19 @@ def test_run_turn_persists_per_paper_on_the_saved_turn(tmp_path):
 
     saved = store.get(chat["id"])
     assert saved["turns"][-1]["per_paper"] is True
+
+
+def test_run_turn_persists_web_search_on_the_saved_turn(tmp_path):
+    store = ChatStore(str(tmp_path))
+    chat = store.create()
+    req = ChatRequest(
+        messages=[ChatMessage(role="user", content="hi")], chat_id=chat["id"], web_search=False
+    )
+
+    run_turn(lambda: _TwoTokenAgent(), store, req, lambda *a: None, _TAGGING)
+
+    saved = store.get(chat["id"])
+    assert saved["turns"][-1]["web_search"] is False
 
 
 def test_run_turn_persists_auto_on_the_saved_turn(tmp_path):
@@ -614,6 +661,7 @@ class _InsufficientScopeThenAskAgent:
         on_trace=None,
         ref_start=0,
         per_paper=False,
+        web_search=False,
         stop_check=None,
     ):
         on_text("Fallback answer.")

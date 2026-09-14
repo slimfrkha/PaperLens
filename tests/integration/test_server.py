@@ -56,6 +56,7 @@ class _RefStartAgent:
         on_trace=None,
         ref_start=0,
         per_paper=False,
+        web_search=False,
         stop_check=None,
     ):
         ref = f"r{ref_start + 1}"
@@ -79,6 +80,7 @@ class _EchoAgent:
         on_trace=None,
         ref_start=0,
         per_paper=False,
+        web_search=False,
         stop_check=None,
     ):
         on_text("answer")
@@ -163,6 +165,7 @@ def test_chat_streams_token_citations_done(make_config, patch_agent_seam):
             on_trace=None,
             ref_start=0,
             per_paper=False,
+            web_search=False,
             stop_check=None,
         ):
             on_text("foo")
@@ -284,6 +287,7 @@ def test_chat_per_paper_true_reaches_the_agent(make_config, patch_agent_seam):
             on_trace=None,
             ref_start=0,
             per_paper=False,
+            web_search=False,
             stop_check=None,
         ):
             received["per_paper"] = per_paper
@@ -323,6 +327,7 @@ def test_chat_without_per_paper_field_defaults_false(make_config, patch_agent_se
             on_trace=None,
             ref_start=0,
             per_paper=False,
+            web_search=False,
             stop_check=None,
         ):
             received["per_paper"] = per_paper
@@ -355,6 +360,7 @@ def test_chat_streams_usage_event_and_persists_it(make_config, patch_agent_seam)
             on_trace=None,
             ref_start=0,
             per_paper=False,
+            web_search=False,
             stop_check=None,
         ):
             on_text("answer")
@@ -585,6 +591,7 @@ def test_chat_route_rejects_concurrent_turn_on_same_chat(make_config, patch_agen
             on_trace=None,
             ref_start=0,
             per_paper=False,
+            web_search=False,
             stop_check=None,
         ):
             started.set()
@@ -644,6 +651,7 @@ def test_stop_route_signals_stop_check_and_releases_the_guard(make_config, patch
             on_trace=None,
             ref_start=0,
             per_paper=False,
+            web_search=False,
             stop_check=None,
         ):
             started.set()

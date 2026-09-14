@@ -38,6 +38,7 @@ class StoredTurn(TypedDict):
     usage: UsagePayload | None
     feedback: FeedbackPayload | None
     per_paper: bool
+    web_search: bool
     compare: bool
     compare_results: list[Payload] | None
     auto: bool

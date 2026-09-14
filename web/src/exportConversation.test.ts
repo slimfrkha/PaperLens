@@ -1,13 +1,25 @@
 import { describe, expect, it } from "vitest";
-import type { Citation, CompareRow, StoredTurn, TraceEntry } from "./api";
+import type { CompareRow, PaperCitation, StoredTurn, TraceEntry, WebCitation } from "./api";
 import { conversationToMarkdown } from "./exportConversation";
 
-function citation(overrides: Partial<Citation> & { ref: string; paper_id: string }): Citation {
+function citation(
+  overrides: Partial<PaperCitation> & { ref: string; paper_id: string },
+): PaperCitation {
   return {
     title: "A Paper",
     breadcrumb: "b",
     section_title: "Method",
     snippet: "sn",
+    ...overrides,
+  };
+}
+
+function webCitation(overrides: Partial<WebCitation> & { ref: string }): WebCitation {
+  return {
+    source_kind: "web",
+    url: "https://example.com/ref",
+    title: "External Reference",
+    snippet: "external snippet",
     ...overrides,
   };
 }
@@ -325,5 +337,33 @@ describe("conversationToMarkdown", () => {
 
   it("returns just the title for an empty conversation (no dangling References)", () => {
     expect(conversationToMarkdown([], "Empty")).toBe("# Empty");
+  });
+
+  it("renders web citations by URL in Sources and References, never as undefined", () => {
+    const turns = [
+      turn({
+        question: "explain an external concept",
+        answer: "The paper says X [r1]. The web adds Y [r2].",
+        citations: [
+          citation({ ref: "r1", paper_id: "p1", title: "A Paper", arxiv_id: "2401.00001" }),
+          webCitation({
+            ref: "r2",
+            url: "https://example.com/ref",
+            title: "External Reference",
+            snippet: "an external note",
+          }),
+        ],
+      }),
+    ];
+    const md = conversationToMarkdown(turns, "Chat");
+
+    // The regression: web citations used to render paper-only fields as "undefined".
+    expect(md).not.toContain("undefined");
+    // Web footnote resolves to the source URL, paper footnote to its section + arXiv link.
+    expect(md).toContain("[^t1-2]: **External Reference** — https://example.com/ref");
+    expect(md).toContain("[^t1-1]: **A Paper** — Method, https://arxiv.org/abs/2401.00001");
+    // Sources block groups web results under their own heading with the URL.
+    expect(md).toContain("From the web:");
+    expect(md).toContain("[2] External Reference — https://example.com/ref");
   });
 });

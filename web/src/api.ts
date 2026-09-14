@@ -21,18 +21,52 @@ export interface FaithfulnessClaim {
 
 export type RetrievalSource = "dense" | "sparse" | "both";
 
-export interface Citation {
+interface CitationBase {
   ref: string;
-  paper_id: string;
   title: string;
+  snippet: string;
+  // Kept on the common shape so faithfulness helpers can safely treat web citations as
+  // unchecked. The backend only populates this for paper citations.
+  faithfulness?: FaithfulnessClaim[];
+}
+
+/** A library passage. `source_kind` is optional for chats saved before that discriminator
+ *  was introduced. */
+export interface PaperCitation extends CitationBase {
+  source_kind?: "paper";
+  paper_id: string;
   arxiv_id?: string | null;
   breadcrumb: string;
   section_title: string;
   section_number?: string;
   source?: RetrievalSource;
-  snippet: string;
   body?: string;
-  faithfulness?: FaithfulnessClaim[];
+}
+
+/** An external web result. It deliberately has none of the paper viewer fields. */
+export interface WebCitation extends CitationBase {
+  source_kind: "web";
+  url: string;
+}
+
+export type Citation = PaperCitation | WebCitation;
+
+export const isWebCitation = (c: Citation): c is WebCitation => c.source_kind === "web";
+export const isPaperCitation = (c: Citation): c is PaperCitation => !isWebCitation(c);
+
+/** Frontend defense for old/corrupt saved chats; production citations are already filtered
+ *  by the backend before persistence. */
+export function isSafeExternalUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return (
+      (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+      !parsed.username &&
+      !parsed.password
+    );
+  } catch {
+    return false;
+  }
 }
 
 export interface Annotation {
@@ -120,6 +154,7 @@ export interface StoredTurn {
   usage: UsageInfo | null;
   feedback: Feedback | null;
   per_paper: boolean;
+  web_search?: boolean; // optional: chats saved before web search existed don't carry it
   compare: boolean;
   compare_results: CompareRow[] | null;
   auto: boolean;
@@ -236,6 +271,7 @@ export interface TraceEntry {
   query?: string;
   paper?: string | null;
   per_paper?: boolean;
+  kind?: "web"; // action entries: a web_search call (paper searches leave this absent)
 }
 
 export interface ChatHandlers {
@@ -279,6 +315,7 @@ export async function chat(
   tags: string[],
   papers: string[],
   perPaper: boolean,
+  webSearch: boolean,
   compare: boolean,
   chatId: string | null,
   h: ChatHandlers,
@@ -296,6 +333,7 @@ export async function chat(
         tags,
         papers,
         per_paper: perPaper,
+        web_search: webSearch,
         compare,
         auto,
         chat_id: chatId,

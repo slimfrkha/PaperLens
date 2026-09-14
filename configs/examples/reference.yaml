@@ -155,6 +155,15 @@ multi_query:
   n_paraphrases: 3
   fetch_multiplier: 3
 
+# --- Web search: an external `web_search` tool for what the pool doesn't cover ---
+# Keyless DuckDuckGo (ddgs). Results are cited to their URL, kept separate from paper
+# citations, and not faithfulness-checked. On by default; the per-message UI toggle turns
+# it off, and `enabled: false` removes the tool entirely. Never runs under Compare.
+web_search:
+  enabled: true
+  k: 5 # results per web_search call
+  timeout: 10.0 # seconds for the DuckDuckGo query
+
 # --- Ingestion worker ---
 ingestion:
   auto_start: true # start the background ingestion worker when the app launches

@@ -318,7 +318,22 @@ passages the **Observation**, the model's reasoning a **Thought**; the UI render
 Thought → Action → Observation **trace**.
 
 - Code: `ChatAgent` in `src/server/agent.py`.
-- `_Avoid_:` chatbot, RAG chain, assistant loop. The single tool is `search_papers`.
+- `_Avoid_:` chatbot, RAG chain, assistant loop. The primary tool is `search_papers`; a
+  turn may also hold the **web search tool** (below).
+
+### 🌐 Web search tool
+
+A second agent tool, `web_search`, for what the paper pool doesn't cover — an out-of-scope
+concept, or a non-arXiv source a paper only cites (which the arXiv-only suggested-papers
+feature can't ingest). Keyless DuckDuckGo (`ddgs`). Its results are **external**: cited to a
+URL (`source_kind: "web"`), shown as separate "From the web" cards, and not
+faithfulness-checked — deliberately kept apart from the library so paper and web knowledge
+never blur. On by config default but gated per message by the user's **web search** toggle;
+never offered under **Compare mode**.
+
+- Code: `WebSearcher` in `src/rag/web_search.py`; the tool + executor in `src/server/agent.py`.
+- `_Avoid_:` web browsing, internet search, external RAG. Say "web search". A web result is
+  still a **ref**/**citation**, just an external one.
 
 ### 🔄 Turn
 

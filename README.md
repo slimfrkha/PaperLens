@@ -21,7 +21,7 @@ that only exist once something runs unattended or serves multiple people at once
 config.yaml ─┬─> ingestion worker: arXiv HTML → markdown → index (Chroma) ‖ LLM tags
              │                         └─ PDF/Docling fallback
              └─> FastAPI backend ── agentic RAG ──> LLM (Anthropic | Gemini | OpenAI-compatible)
-                       │  tool: search_papers → Searcher (embedder + reranker)
+                       │  tools: search_papers → Searcher; optional web_search → DuckDuckGo
                        └─> React + Vite + Mantine UI: Chat · Papers · Notes · Admin
 ```
 
@@ -36,6 +36,8 @@ config.yaml ─┬─> ingestion worker: arXiv HTML → markdown → index (Chro
   search to matching papers.
 - ✅ **Faithfulness (opt-in)** verifies each cited sentence against the passage it
   cites and flags entailment/neutral/contradiction — a signal, not a gate.
+- 🌐 **Web search** can fill gaps outside the paper pool with external URL citations;
+  it is user-controlled per message and can be disabled globally in config.
 - 🔌 **The LLM is an opaque config value** (`type`, `api_base`, `model`) — point
   it at Anthropic, Gemini, or any OpenAI-compatible server (LM Studio, Ollama, vLLM,
   cloud).
@@ -93,7 +95,8 @@ agent calls a `search_papers` tool). Every key, command, and API route:
 - 💬 **Chat** — agentic RAG with streaming answers and a Thought → Action →
   Observation trace; `[rN]` citations are clickable, with faithfulness flags and
   source cards. Filter by paper or tag, 👍/👎 feedback, edit and resend a prior
-  question, and copy an answer as Markdown or BibTeX.
+  question, optionally search the web for out-of-pool context, and copy an answer as
+  Markdown or BibTeX.
 - 📄 **Papers** — every paper in the DB with tags; open one to read the full
   markdown (tables + LaTeX rendered), highlight passages, and attach notes.
 - 📝 **Notes** — browse, filter, export, and revisit annotations across the library.
@@ -111,6 +114,7 @@ Full docs live in [`docs/`](docs/README.md):
 | ⚙️ [Configuration & commands](docs/configuration.md) | Every `config.yaml` key, command, and API route. |
 | 🧩 [How-to guides](docs/how-to.md) | Add papers, swap backends, use a cloud provider. |
 | 🏛️ [Architecture](docs/architecture.md) | Chunking, two-stage retrieval, the agent loop. |
+| 🌐 [Advanced web search](docs/web-advanced.md) | Deferred design for richer web grounding. |
 | 🎛️ [Eval harness](docs/harness.md) | Tune retrieval config for your own paper pool. |
 | 🤝 [CONTRIBUTING](CONTRIBUTING.md) | Dev setup, the gate, conventions. |
 | 📖 [CONTEXT](CONTEXT.md) | Domain glossary. |

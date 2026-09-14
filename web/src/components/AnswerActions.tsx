@@ -1,5 +1,5 @@
 import { ActionIcon, CopyButton, Group, Tooltip } from "@mantine/core";
-import type { Citation } from "../api";
+import { isPaperCitation, type Citation } from "../api";
 import { answerToBibtex, answerToMarkdown, citedCitations } from "../exportAnswer";
 import { IconBook, IconCheck, IconCopy } from "./Icons";
 
@@ -14,7 +14,7 @@ export default function AnswerActions({
   citations: Citation[];
 }) {
   const cited = citedCitations(text, citations);
-  const noCitations = cited.length === 0;
+  const noPaperCitations = !cited.some(isPaperCitation);
 
   return (
     <Group gap={4} mt="sm">
@@ -35,7 +35,9 @@ export default function AnswerActions({
       </CopyButton>
       <CopyButton value={answerToBibtex(cited)}>
         {({ copied, copy }) => (
-          <Tooltip label={noCitations ? "No cited sources" : copied ? "Copied!" : "Copy BibTeX"}>
+          <Tooltip
+            label={noPaperCitations ? "No cited papers" : copied ? "Copied!" : "Copy BibTeX"}
+          >
             {/* A disabled ActionIcon drops pointer events, so wrap in a span for the
                 Tooltip to still trigger on hover (Mantine's documented workaround). */}
             <span>
@@ -44,7 +46,7 @@ export default function AnswerActions({
                 variant="subtle"
                 color="gray"
                 aria-label="Copy BibTeX"
-                disabled={noCitations}
+                disabled={noPaperCitations}
                 onClick={copy}
               >
                 {copied ? <IconCheck size={15} /> : <IconBook size={15} />}

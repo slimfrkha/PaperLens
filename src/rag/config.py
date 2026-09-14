@@ -344,6 +344,25 @@ class MultiQueryCfg:
 
 
 @dataclass
+class WebSearchCfg:
+    """Opt-out: let the chat agent call a `web_search` tool for what the paper pool
+    doesn't cover (out-of-scope concepts, non-arXiv references the pool cites but can't
+    ingest). Results are external and cited to their URL, never mixed with paper [rN]s.
+
+    Plain dataclass, not a ``ChoiceRegistry`` like ``sparse``/``faithfulness`` — there is
+    one provider (DuckDuckGo via ``ddgs``), same call the ``MultiQueryCfg`` comment makes.
+    Promote to a registry if a second provider ever lands."""
+
+    enabled: bool = True  # on by default; per-message toggle can still switch it off
+    k: int = 5  # results per web_search call
+    timeout: float = 10.0  # seconds for the ddgs query; <= 0 -> library default
+
+    def __post_init__(self) -> None:
+        if self.k < 1:
+            raise ValueError("web_search.k must be >= 1")
+
+
+@dataclass
 class TaggerCfg:
     max_tags: int = 12
     min_tags: int = 5
@@ -412,6 +431,7 @@ class Config:
     extraction: ExtractionCfg = field(default_factory=ExtractionCfg)
     retrieval: RetrievalCfg = field(default_factory=RetrievalCfg)
     multi_query: MultiQueryCfg = field(default_factory=MultiQueryCfg)
+    web_search: WebSearchCfg = field(default_factory=WebSearchCfg)
     tagger: TaggerCfg = field(default_factory=TaggerCfg)
     ingestion: IngestionCfg = field(default_factory=IngestionCfg)
     server: ServerCfg = field(default_factory=ServerCfg)

@@ -17,6 +17,7 @@ class ChatRequest(BaseModel):
     tags: list[str] = []
     papers: list[str] = []  # restrict search to these paper_ids (empty = all)
     per_paper: bool = False  # recall once per paper, pool flat, instead of once over the scope
+    web_search: bool = True  # offer the web_search tool (default-on; toggle off for library-only)
     compare: bool = False  # Compare mode: guaranteed per-paper search+answer, then synthesized
     # Auto mode was selected client-side and resolved (ask/compare) via /api/chat/classify
     # before this request was sent — badge-only, never re-classified server-side: `compare`

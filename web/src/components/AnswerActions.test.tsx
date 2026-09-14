@@ -1,7 +1,7 @@
 import { MantineProvider } from "@mantine/core";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Citation } from "../api";
+import type { Citation, WebCitation } from "../api";
 import AnswerActions from "./AnswerActions";
 
 function citation(ref: string, paper_id: string, arxiv_id?: string): Citation {
@@ -42,6 +42,18 @@ describe("AnswerActions", () => {
 
   it("disables Copy BibTeX when the turn cited no sources", () => {
     renderActions("Hi there!", []);
+    expect(screen.getByLabelText("Copy BibTeX")).toBeDisabled();
+  });
+
+  it("disables Copy BibTeX when the turn cited only web sources", () => {
+    const web: WebCitation = {
+      ref: "r1",
+      source_kind: "web",
+      url: "https://example.com/ref",
+      title: "External Reference",
+      snippet: "external snippet",
+    };
+    renderActions("External claim [r1].", [web]);
     expect(screen.getByLabelText("Copy BibTeX")).toBeDisabled();
   });
 

@@ -45,6 +45,7 @@ import {
   type ChatMessage,
   type ChatSummary,
   type Feedback,
+  isPaperCitation,
   type Paper,
   type StoredTurn,
   type TagCount,
@@ -87,6 +88,7 @@ export default function ChatPage() {
   const [paperOptions, setPaperOptions] = useState<{ value: string; label: string }[]>([]);
   const [allPapers, setAllPapers] = useState<Paper[]>([]); // for resolveScopeSize — carries tags
   const [perPaper, setPerPaper] = useState(false);
+  const [webSearch, setWebSearch] = useState(true); // on by default; toggle off for library-only
   const [mode, setMode] = useState<"auto" | "ask" | "compare">("auto");
   const [deciding, setDeciding] = useState(false); // Auto's classifyMode() pre-flight in flight
   const [busy, setBusy] = useState(false);
@@ -204,6 +206,7 @@ export default function ChatPage() {
         // if they send another message without checking).
         const last = s.turns[s.turns.length - 1];
         setPerPaper(last?.per_paper ?? false);
+        setWebSearch(last?.web_search ?? true);
         const lastCompare = last?.compare ?? false;
         const lastAuto = last?.auto ?? false;
         // Once Auto exists, compare[last] alone no longer says who picked the mode — it
@@ -285,6 +288,7 @@ export default function ChatPage() {
         usage: null,
         feedback: null,
         per_paper: mode === "ask" ? perPaper : false,
+        web_search: sendCompare ? false : webSearch,
         compare: sendCompare,
         compare_results: sendCompare ? [] : null,
         auto: sendAuto,
@@ -309,6 +313,8 @@ export default function ChatPage() {
         // The secondary knob only applies inside Ask — Compare's per-paper sub-runs
         // already search one paper at a time, so it's never sent under Compare.
         mode === "ask" ? perPaper : false,
+        // Web search runs on Ask/Auto turns; Compare's per-paper sub-runs never web-search.
+        sendCompare ? false : webSearch,
         sendCompare,
         id,
         {
@@ -537,7 +543,12 @@ export default function ChatPage() {
   // walks. Recomputed from the turn each render so an edit/resend that changes a turn's
   // citations is reflected (the pointer is by ref; it simply lands in the new set or drops).
   const activeTurn = activeCitation ? turns[activeCitation.turnIndex] : undefined;
-  const activeCited = activeTurn ? citedCitations(activeTurn.answer, activeTurn.citations) : [];
+  // The side panel navigates paper passages only. Web refs open in a browser tab and have
+  // no paper_id/section, so including them here would make prev/next request
+  // `/api/papers/undefined` at runtime.
+  const activeCited = activeTurn
+    ? citedCitations(activeTurn.answer, activeTurn.citations).filter(isPaperCitation)
+    : [];
   const activeIdx = activeCitation
     ? activeCited.findIndex((c) => c.ref === activeCitation.ref)
     : -1;
@@ -550,7 +561,7 @@ export default function ChatPage() {
   const lastIdx = turns.length - 1;
   const lastCited =
     lastIdx >= 0 && !turns[lastIdx].streaming
-      ? citedCitations(turns[lastIdx].answer, turns[lastIdx].citations)
+      ? citedCitations(turns[lastIdx].answer, turns[lastIdx].citations).filter(isPaperCitation)
       : [];
   const hasNewerCitations =
     panelOpen && !!activeCitation && lastIdx > activeCitation.turnIndex && lastCited.length > 0;
@@ -655,6 +666,12 @@ export default function ChatPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [panelOpen]);
 
+  // While a turn is in flight — the Auto classify pre-flight (`deciding`) or the streaming
+  // answer (`busy`) — freeze the whole composer, not just the textarea: mode and the toggles
+  // were captured when the turn was sent, so changing them mid-stream is a silent no-op that
+  // only misleads about what the in-flight (and next) turn will do.
+  const composerLocked = busy || deciding;
+
   const composer = (
     <Box className="composer" p={6}>
       <Group align="flex-end" gap={6} wrap="nowrap">
@@ -674,6 +691,7 @@ export default function ChatPage() {
               size="xs"
               value={mode}
               onChange={(v) => setMode(v as "auto" | "ask" | "compare")}
+              disabled={composerLocked}
               data={[
                 { label: "Auto", value: "auto" },
                 { label: "Ask", value: "ask" },
@@ -696,9 +714,30 @@ export default function ChatPage() {
                 variant="light"
                 checked={perPaper}
                 onChange={setPerPaper}
+                disabled={composerLocked}
                 aria-label="Broaden recall per paper"
               >
                 Broaden recall
+              </Chip>
+            </Box>
+          </Tooltip>
+        )}
+        {mode !== "compare" && (
+          <Tooltip
+            label="Lets the assistant search the public web for what the papers in scope don't cover (out-of-scope concepts, non-arXiv sources they cite). Web claims are cited to their URL, kept separate from paper citations. Turn off for library-only answers."
+            multiline
+            w={260}
+          >
+            <Box style={{ alignSelf: "center" }}>
+              <Chip
+                size="xs"
+                variant="light"
+                checked={webSearch}
+                onChange={setWebSearch}
+                disabled={composerLocked}
+                aria-label="Allow web search"
+              >
+                Web search
               </Chip>
             </Box>
           </Tooltip>
@@ -710,10 +749,10 @@ export default function ChatPage() {
           minRows={1}
           maxRows={8}
           value={input}
-          // Greyed out during Auto's classify round trip: send()/sendEdit() already
-          // captured this question before the pre-flight call started, so further edits
-          // here would silently have no effect on the in-flight decision.
-          disabled={deciding}
+          // Greyed out while a turn is in flight (the Auto classify round trip and the
+          // streaming answer): send()/sendEdit() already captured the question, so further
+          // edits here would silently have no effect on the in-flight turn.
+          disabled={composerLocked}
           placeholder={
             mode === "compare"
               ? `Ask one thing to compare across ${scopeSize} papers…`

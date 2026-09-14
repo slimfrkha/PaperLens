@@ -7,14 +7,28 @@ import pytest
 from rag.config import HFFaithfulnessCfg
 from rag.llm import Usage
 from rag.manifest import Manifest
+from rag.web_search import WebResult
 from server.agent import CLASSIFY_SYSTEM_PROMPT, ChatAgent
+
+
+class FakeWebSearcher:
+    """Scripted, offline web searcher — returns ``results`` for any query (or [] to script
+    a rate-limited/empty DDG)."""
+
+    def __init__(self, results: list[WebResult] | None = None) -> None:
+        self.results = results or []
+        self.queries: list[str] = []
+
+    def search(self, query: str, k: int | None = None) -> list[WebResult]:
+        self.queries.append(query)
+        return self.results
 
 
 @pytest.fixture
 def make_agent(make_searcher, seed_chunks):
     """Factory: a ChatAgent wired to a seeded searcher, manifest, and FakeLLM."""
 
-    def _make(llm, faithfulness=None):
+    def _make(llm, faithfulness=None, web_searcher=None):
         docs = [
             seed_chunks("paper-a", "Attention", "multi head latent attention kv cache"),
             seed_chunks("paper-b", "Training", "reinforcement learning recipe"),
@@ -27,7 +41,16 @@ def make_agent(make_searcher, seed_chunks):
             {"paper_id": "paper-a", "title": "Paper A", "tags": ["moe"], "arxiv_id": "2412.19437"}
         )
         manifest.upsert({"paper_id": "paper-b", "title": "Paper B", "tags": ["rl"]})
-        agent = ChatAgent(ctx.cfg, ctx.searcher, manifest, client=llm, faithfulness=faithfulness)
+        # A FakeWebSearcher by default so a test never hits the real network even if the
+        # scripted LLM calls web_search; tests that need results pass their own.
+        agent = ChatAgent(
+            ctx.cfg,
+            ctx.searcher,
+            manifest,
+            client=llm,
+            faithfulness=faithfulness,
+            web_searcher=web_searcher or FakeWebSearcher(),
+        )
         return agent
 
     return _make
@@ -855,3 +878,140 @@ def test_classify_mode_sees_full_conversation_history(make_agent, fake_llm, monk
     transcript = classifier.complete_calls[0]["user"]
     for m in messages:
         assert m["content"] in transcript
+
+
+# --- web search tool ------------------------------------------------------------------
+
+
+def _web_results():
+    return [
+        WebResult(
+            title="External Reference",
+            url="https://example.com/external-reference",
+            snippet="An explanation from the open web, not from any paper in the pool.",
+        )
+    ]
+
+
+def test_web_tool_offered_only_when_enabled_and_armed(make_agent, fake_llm):
+    """The web_search tool is in the tool list only when the config allows it AND the turn
+    opts in — a library-only turn never sees it."""
+    agent = make_agent(fake_llm(answer="hi"))
+
+    def tool_names(**run_kwargs):
+        llm = fake_llm(answer="hi")
+        agent.client = llm
+        agent.run(
+            [{"role": "user", "content": "q"}],
+            tags=[],
+            papers=[],
+            on_text=lambda _t: None,
+            **run_kwargs,
+        )
+        return [t["name"] for t in llm.run_tools_calls[0]["tools"]]
+
+    assert tool_names(web_search=True) == ["search_papers", "web_search"]
+    assert tool_names(web_search=False) == ["search_papers"]
+    # Config kill-switch wins even when the turn opts in.
+    agent.cfg.web_search.enabled = False
+    assert tool_names(web_search=True) == ["search_papers"]
+
+
+def test_web_search_builds_external_citations_and_trace(make_agent, fake_llm):
+    web = FakeWebSearcher(_web_results())
+    llm = fake_llm(
+        answer="That is covered externally [r1].",
+        tool_calls=[("web_search", {"query": "external concept"})],
+    )
+    agent = make_agent(llm, web_searcher=web)
+
+    trace: list[dict] = []
+    _text, citations, _usage = agent.run(
+        [{"role": "user", "content": "explain an outside concept"}],
+        tags=[],
+        papers=[],
+        on_text=lambda _t: None,
+        on_trace=trace.append,
+        web_search=True,
+    )
+
+    assert web.queries == ["external concept"]
+    assert len(citations) == 1
+    c = citations[0]
+    assert c["ref"] == "r1"
+    assert c["source_kind"] == "web"
+    assert c["url"] == "https://example.com/external-reference"
+    assert "paper_id" not in c and "body" not in c
+    # The action trace entry is marked as a web search so the UI renders it distinctly.
+    action = next(e for e in trace if e["type"] == "action")
+    assert action["kind"] == "web"
+
+
+def test_web_and_paper_searches_share_ref_numbering(make_agent, fake_llm):
+    web = FakeWebSearcher(_web_results())
+    llm = fake_llm(
+        answer="Paper [r1] and web [r2].",
+        tool_calls=[
+            ("search_papers", {"query": "latent attention"}),
+            ("web_search", {"query": "external concept"}),
+        ],
+    )
+    agent = make_agent(llm, web_searcher=web)
+    agent.cfg.retrieval.min_k = 1
+    agent.cfg.retrieval.max_k = 1
+
+    _text, citations, _usage = agent.run(
+        [{"role": "user", "content": "q"}],
+        tags=[],
+        papers=[],
+        on_text=lambda _t: None,
+        web_search=True,
+    )
+    assert [c["ref"] for c in citations] == ["r1", "r2"]
+    assert citations[0]["source_kind"] == "paper"
+    assert citations[1]["source_kind"] == "web"
+
+
+def test_web_search_empty_degrades_without_crashing(make_agent, fake_llm):
+    """A rate-limited/offline DDG surfaces as [] -> a graceful observation, no citation, no
+    raise (WebSearcher itself never raises; here the fake returns [])."""
+    llm = fake_llm(
+        answer="The library doesn't cover this.",
+        tool_calls=[("web_search", {"query": "obscure"})],
+    )
+    agent = make_agent(llm, web_searcher=FakeWebSearcher([]))
+
+    trace: list[dict] = []
+    _text, citations, _usage = agent.run(
+        [{"role": "user", "content": "q"}],
+        tags=[],
+        papers=[],
+        on_text=lambda _t: None,
+        on_trace=trace.append,
+        web_search=True,
+    )
+    assert citations == []
+    obs = next(e for e in trace if e["type"] == "observation")
+    assert "unavailable" in obs["text"]
+
+
+def test_faithfulness_skips_web_refs(make_agent, fake_llm, fake_faithfulness_checker):
+    """A cited web ref (no body) must not break the faithfulness pass, which scores against
+    paper bodies only."""
+    checker = fake_faithfulness_checker()
+    llm = fake_llm(
+        answer="Web says so [r1].",
+        tool_calls=[("web_search", {"query": "external concept"})],
+    )
+    agent = make_agent(llm, faithfulness=checker, web_searcher=FakeWebSearcher(_web_results()))
+
+    _text, citations, _usage = agent.run(
+        [{"role": "user", "content": "q"}],
+        tags=[],
+        papers=[],
+        on_text=lambda _t: None,
+        web_search=True,
+    )
+    # No faithfulness added to the web ref, and the checker was never called on a web body.
+    assert "faithfulness" not in citations[0]
+    assert checker.calls == []

@@ -2,7 +2,7 @@ import { MantineProvider } from "@mantine/core";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it } from "vitest";
-import type { Citation } from "../api";
+import type { Citation, WebCitation } from "../api";
 import Answer from "./Answer";
 
 function cite(ref: string, paperId: string, title: string): Citation {
@@ -75,5 +75,21 @@ describe("Answer citation marker rendering", () => {
     renderAnswer("[r10, r99] combined.", [cite("r10", "p1", "Paper One")]);
     expect(screen.queryByText("10")).not.toBeInTheDocument();
     expect(screen.getByText(/r10, r99/)).toBeInTheDocument();
+  });
+
+  it("never links an unsafe URL from an old or corrupt web citation", () => {
+    const web: WebCitation = {
+      ref: "r1",
+      source_kind: "web",
+      url: "javascript:alert(1)",
+      title: "Unsafe result",
+      snippet: "external snippet",
+    };
+
+    renderAnswer("External claim [r1].", [web]);
+
+    const marker = screen.getByText("1");
+    expect(marker).not.toHaveAttribute("href");
+    expect(marker).toHaveAccessibleName("web citation 1: invalid source URL omitted");
   });
 });

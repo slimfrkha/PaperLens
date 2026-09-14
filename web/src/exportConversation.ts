@@ -1,5 +1,14 @@
-import type { Citation, CompareRow, Feedback, StoredTurn, TraceEntry, UsageInfo } from "./api";
-import { citedCitations, REF_ID, REF_MARKER, refNumber } from "./exportAnswer";
+import type {
+  Citation,
+  CompareRow,
+  Feedback,
+  PaperCitation,
+  StoredTurn,
+  TraceEntry,
+  UsageInfo,
+} from "./api";
+import { isPaperCitation, isWebCitation } from "./api";
+import { citedCitations, REF_ID, REF_MARKER, referenceLine, refNumber } from "./exportAnswer";
 import { faithfulnessMessage, worstLabel } from "./faithfulness";
 
 // A cited citation tagged with the footnote label of the turn (or compare row) it
@@ -98,8 +107,16 @@ function reasoningBlock(trace: TraceEntry[]): string {
  *  arXiv link, then each ref's number, section, a faithfulness flag when the automated check
  *  isn't a clean support, and the passage snippet. Wrapped in a code fence by the caller. */
 function sourcesToText(cited: Citation[]): string {
-  const byPaper = new Map<string, { title: string; arxivId?: string | null; refs: Citation[] }>();
-  for (const c of cited) {
+  // Web citations carry no paper_id/section/arXiv link — mirror the "From the web" split in
+  // SourceCards rather than grouping them under an empty paper_id with undefined sections.
+  const webCited = cited.filter(isWebCitation);
+  const paperCited = cited.filter(isPaperCitation);
+
+  const byPaper = new Map<
+    string,
+    { title: string; arxivId?: string | null; refs: PaperCitation[] }
+  >();
+  for (const c of paperCited) {
     const g = byPaper.get(c.paper_id);
     if (g) g.refs.push(c);
     else byPaper.set(c.paper_id, { title: c.title, arxivId: c.arxiv_id, refs: [c] });
@@ -113,7 +130,12 @@ function sourcesToText(cited: Citation[]): string {
     });
     return `${title}${link}\n\n${items.join("\n\n")}`;
   });
-  return papers.join("\n\n");
+
+  // Each web ref as: number, title — URL, then its snippet. Web refs aren't
+  // faithfulness-checked, so no flag.
+  const web = webCited.map((c) => `[${refNumber(c)}] ${c.title} — ${c.url}\n${c.snippet}`);
+  const webBlock = web.length > 0 ? [`From the web:\n\n${web.join("\n\n")}`] : [];
+  return [...papers, ...webBlock].join("\n\n");
 }
 
 /** A collapsed-by-default "Sources" block mirroring the `SourceCards` panel under each
@@ -209,11 +231,6 @@ export function conversationToMarkdown(turns: StoredTurn[], title: string): stri
     return 0;
   });
 
-  const defs = ordered
-    .map(({ label, citation }) => {
-      const link = citation.arxiv_id ? `, https://arxiv.org/abs/${citation.arxiv_id}` : "";
-      return `[^${label}]: **${citation.title}** — ${citation.section_title}${link}`;
-    })
-    .join("\n\n");
+  const defs = ordered.map(({ label, citation }) => referenceLine(label, citation)).join("\n\n");
   return `${body}\n\n## References\n\n${defs}`;
 }

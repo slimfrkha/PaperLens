@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Citation } from "./api";
+import type { PaperCitation, WebCitation } from "./api";
 import {
   answerToBibtex,
   answerToMarkdown,
@@ -8,12 +8,24 @@ import {
   extractCitedRefs,
 } from "./exportAnswer";
 
-function citation(overrides: Partial<Citation> & { ref: string; paper_id: string }): Citation {
+function citation(
+  overrides: Partial<PaperCitation> & { ref: string; paper_id: string },
+): PaperCitation {
   return {
     title: "A Paper",
     breadcrumb: "b",
     section_title: "Method",
     snippet: "sn",
+    ...overrides,
+  };
+}
+
+function webCitation(overrides: Partial<WebCitation> & { ref: string }): WebCitation {
+  return {
+    source_kind: "web",
+    url: "https://example.com/ref",
+    title: "External Reference",
+    snippet: "external snippet",
     ...overrides,
   };
 }
@@ -106,6 +118,19 @@ describe("answerToMarkdown", () => {
     const out = answerToMarkdown("Figures reported [r10, r12].", cited);
     expect(out).toContain("Figures reported [^10][^12].");
   });
+
+  it("resolves a web citation's footnote to its URL, not paper fields as undefined", () => {
+    const cited = [
+      webCitation({
+        ref: "r2",
+        url: "https://example.com/ref",
+        title: "External Reference",
+      }),
+    ];
+    const out = answerToMarkdown("From the web [r2].", cited);
+    expect(out).not.toContain("undefined");
+    expect(out).toContain("[^2]: **External Reference** — https://example.com/ref");
+  });
 });
 
 describe("escapeBibtex", () => {
@@ -145,5 +170,21 @@ describe("answerToBibtex", () => {
   it("escapes special characters in the title", () => {
     const cited = [citation({ ref: "r1", paper_id: "p1", title: "50% Faster {Attention}" })];
     expect(answerToBibtex(cited)).toContain("title = {50\\% Faster \\{Attention\\}}");
+  });
+
+  it("skips web citations (no paper_id/arxiv_id) so no malformed @misc{,} is emitted", () => {
+    const cited = [
+      citation({ ref: "r1", paper_id: "p1", title: "Paper One", arxiv_id: "2412.19437" }),
+      webCitation({
+        ref: "r2",
+        url: "https://example.com/ref",
+        title: "External Reference",
+      }),
+    ];
+    const out = answerToBibtex(cited);
+    expect(out.match(/@misc\{/g)).toHaveLength(1);
+    expect(out).toContain("@misc{p1,");
+    expect(out).not.toContain("@misc{,");
+    expect(out).not.toContain("External Reference");
   });
 });

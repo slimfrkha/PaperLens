@@ -211,6 +211,17 @@ body {
   background: var(--mantine-color-red-filled);
   color: var(--mantine-color-white);
 }
+/* External web citations — a distinct blue so they read as "not from the library" at a
+   glance, set apart from the accent-colored paper cites and the orange/red faithfulness
+   flags. Compound selector for the same dark-mode specificity reason as the flags above. */
+.cite.cite-web {
+  background: var(--mantine-color-blue-light);
+  color: var(--mantine-color-blue-light-color);
+}
+.cite.cite-web:hover {
+  background: var(--mantine-color-blue-filled);
+  color: var(--mantine-color-white);
+}
 .cite-flag {
   margin-left: 2px;
   font-weight: 700;

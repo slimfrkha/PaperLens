@@ -4,7 +4,8 @@ Local, config-driven **agentic RAG** over arXiv model technical reports. A singl
 config under `configs/` is the source of truth; two flows hang off it — **ingestion**
 (arXiv HTML, with PDF/Docling fallback → markdown → chunk → embed → Chroma index → LLM
 tags → manifest) and **retrieval** (a FastAPI backend whose `ChatAgent` runs a ReAct loop
-with one `search_papers` tool over a two-stage `Searcher`). A Vite + React frontend streams
+with a primary `search_papers` tool over a two-stage `Searcher`, plus optional web search).
+A Vite + React frontend streams
 the answer and its Thought → Action → Observation trace over SSE. Backend is Python (`rag`
 core + `server`); frontend is `web/`.
 
@@ -74,6 +75,7 @@ src/
     llm.py             # provider-agnostic LLM backends (tool-use loop)
     manifest.py        # papers.json (paper metadata + tags)
     search.py          # Searcher: dense/hybrid recall → rerank → elbow cutoff
+    web_search.py      # keyless external search for gaps outside the paper pool
     tagger.py          # LLM tag generation
     pipeline.py        # ingest_paper: extract → index → tag → manifest
     ingest.py          # headless ingestion CLI (+ --retag, --reindex, --reextract)

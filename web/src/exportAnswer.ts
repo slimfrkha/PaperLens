@@ -1,4 +1,5 @@
-import type { Citation } from "./api";
+import type { Citation, PaperCitation } from "./api";
+import { isPaperCitation, isSafeExternalUrl, isWebCitation } from "./api";
 
 // The `[rN]` marker pattern — the one place it's defined. `Answer.tsx` imports this
 // (rather than keeping its own copy) so the two can't silently drift apart on what
@@ -48,6 +49,20 @@ export function refNumber(c: Citation): string {
   return c.ref.replace(/^r/, "");
 }
 
+/** One `## References` footnote definition line for a cited source, given its already-built
+ *  footnote `label` (a bare number here, a turn-namespaced `t2-16` in the conversation
+ *  export). A web citation resolves to its source URL; a paper citation to its section and
+ *  arXiv link — the two carry disjoint metadata (a web citation has no `section_title` or
+ *  `arxiv_id`), so both exports share this one place to get the branch right. */
+export function referenceLine(label: string, c: Citation): string {
+  if (isWebCitation(c)) {
+    const url = isSafeExternalUrl(c.url) ? c.url : "invalid web URL omitted";
+    return `[^${label}]: **${c.title}** — ${url}`;
+  }
+  const link = c.arxiv_id ? `, https://arxiv.org/abs/${c.arxiv_id}` : "";
+  return `[^${label}]: **${c.title}** — ${c.section_title}${link}`;
+}
+
 /** Converts an answer's `[rN]` markers to `[^N]` footnotes — same number already
  *  shown on-screen, not renumbered — plus a `## References` block linking out to
  *  arXiv. Returns `text` unchanged when nothing was cited, so a small-talk turn
@@ -66,10 +81,7 @@ export function answerToMarkdown(text: string, cited: Citation[]): string {
     return notes.length > 0 ? notes.join("") : m;
   });
   const sorted = [...cited].sort((a, b) => Number(refNumber(a)) - Number(refNumber(b)));
-  const lines = sorted.map((c) => {
-    const link = c.arxiv_id ? `, https://arxiv.org/abs/${c.arxiv_id}` : "";
-    return `[^${refNumber(c)}]: **${c.title}** — ${c.section_title}${link}`;
-  });
+  const lines = sorted.map((c) => referenceLine(refNumber(c), c));
   return `${processed}\n\n## References\n\n${lines.join("\n")}`;
 }
 
@@ -96,8 +108,12 @@ export function escapeBibtex(s: string): string {
  *  prefix — no author field, since the manifest doesn't store one. `paper_id` (the
  *  config-name slug) is the citation key, for the same reason. */
 export function answerToBibtex(cited: Citation[]): string {
-  const byPaper = new Map<string, Citation>();
-  for (const c of cited) if (!byPaper.has(c.paper_id)) byPaper.set(c.paper_id, c);
+  const byPaper = new Map<string, PaperCitation>();
+  // Web citations have no paper_id/arxiv_id — a BibTeX entry for them would be a malformed
+  // `@misc{,...}` with an empty key. BibTeX is for the cited papers only; skip web sources.
+  for (const c of cited.filter(isPaperCitation)) {
+    if (!byPaper.has(c.paper_id)) byPaper.set(c.paper_id, c);
+  }
 
   const entries = [...byPaper.values()].map((c) => {
     const fields = [`  title = {${escapeBibtex(c.title)}}`];

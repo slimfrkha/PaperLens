@@ -1,5 +1,5 @@
 import { Badge, Box, Group, Text } from "@mantine/core";
-import { IconSearch } from "./Icons";
+import { IconExternal, IconSearch } from "./Icons";
 import type { TraceEntry } from "../api";
 
 /** Renders a list of Thought→Action→Observation entries as a stepped timeline on a
@@ -52,15 +52,21 @@ function TraceLine({ e }: { e: TraceEntry }) {
       </Box>
     );
 
-  if (e.type === "action")
+  if (e.type === "action") {
+    const isWeb = e.kind === "web";
     return (
       <Box pos="relative" pl="md" mt={8}>
         <Dot color="accent-filled" />
         <Group gap={6} wrap="nowrap" align="center">
-          <IconSearch size={13} />
+          {isWeb ? <IconExternal size={13} /> : <IconSearch size={13} />}
           <Text size="sm" fw={500} style={{ color: "var(--mantine-color-accent-light-color)" }}>
             {e.query}
           </Text>
+          {isWeb && (
+            <Badge size="xs" variant="light" color="gray" radius="sm">
+              web
+            </Badge>
+          )}
           {e.paper && (
             <Badge size="xs" variant="outline" color="gray" radius="sm">
               {e.paper}
@@ -74,6 +80,7 @@ function TraceLine({ e }: { e: TraceEntry }) {
         </Group>
       </Box>
     );
+  }
 
   // observation
   return (

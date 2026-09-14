@@ -430,6 +430,105 @@ describe("ChatPage secondary 'Broaden recall per paper' knob (Ask mode)", () => 
     expect(sent.per_paper).toBe(true);
   });
 
+  it("sends web_search: true by default and false once toggled off", async () => {
+    const sse = "event: citations\ndata: []\n\nevent: done\ndata: \n\n";
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      void init;
+      const url = String(input);
+      if (url === "/api/chat") return Promise.resolve(mockStreamResponse(sse));
+      const body =
+        url === "/api/chats/test-id"
+          ? chatSession
+          : url.startsWith("/api/tags") ||
+              url.startsWith("/api/papers") ||
+              url.startsWith("/api/chats")
+            ? []
+            : {};
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+    await screen.findByText(/regression marker text/i);
+
+    // Default on: send with no toggle -> web_search true.
+    fireEvent.change(screen.getByPlaceholderText("Ask about a paper or a concept…"), {
+      target: { value: "first question" },
+    });
+    fireEvent.click(screen.getByLabelText("Send"));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/chat", expect.anything()));
+    const first = fetchMock.mock.calls.find(([u]) => String(u) === "/api/chat")!;
+    expect(JSON.parse((first[1] as RequestInit).body as string).web_search).toBe(true);
+
+    // Toggle off, send again -> web_search false.
+    fireEvent.click(screen.getByLabelText("Allow web search"));
+    fireEvent.change(screen.getByPlaceholderText("Ask about a paper or a concept…"), {
+      target: { value: "second question" },
+    });
+    fireEvent.click(screen.getByLabelText("Send"));
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.filter(([u]) => String(u) === "/api/chat")).toHaveLength(2),
+    );
+    const second = fetchMock.mock.calls.filter(([u]) => String(u) === "/api/chat")[1];
+    expect(JSON.parse((second[1] as RequestInit).body as string).web_search).toBe(false);
+  });
+
+  it("freezes the composer controls (mode + toggles + input) while a turn is streaming", async () => {
+    // A stream whose reader never resolves — the turn stays in flight, so `busy` stays true
+    // and the whole composer must be disabled, not just the textarea.
+    const hanging = {
+      body: { getReader: () => ({ read: () => new Promise(() => {}), cancel: () => {} }) },
+    } as unknown as Response;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      void init;
+      const url = String(input);
+      if (url === "/api/chat") return Promise.resolve(hanging);
+      const body =
+        url === "/api/chats/test-id"
+          ? chatSession
+          : url.startsWith("/api/tags") ||
+              url.startsWith("/api/papers") ||
+              url.startsWith("/api/chats")
+            ? []
+            : {};
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+    await screen.findByText(/regression marker text/i);
+
+    // Ask mode: skips the Auto classify pre-flight and surfaces the per-paper chip too.
+    fireEvent.click(screen.getByRole("radio", { name: "Ask" }));
+    fireEvent.change(screen.getByPlaceholderText("Ask about a paper or a concept…"), {
+      target: { value: "a question" },
+    });
+    fireEvent.click(screen.getByLabelText("Send"));
+
+    // Once the turn is streaming (Send has become Stop), every composer control is frozen.
+    await screen.findByLabelText("Stop generating");
+    expect(screen.getByRole("radio", { name: "Ask" })).toBeDisabled();
+    expect(screen.getByLabelText("Broaden recall per paper")).toBeDisabled();
+    expect(screen.getByLabelText("Allow web search")).toBeDisabled();
+    expect(screen.getByPlaceholderText("Ask about a paper or a concept…")).toBeDisabled();
+  });
+
   it("stays on for a second message without re-toggling", async () => {
     const sse = "event: citations\ndata: []\n\nevent: done\ndata: \n\n";
     // `init` is unused but kept in the signature so fetchMock.mock.calls types as a 2-tuple
@@ -1656,15 +1755,20 @@ describe("ChatPage side-by-side paper panel", () => {
     markdown: `## ${title}\n\nSome body text for ${title}.`,
   });
 
-  function splitFetch() {
+  function splitFetch(session: unknown = citedSession) {
     return vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       let body: unknown = {};
-      if (url === "/api/chats/test-id") body = citedSession;
+      if (url === "/api/chats/test-id") body = session;
       else if (url === "/api/chats/other-id") body = { id: "other-id", name: "Other", turns: [] };
       else if (url === "/api/papers/p1") body = paperData("p1", "Paper One");
       else if (url === "/api/papers/p2") body = paperData("p2", "Paper Two");
-      else if (url === "/api/papers/p1/annotations" || url === "/api/papers/p2/annotations")
+      else if (url === "/api/papers/p3") body = paperData("p3", "Paper Three");
+      else if (
+        url === "/api/papers/p1/annotations" ||
+        url === "/api/papers/p2/annotations" ||
+        url === "/api/papers/p3/annotations"
+      )
         body = [];
       else if (url === "/api/papers" || url.startsWith("/api/tags") || url.startsWith("/api/chats"))
         body = [];
@@ -1735,6 +1839,39 @@ describe("ChatPage side-by-side paper panel", () => {
 
     fireEvent.click(screen.getByLabelText("Next citation"));
     expect(await screen.findByText(/Some body text for Paper Two/)).toBeInTheDocument();
+    expect(screen.getByText("2/2")).toBeInTheDocument();
+  });
+
+  it("skips web refs when stepping through paper citations", async () => {
+    const mixedSession = {
+      id: "test-id",
+      name: "Mixed",
+      turns: [
+        storedTurn("q", "Paper [r1]. Web [r2]. Another paper [r3].", {
+          citations: [
+            cite("r1", "p1", "Paper One", "passage one", "Sec A"),
+            {
+              ref: "r2",
+              source_kind: "web",
+              url: "https://example.com/ref",
+              title: "External Reference",
+              snippet: "external snippet",
+            },
+            cite("r3", "p3", "Paper Three", "passage three", "Sec C"),
+          ],
+        }),
+      ],
+    };
+    vi.stubGlobal("fetch", splitFetch(mixedSession));
+    const { container } = renderChat();
+    await screen.findByText(/Another paper/);
+
+    fireEvent.click(container.querySelector("a.cite")!); // r1 → Paper One
+    expect(await screen.findByText(/Some body text for Paper One/)).toBeInTheDocument();
+    expect(screen.getByText("1/2")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText("Next citation"));
+    expect(await screen.findByText(/Some body text for Paper Three/)).toBeInTheDocument();
     expect(screen.getByText("2/2")).toBeInTheDocument();
   });
 
