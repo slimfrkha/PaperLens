@@ -114,7 +114,6 @@ Full docs live in [`docs/`](docs/README.md):
 | ⚙️ [Configuration & commands](docs/configuration.md) | Every `config.yaml` key, command, and API route. |
 | 🧩 [How-to guides](docs/how-to.md) | Add papers, swap backends, use a cloud provider. |
 | 🏛️ [Architecture](docs/architecture.md) | Chunking, two-stage retrieval, the agent loop. |
-| 🌐 [Advanced web search](docs/web-advanced.md) | Deferred design for richer web grounding. |
 | 🎛️ [Eval harness](docs/harness.md) | Tune retrieval config for your own paper pool. |
 | 🤝 [CONTRIBUTING](CONTRIBUTING.md) | Dev setup, the gate, conventions. |
 | 📖 [CONTEXT](CONTEXT.md) | Domain glossary. |
