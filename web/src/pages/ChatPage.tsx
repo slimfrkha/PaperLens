@@ -133,6 +133,20 @@ export default function ChatPage() {
   // glued together with no boundary. Set on every trace event, consumed by the next token.
   const pendingSeparatorRef = useRef(false);
 
+  // Leaving a chat abandons only that chat's active turn. The id equality matters for a
+  // brand-new chat: navigate() changes `/` to `/c/:id` just before runTurn installs its
+  // controller, and the cleanup for `/` must not abort the request that belongs to :id.
+  useEffect(
+    () => () => {
+      const controller = abortRef.current;
+      const activeId = activeChatIdRef.current;
+      if (!controller || controller.signal.aborted || activeId !== chatId) return;
+      controller.abort();
+      stopChat(activeId).catch((e) => console.error("Failed to stop generation", e));
+    },
+    [chatId],
+  );
+
   const refreshSessions = () => listChats().then(setSessions);
 
   useEffect(() => {
@@ -280,6 +294,10 @@ export default function ChatPage() {
     abortRef.current = controller;
     activeChatIdRef.current = id;
     pendingSeparatorRef.current = false;
+    const isActiveTurn = () => abortRef.current === controller && !controller.signal.aborted;
+    const patchActiveTurn = (fn: (t: Turn) => Turn) => {
+      if (isActiveTurn()) patchLast(fn);
+    };
     try {
       await chat(
         history,
@@ -292,30 +310,42 @@ export default function ChatPage() {
         id,
         {
           onToken: (tok) =>
-            patchLast((t) => {
+            patchActiveTurn((t) => {
               const sep = pendingSeparatorRef.current && t.answer && !/\n\n$/.test(t.answer);
               pendingSeparatorRef.current = false;
               return { ...t, answer: t.answer + (sep ? "\n\n" : "") + tok };
             }),
-          onCitations: (c) => patchLast((t) => ({ ...t, citations: c })),
+          onCitations: (c) => patchActiveTurn((t) => ({ ...t, citations: c })),
           onTrace: (e) => {
+            if (!isActiveTurn()) return;
             pendingSeparatorRef.current = true;
-            patchLast((t) => ({ ...t, trace: [...t.trace, e] }));
+            patchActiveTurn((t) => ({ ...t, trace: [...t.trace, e] }));
           },
-          onUsage: (u) => patchLast((t) => ({ ...t, usage: u })),
+          onUsage: (u) => patchActiveTurn((t) => ({ ...t, usage: u })),
           onCompareRow: (row) =>
-            patchLast((t) => ({ ...t, compare_results: [...(t.compare_results ?? []), row] })),
+            patchActiveTurn((t) => ({
+              ...t,
+              compare_results: [...(t.compare_results ?? []), row],
+            })),
           onMeta: () => refreshSessions(),
-          onError: (e) => patchLast((t) => ({ ...t, answer: t.answer + `\n\n_Error: ${e}_` })),
-          onDone: () => patchLast((t) => ({ ...t, streaming: false })),
+          onError: (e) =>
+            patchActiveTurn((t) => ({ ...t, answer: t.answer + `\n\n_Error: ${e}_` })),
+          onDone: () => patchActiveTurn((t) => ({ ...t, streaming: false })),
         },
         editTurn,
         controller.signal,
         sendAuto,
       );
     } finally {
-      setBusy(false);
-      refreshSessions();
+      // Only the still-active turn owns the shared UI. If a newer turn has taken over
+      // (`abortRef` reassigned), this stale finally must touch nothing — clearing the
+      // global `busy` here would report the newer turn as idle while it's mid-stream.
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        activeChatIdRef.current = null;
+        setBusy(false);
+        refreshSessions();
+      }
     }
   }
 

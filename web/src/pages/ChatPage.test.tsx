@@ -1153,6 +1153,10 @@ describe("ChatPage Ask/Compare mode", () => {
 });
 
 describe("ChatPage stop generating", () => {
+  beforeEach(() => {
+    Element.prototype.scrollIntoView = vi.fn();
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -1220,6 +1224,175 @@ describe("ChatPage stop generating", () => {
     expect(await screen.findByLabelText("Send")).toBeInTheDocument();
     const editsAfterStop = screen.getAllByLabelText("Edit message");
     expect(editsAfterStop[editsAfterStop.length - 1]).not.toBeDisabled();
+  });
+
+  it("aborts the originating turn when switching chats and ignores its later tokens", async () => {
+    const otherSession = {
+      id: "other-id",
+      name: "Other",
+      turns: [storedTurn("other question", "other answer")],
+    };
+    let releaseSecondRead: (() => void) | undefined;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/chat") {
+        let readCount = 0;
+        return Promise.resolve({
+          status: 200,
+          body: {
+            getReader: () => ({
+              read: () => {
+                readCount += 1;
+                if (readCount === 1) {
+                  return Promise.resolve({
+                    done: false,
+                    value: new TextEncoder().encode("event: token\ndata: A partial\n\n"),
+                  });
+                }
+                if (readCount === 2) {
+                  return new Promise((resolve, reject) => {
+                    releaseSecondRead = () =>
+                      resolve({
+                        done: false,
+                        value: new TextEncoder().encode("event: token\ndata: LEAKED\n\n"),
+                      });
+                    init?.signal?.addEventListener("abort", () =>
+                      reject(new DOMException("aborted", "AbortError")),
+                    );
+                  });
+                }
+                return Promise.resolve({ done: true, value: undefined });
+              },
+            }),
+          },
+        } as unknown as Response);
+      }
+      if (url === "/api/chats/test-id/stop" && init?.method === "POST") {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ stopped: true }),
+        } as Response);
+      }
+      if (url === "/api/chats") {
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve([
+              { id: "test-id", name: "Test", updated_at: "" },
+              { id: "other-id", name: "Other", updated_at: "" },
+            ]),
+        } as Response);
+      }
+      const body =
+        url === "/api/chats/test-id"
+          ? chatSession
+          : url === "/api/chats/other-id"
+            ? otherSession
+            : url.startsWith("/api/tags") || url.startsWith("/api/papers")
+              ? []
+              : {};
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/c/test-id"]}>
+          <Routes>
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+    await screen.findByText(/regression marker text/i);
+
+    fireEvent.change(screen.getByPlaceholderText("Ask about a paper or a concept…"), {
+      target: { value: "a question" },
+    });
+    fireEvent.click(screen.getByLabelText("Send"));
+    await screen.findByText("A partial");
+
+    fireEvent.click(screen.getByText("Other"));
+    await screen.findByText("other answer");
+    releaseSecondRead?.();
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/chats/test-id/stop",
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    expect(screen.queryByText(/LEAKED/)).not.toBeInTheDocument();
+    expect(screen.getByText("other answer")).toBeInTheDocument();
+  });
+
+  it("does not abort a brand-new chat's first turn when send() navigates / -> /c/:id", async () => {
+    // The riskiest branch of the switch-abort guard: creating a chat changes the route from
+    // `/` to `/c/:id` mid-send, so the `/` effect's cleanup fires while the turn is already
+    // in flight. It must NOT abort it — the turn belongs to :id, not to the `/` it left.
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/chat") {
+        let readCount = 0;
+        return Promise.resolve({
+          status: 200,
+          body: {
+            getReader: () => ({
+              read: () => {
+                // A wrong abort at the `/` cleanup trips the signal before the first read;
+                // honoring it here turns that regression into a missing token + a stop call.
+                if (init?.signal?.aborted) {
+                  return Promise.reject(new DOMException("aborted", "AbortError"));
+                }
+                readCount += 1;
+                if (readCount === 1) {
+                  return Promise.resolve({
+                    done: false,
+                    value: new TextEncoder().encode("event: token\ndata: fresh answer\n\n"),
+                  });
+                }
+                return Promise.resolve({ done: true, value: undefined });
+              },
+            }),
+          },
+        } as unknown as Response);
+      }
+      if (url === "/api/chats" && init?.method === "POST") {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ id: "new-id", name: "New", turns: [] }),
+        } as Response);
+      }
+      const body = url === "/api/chats/new-id" ? { id: "new-id", name: "New", turns: [] } : [];
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MantineProvider>
+        <MemoryRouter initialEntries={["/"]}>
+          <Routes>
+            <Route path="/" element={<ChatPage />} />
+            <Route path="/c/:chatId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>
+      </MantineProvider>,
+    );
+
+    // Ask mode skips Auto's classify pre-flight, keeping this test on the send path only.
+    fireEvent.click(await screen.findByRole("radio", { name: "Ask" }));
+    fireEvent.change(screen.getByPlaceholderText("Ask about a paper or a concept…"), {
+      target: { value: "a question" },
+    });
+    fireEvent.click(screen.getByLabelText("Send"));
+
+    // The turn survived the /->/c/new-id navigation: its token renders and the stream
+    // completes on its own (no phantom abort of the just-created chat).
+    expect(await screen.findByText("fresh answer")).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      "/api/chats/new-id/stop",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 });
 

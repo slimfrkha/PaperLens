@@ -295,7 +295,7 @@ class LLMCfg:
 @dataclass
 class RetrievalCfg:
     candidates: int = 20  # dense-recall pool size handed to the reranker
-    max_rounds: int = 8  # ReAct search/answer cycles before the agent must answer
+    max_rounds: int = 8  # ReAct calls including the final, tool-free answer call
     # Elbow cutoff: after reranking, cut at the first real drop-off in score rather than
     # always returning a fixed count. min_k/max_k bound it; elbow_mad_multiplier/
     # elbow_prominence tune how big a drop counts as "real" (see find_cutoff in search.py).
@@ -309,6 +309,8 @@ class RetrievalCfg:
     elbow_enabled: bool = True
 
     def __post_init__(self) -> None:
+        if self.max_rounds < 2:
+            raise ValueError("retrieval.max_rounds must be >= 2")
         if self.min_k > self.max_k:
             raise ValueError("retrieval.min_k must be <= retrieval.max_k")
         if self.max_k > self.candidates:

@@ -174,6 +174,8 @@ def test_incoherent_knobs_fail_at_construction():
         RetrievalCfg(min_k=30, max_k=10, candidates=20)
     with pytest.raises(ValueError, match="retrieval.max_k"):
         RetrievalCfg(min_k=2, max_k=30, candidates=20)
+    with pytest.raises(ValueError, match="retrieval.max_rounds"):
+        RetrievalCfg(max_rounds=1)
     with pytest.raises(ValueError, match="elbow_mad_multiplier"):
         RetrievalCfg(elbow_mad_multiplier=0)
     with pytest.raises(ValueError, match="elbow_prominence"):

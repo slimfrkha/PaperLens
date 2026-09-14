@@ -128,7 +128,7 @@ extraction:
 # --- Retrieval: the agentic search loop ---
 retrieval:
   candidates: 20 # dense-recall pool size handed to the reranker
-  max_rounds: 8 # ReAct search/answer cycles before the agent must answer
+  max_rounds: 8 # >=2; ReAct calls including the final, tool-free answer call
   # Elbow cutoff: after reranking, how many passages a search_papers call returns is
   # decided by the first real drop-off in score (find_cutoff in search.py), not a fixed
   # count — min_k/max_k just bound it. Starting values, not settled numbers: calibrate

@@ -226,7 +226,7 @@ both fall back to plain `max_k` truncation.
 | `elbow_mad_multiplier` | float | `3.0` | How many robust deviations (MAD, of the *other* score gaps) above baseline a gap must clear to count as a real cliff. |
 | `elbow_prominence` | float | `0.15` | How large a gap must be, relative to the score range of the candidates considered, to count as a real cliff — independent of `elbow_mad_multiplier`, both must clear. |
 | `elbow_enabled` | bool | `true` | Rollback switch to plain `max_k` truncation, no code change. `min_k`/`max_k`/the two knobs above are per-pool starting values — validate with `paperlens-eval screen --tier elbow` (see [harness](harness.md)) before trusting them; flip this off if elbow misbehaves before that's run. |
-| `max_rounds` | int | `8` | How many search/answer ReAct cycles the agent gets before it must answer. |
+| `max_rounds` | int ≥ 2 | `8` | Maximum ReAct calls per turn; the final call is tool-free so it must answer from passages already gathered. |
 
 ### 🔀 `multi_query`
 

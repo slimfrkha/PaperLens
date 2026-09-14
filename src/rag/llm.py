@@ -268,17 +268,24 @@ class LiteLLMBackend(LLMBackend):
         def usage() -> Usage:
             return Usage(total_in, total_out) if usage_complete else Usage(None, None)
 
-        for _ in range(max_rounds):
+        for round_index in range(max_rounds):
             if stop_check and stop_check():
                 return final_text, usage()
-            stream = litellm.completion(
-                messages=convo,
-                tools=oai_tools,
-                max_tokens=self.spec.max_tokens,
-                temperature=self.spec.temperature,
-                stream=True,
-                stream_options={"include_usage": True},
+            request = {
+                "messages": convo,
+                "max_tokens": self.spec.max_tokens,
+                "temperature": self.spec.temperature,
+                "stream": True,
+                "stream_options": {"include_usage": True},
                 **self._kwargs(),
+            }
+            # The configured cap promises an answer, not merely termination. Withholding
+            # tools on the last request forces the model to synthesize from the passages it
+            # already gathered instead of ending the turn on one more tool call.
+            if round_index < max_rounds - 1:
+                request["tools"] = oai_tools
+            stream = litellm.completion(
+                **request,
             )
             content = ""
             reasoning = ""

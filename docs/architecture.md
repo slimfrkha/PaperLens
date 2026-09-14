@@ -202,7 +202,9 @@ badge in the frontend's source cards.
 
 Chat is **agentic RAG** (`src/server/agent.py`): a ReAct loop over the model's native tool
 calling, not a fixed retrieve-then-generate chain. The agent has exactly one tool,
-`search_papers`.
+`search_papers`. The final call allowed by `retrieval.max_rounds` is deliberately tool-free,
+so the cap always ends in an answer synthesized from passages already gathered rather than
+an unfulfilled tool call.
 
 ```mermaid
 sequenceDiagram

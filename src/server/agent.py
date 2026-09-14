@@ -492,11 +492,9 @@ class ChatAgent:
         paper_ids = self._resolve_paper_ids(tags, papers, fallback_to_manifest=per_paper)
         citations: list[dict] = []
         counter = {"n": ref_start}
-        # max_rounds counts ReAct rounds, not searches, and the harness doesn't reserve
-        # a final round to answer in — if the model spends every round on tool calls it
-        # returns with no real answer. Budget one fewer than the true round cap so the
-        # model treats the last round as the one it must spend answering, not searching.
-        search_budget = max(self.cfg.retrieval.max_rounds - 1, 1)
+        # The backend reserves max_rounds' final call for a tool-free answer, so every
+        # earlier call is available for at most one search.
+        search_budget = self.cfg.retrieval.max_rounds - 1
 
         def trace(entry: dict):
             if on_trace:

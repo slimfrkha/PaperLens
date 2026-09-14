@@ -216,14 +216,22 @@ def test_run_tools_usage_unknown_when_any_round_omits_it(monkeypatch):
     assert usage.output_tokens is None
 
 
-def test_run_tools_stops_at_max_rounds_without_a_final_answer(monkeypatch):
-    # If the LLM keeps calling tools every round (a stuck ReAct loop, or a misbehaving
-    # client), the loop must not spin forever — it should stop after exactly `max_rounds`
-    # rounds and return whatever text the last round produced, not raise or keep querying.
-    def tool_only_round():
-        return [_chunk(tool_call=_tool_call(0, "call_1", "search_papers", '{"query": "mla"}'))]
+def test_run_tools_reserves_the_last_round_for_a_final_answer(monkeypatch):
+    # A model that always chooses a tool when one is available must still answer: the
+    # final request omits tools, turning the configured cap into a hard answer boundary.
+    class ToolUntilForced:
+        def __init__(self):
+            self.kwargs_seen: list[dict] = []
 
-    fake = _FakeCompletionSeq([tool_only_round() for _ in range(3)])
+        def __call__(self, **kwargs):
+            self.kwargs_seen.append(kwargs)
+            if "tools" in kwargs:
+                return iter(
+                    [_chunk(tool_call=_tool_call(0, "call_1", "search_papers", '{"query": "mla"}'))]
+                )
+            return iter([_chunk(content="Final answer from the gathered passages [r1].")])
+
+    fake = ToolUntilForced()
     backend = _backend(monkeypatch, fake)
 
     executed = []
@@ -235,9 +243,11 @@ def test_run_tools_stops_at_max_rounds_without_a_final_answer(monkeypatch):
         max_rounds=3,
     )
 
-    assert fake.calls == 3  # queried exactly max_rounds times, not more
-    assert len(executed) == 3  # every round's tool call still ran
-    assert out == ""  # no round ever produced visible text — nothing to fabricate as an answer
+    assert len(fake.kwargs_seen) == 3
+    assert all("tools" in kwargs for kwargs in fake.kwargs_seen[:-1])
+    assert "tools" not in fake.kwargs_seen[-1]
+    assert len(executed) == 2
+    assert out == "Final answer from the gathered passages [r1]."
 
 
 # ---- malformed tool-call JSON: now one guarded site for every provider ------
