@@ -165,7 +165,9 @@ wrong (garbled, or just an author/org name), use the paper_id instead — the \
 id is always the paper's real identity. If \
 papers disagree, present both attributed positions rather than reconciling \
 them, and say when a passage only partially answers. Only cite refs you \
-actually received. Be concise and technical.
+actually received. Be concise and technical. Format LaTeX inline math with \
+`$...$` and display math with standalone `$$...$$` lines; never use \
+`\\(...\\)` or `\\[...\\]` delimiters.
 
 {filter_note}
 Papers in scope: {papers}"""
@@ -228,6 +230,9 @@ model size in each paper?") — use one when it fits. A table does not exempt yo
 citing: every cell that states a fact still needs its [rN] marker in that same cell, \
 e.g. "7B [r3]", exactly like a prose sentence would. A table with no markers at all is \
 not an acceptable answer.
+
+Format LaTeX inline math with `$...$` and display math with standalone `$$...$$` lines; \
+never use `\\(...\\)` or `\\[...\\]` delimiters.
 
 A search tool is available but you should not need it — everything required is already in \
 the per-paper answers below. Only search again if a per-paper answer is genuinely missing \

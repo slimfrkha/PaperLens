@@ -234,6 +234,19 @@ def test_filter_scopes_the_paper_catalog_in_the_prompt(make_agent, fake_llm):
     assert "Paper B" in full and "Paper A" in full
 
 
+def test_agent_prompt_requests_renderer_compatible_latex(make_agent, fake_llm):
+    llm = fake_llm(answer="x", tool_calls=[])
+    make_agent(llm).run(
+        [{"role": "user", "content": "show me a formula"}],
+        tags=[],
+        papers=[],
+        on_text=lambda _t: None,
+    )
+    system = llm.run_tools_calls[0]["system"]
+    assert "inline math with `$...$`" in system
+    assert "never use `\\(...\\)` or `\\[...\\]`" in system
+
+
 def test_empty_query_is_rejected(make_agent, fake_llm):
     llm = fake_llm(answer="done", tool_calls=[("search_papers", {"query": "   "})])
     agent = make_agent(llm)
@@ -621,6 +634,23 @@ def test_synthesis_call_gets_full_history_and_the_defensive_search_tool(make_age
     assert synthesis_call["messages"] == messages  # full history, not just the last message
     assert synthesis_call["tools"] == [agent.search_tool]
     assert synthesis_call["max_rounds"] == 2
+
+
+def test_synthesis_prompt_requests_renderer_compatible_latex(make_agent, fake_llm):
+    llm = fake_llm(answer="Combined answer.", tool_calls=[])
+    agent = make_agent(llm)
+
+    agent.compare(
+        [{"role": "user", "content": "compare the formulas"}],
+        tags=[],
+        papers=[],
+        on_text=lambda _t: None,
+        on_row=lambda _r: None,
+    )
+
+    system = llm.run_tools_calls[-1]["system"]
+    assert "inline math with `$...$`" in system
+    assert "never use `\\(...\\)` or `\\[...\\]`" in system
 
 
 def test_synthesis_failure_retries_with_trimmed_history(make_agent):

@@ -5,6 +5,7 @@ import Markdown from "./Markdown";
 import type { Citation, FaithfulnessClaim } from "../api";
 import { isSafeExternalUrl, isWebCitation } from "../api";
 import { REF_ID, REF_MARKER, extractCitedRefs, refNumber } from "../exportAnswer";
+import { normalizeLatexMath } from "../markdownMath";
 import {
   createClaimResolver,
   faithfulnessColor,
@@ -202,7 +203,7 @@ export default function Answer({
   // Keep the internal `cite:` scheme; react-markdown's default sanitizer drops it.
   return (
     <Markdown components={components} urlTransform={(url) => url}>
-      {processed}
+      {normalizeLatexMath(processed)}
     </Markdown>
   );
 }
