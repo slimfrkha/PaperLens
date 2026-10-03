@@ -257,9 +257,9 @@ key. Web results are **external**: they're cited to their URL and rendered as se
 faithfulness-checked. The model is prompted to search the papers first and reach for the web
 only for genuine gaps.
 
-`enabled` defaults to `true` (on), but it's still **off by default per turn's toggle only
-when the user flips it** — the `web_search` UI chip (and the request's `web_search` flag)
-turns it off for a library-only answer. Set `enabled: false` to remove the tool entirely for
+`enabled` defaults to `true` (on), and each turn is on by default too — the `web_search` UI
+chip (and the request's `web_search` flag, default `true`) turns it off for a library-only
+answer. Set `enabled: false` to remove the tool entirely for
 a curated pool. Web search never runs under Compare mode. Web and paper searches share the
 same per-turn `retrieval.max_rounds` budget.
 

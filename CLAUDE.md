@@ -74,20 +74,26 @@ src/
     index.py           # chunk → embed → upsert (Chroma)
     llm.py             # provider-agnostic LLM backends (tool-use loop)
     manifest.py        # papers.json (paper metadata + tags)
+    config_writer.py   # comment-preserving add/remove of papers in config.yaml
+    sparse.py          # BM25 + reciprocal rank fusion for hybrid retrieval
+    query_expansion.py # multi-query paraphrase generation
     search.py          # Searcher: dense/hybrid recall → rerank → elbow cutoff
+    faithfulness.py    # optional post-generation citation check
     web_search.py      # keyless external search for gaps outside the paper pool
+    cited_papers.py    # arXiv ids cited by pooled papers (Admin suggestions)
     tagger.py          # LLM tag generation
     pipeline.py        # ingest_paper: extract → index → tag → manifest
     ingest.py          # headless ingestion CLI (+ --retag, --reindex, --reextract)
   server/              # FastAPI backend + in-process ingestion worker (composes rag)
     main.py            # create_app: wires manifest, worker, lazy ChatAgent; all routes
     agent.py           # ChatAgent: ReAct loop, search_papers tool, ref/citation registry
+    chat_turn.py       # run_turn: one chat turn — run, persist, stream; Stop handling
     worker.py          # IngestionWorker: background thread over pending papers
-    chats.py schemas.py
+    chats.py annotations.py schemas.py
   eval/                # per-pool config optimizer (composes rag; see docs/harness.md)
-    cli.py             # gen / run / screen / sweep / confirm
-    fingerprint.py queryset.py genfilter.py metrics.py stats.py
-    index_isolated.py optimizer.py harness.py
+    cli.py             # gen / run / screen / sweep / confirm / per-paper / comparative
+    fingerprint.py queryset.py genfilter.py metrics.py stats.py checkpoint.py
+    index_isolated.py optimizer.py harness.py comparative_queryset.py comparative_metrics.py
 web/                   # Vite + React + Mantine frontend (SSE chat, trace, paper viewer)
 tests/                 # unit/ + integration/ (no __init__.py; importlib mode)
   data/                # static fixtures, e.g. the faithfulness calibration golden set
@@ -105,7 +111,7 @@ the leaf modules — the internal layout may change.
 `rag` modules import in **one direction only, no cycles** (graph in `src/rag/__init__.py`):
 
 ```text
-config  chunking  extract  manifest  sparse  config_writer  →  embedders  llm  index  reranker
+config  chunking  extract  manifest  sparse  config_writer  cited_papers  →  embedders  llm  index  reranker
    →  tagger  query_expansion  search  →  pipeline  →  ingest
 ```
 
@@ -177,7 +183,8 @@ server hosts the worker, so it reads every field). Don't widen `IngestConfig` fo
   a new/renamed term → [CONTEXT.md](CONTEXT.md); a change to `src/eval/` or the
   `paperlens-eval` flow → [docs/harness.md](docs/harness.md); any new feature (user-facing or
   internal) → [docs/features.md](docs/features.md). A change isn't done until docs agree.
-  After doc edits, run `uv run python scripts/check_docs.py`.
+  Diagrams under `docs/assets/diagrams/` are generated: edit `scripts/diagrams.py` and rerun
+  it. After doc edits, run `uv run python scripts/check_docs.py`.
 
 Full contributor guide: [CONTRIBUTING.md](CONTRIBUTING.md). Recipes for adding a paper,
 LLM backend, or embedder: [docs/how-to.md](docs/how-to.md).

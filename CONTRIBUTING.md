@@ -66,18 +66,21 @@ src/
     index.py           # chunk → embed → upsert (Chroma)
     llm.py             # provider-agnostic LLM backends (tool-use loop)
     manifest.py        # papers.json (paper metadata + tags)
+    config_writer.py   # comment-preserving add/remove of papers in config.yaml
     sparse.py          # BM25 + reciprocal rank fusion for hybrid retrieval
     query_expansion.py # multi-query paraphrase generation
     search.py          # Searcher: dense/hybrid recall → rerank → elbow cutoff
     faithfulness.py    # optional post-generation citation check
+    web_search.py      # keyless external search for gaps outside the paper pool
+    cited_papers.py    # arXiv ids cited by pooled papers (Admin suggestions)
     tagger.py          # LLM tag generation
     pipeline.py        # extract → index → tag → manifest
     ingest.py          # headless ingestion CLI (+ --retag, --reindex, --reextract)
   server/              # FastAPI backend + in-process ingestion worker (composes rag)
-    main.py agent.py worker.py chats.py schemas.py
+    main.py agent.py chat_turn.py worker.py chats.py annotations.py schemas.py
   eval/                # per-pool config optimizer (composes rag; see docs/harness.md)
-    cli.py fingerprint.py queryset.py genfilter.py metrics.py stats.py
-    index_isolated.py optimizer.py harness.py
+    cli.py fingerprint.py queryset.py genfilter.py metrics.py stats.py checkpoint.py
+    index_isolated.py optimizer.py harness.py comparative_queryset.py comparative_metrics.py
 web/                   # Vite + React + Mantine frontend
 tests/                 # unit/ + integration/
 docs/                  # documentation hub (see docs/README.md)
@@ -91,10 +94,10 @@ leaf modules — the internal layout may change.
 ## 🧭 Architecture you must preserve
 
 The `rag` modules import in **one direction only — no cycles**. The graph is documented in
-`src/rag/__init__.py` and explained in [docs/architecture.md](docs/architecture.md):
+`src/rag/__init__.py` and drawn in [docs/architecture.md](docs/architecture.md#-layering-server-composes-rag):
 
 ```text
-config  chunking  extract  manifest  sparse  config_writer   →   embedders  llm  index  reranker
+config  chunking  extract  manifest  sparse  config_writer  cited_papers   →   embedders  llm  index  reranker
    →   tagger  query_expansion  search   →   pipeline   →   ingest
 ```
 
@@ -152,6 +155,8 @@ change**:
 - a new or renamed domain term → [CONTEXT.md](CONTEXT.md)
 - a change to `src/eval/` or the `paperlens-eval` flow → [docs/harness.md](docs/harness.md)
 - any new user-facing or internal feature → [docs/features.md](docs/features.md)
+- a change to something a diagram shows → edit `scripts/diagrams.py`, then
+  `uv run python scripts/diagrams.py` (writes `docs/assets/diagrams/*.svg`)
 
 Docs that contradict the code are worse than no docs. A change isn't done until they agree.
 Run `uv run python scripts/check_docs.py` after editing documentation; it checks local links,

@@ -17,13 +17,7 @@ that only exist once something runs unattended or serves multiple people at once
 
 ## 🛠️ How it works
 
-```text
-config.yaml ─┬─> ingestion worker: arXiv HTML → markdown → index (Chroma) ‖ LLM tags
-             │                         └─ PDF/Docling fallback
-             └─> FastAPI backend ── agentic RAG ──> LLM (Anthropic | Gemini | OpenAI-compatible)
-                       │  tools: search_papers → Searcher; optional web_search → DuckDuckGo
-                       └─> React + Vite + Mantine UI: Chat · Papers · Notes · Admin
-```
+![Two flows, one index: config.yaml drives the ingestion worker and the ChatAgent, which meet at the RAG DB](docs/assets/diagrams/overview.svg)
 
 - ✂️ **Chunking** is section-aware with hierarchical breadcrumbs rebuilt from the
   paper's section numbering (`src/rag/chunking.py`).

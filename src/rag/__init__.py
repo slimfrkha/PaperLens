@@ -14,7 +14,7 @@ Module layering — imports flow one way (top -> bottom); there are no cycles::
                               |                        |
                          pipeline(extract, index, manifest, tagger)
                               |
-                         ingest(pipeline, index, manifest, tagger)
+                         ingest(pipeline, manifest, tagger)
 
 ``faithfulness(config)`` and ``web_search(config)`` are sibling leaf-plus-config modules
 like ``embedders``/``llm`` (each depends only on ``config``), but aren't part of the

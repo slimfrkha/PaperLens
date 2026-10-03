@@ -47,13 +47,7 @@ here when you want to go deeper.
 
 ## 🗺️ The shape of the system
 
-```text
-config.yaml ─┬─> ingestion worker: arXiv HTML → markdown → index (Chroma) → LLM tags
-             │                         └─ PDF/Docling fallback
-             └─> FastAPI backend ── agentic RAG ──> LLM (Anthropic | Gemini | OpenAI-compatible)
-                       │  tools: search_papers → Searcher; optional web_search → DuckDuckGo
-                       └─> React + Vite + Mantine UI: Chat · Papers · Notes · Admin
-```
+![Two flows, one index: config.yaml drives the ingestion worker and the ChatAgent, which meet at the RAG DB](assets/diagrams/overview.svg)
 
 Two flows meet at the vector index: **ingestion** fills it, **retrieval** reads it.
 See [Architecture](architecture.md) for the full picture. 🏛️

@@ -9,40 +9,16 @@
 Everything hangs off `config.yaml` and splits into two flows that meet at the vector index
 (Chroma):
 
-```mermaid
-flowchart LR
-  cfg[config.yaml] --> ing
-  cfg --> srv
-  subgraph ing[Ingestion — write path]
-    html[arXiv HTML] --> ex[normalize]
-    html -. unavailable/invalid .-> pdf[PDF + Docling fallback] --> ex
-    ex --> ck[chunk] --> ix[(index: Chroma)] --> mf[(manifest)]
-    ex --> tg[tag: LLM] --> mf
-  end
-  subgraph srv[Retrieval — read path]
-    q([user question]) -->|1 · ask| agent
-    agent[ChatAgent · ReAct loop] <-->|2 · reason · decide| llm[LLM backend]
-    agent -->|3 · search_papers| searcher[Searcher]
-    searcher -->|4a · dense recall| ix
-    searcher -.->|4b · lexical recall, opt-in| bm25[(BM25)]
-    searcher -->|5 · fuse RRF → rerank → elbow cutoff| rr[Reranker]
-    searcher -.->|6 · passages| agent
-    agent -->|7 · answer + [rN] citations| fc{{faithfulness check, opt-in}}
-    fc -.->|8 · verdicts| agent
-    agent -.->|9 · answer + citations + verdicts · SSE| ui([web UI])
-  end
-```
+![Two flows, one index: config.yaml drives the ingestion worker and the ChatAgent, which meet at the RAG DB](assets/diagrams/overview.svg)
 
 Reading the read path: a **question** enters the **ChatAgent**, which loops with the **LLM
-backend** (each turn a **Thought**) and, when it needs evidence, calls its one tool
-`search_papers` (an **Action**). The **Searcher** runs dense **recall** of `candidates` from
-the index — plus, when **hybrid retrieval** is on, BM25 lexical recall fused in via **RRF** —
-then **rerank**s and applies an **elbow cutoff**, returning the **passages** (the
-**Observation**). The agent
-threads them into an answer with `[rN]` **citations**; when the **faithfulness check** is on,
-each cited sentence is verified against its passage and gets a **verdict** before the answer
-streams to the UI over SSE. Solid arrows are calls; dotted arrows are what comes back or are
-opt-in.
+backend** (each turn a **Thought**) and, when it needs evidence, calls `search_papers` (an
+**Action**) — or, for gaps outside the pool, the opt-in `web_search` tool. The **Searcher**
+recalls candidates from the index, **rerank**s them and applies an **elbow cutoff**, returning
+the **passages** (the **Observation**; see [Retrieval](#-retrieval-three-stages)). The agent
+threads them into an answer with `[rN]` **citations**, optionally checked by the
+**faithfulness check**, and streams it to the UI over SSE (see [the agent](#-the-agent-retrieval-as-a-tool)).
+Blue arrows are HTTP/API calls; dashed ones are config or per-message opt-ins.
 
 **Ingestion** fills the index; **retrieval** reads it. They share only the on-disk index
 and manifest, so you can re-ingest without touching the server and vice versa.
@@ -70,6 +46,8 @@ Steps 3 (index) and 4 (tag) run **concurrently** — tags live in the manifest, 
 chunk metadata, so neither needs the other's output; they meet at the manifest write. The
 compute-bound embedder and the I/O-bound LLM call overlap for free. (This is also why
 `--retag` can regenerate tags without re-indexing.)
+
+![Ingestion flowchart: reuse cached markdown or extract HTML with a Docling fallback, then index and tag concurrently into the manifest](assets/diagrams/ingestion.svg)
 
 Extraction also prepares figures for the paper viewer when `extraction.render_images` is
 on (default). HTML extraction downloads LaTeXML's figure URLs directly; the Docling
@@ -118,11 +96,15 @@ numeric heading tag, matching Docling's output shape. The section **numbering** 
 text (`2`, `2.1`, `2.1.1`) still encodes hierarchy. So PaperLens:
 
 - splits on `##` boundaries,
-- rebuilds the hierarchy into a **breadcrumb** (e.g. `2.1.1 Multi-Head Latent Attention`),
+- rebuilds the hierarchy into a **breadcrumb** — the paper title plus each numbered ancestor,
+  joined by ` > ` (e.g. `<title> > 2 Architecture > 2.1 Basic Architecture > 2.1.1
+  Multi-Head Latent Attention`),
 - prepends the breadcrumb to the chunk so the **embedding carries its context**,
 - drops noise sections (references, TOCs, author blocks, figure/caption fragments),
 - and normalizes size: big sections split on paragraph/table boundaries with overlap, tiny
   ones are merged or dropped.
+
+![Breadcrumb tree: section numbers rebuild the hierarchy prepended to each chunk](assets/diagrams/breadcrumb.svg)
 
 The size thresholds and noise heuristics (`max_tokens`, `overlap_tokens`, `min_tokens`,
 `noise_ratio`, `extra_skip_titles`) are config, not constants — they're tuned for dense
@@ -133,6 +115,8 @@ A `Chunk` therefore stores both `text` (breadcrumb + body, what gets embedded) a
 (shown to the reader). This is why citations can name the exact section.
 
 ## 🎯 Retrieval: three stages
+
+![Retrieval flowchart: dense and optional BM25 recall, rerank, then elbow cutoff or max_k truncation](assets/diagrams/retrieval.svg)
 
 `Searcher.search` (`src/rag/search.py`) is deliberately three-stage:
 
@@ -207,28 +191,7 @@ second tool, `web_search`. The final call allowed by `retrieval.max_rounds` is d
 tool-free, so the cap always ends in an answer synthesized from passages already gathered
 rather than an unfulfilled tool call.
 
-```mermaid
-sequenceDiagram
-  participant U as User
-  participant A as ChatAgent
-  participant L as LLM backend
-  participant S as Searcher
-  participant F as FaithfulnessChecker
-  U->>A: question
-  A->>L: run_tools(system, messages, [search_papers])
-  loop until answered
-    L-->>A: Thought / tool call (Action)
-    A->>S: search(query, paper_ids)
-    S-->>A: passages (Observation)
-    A->>L: tool result
-  end
-  L-->>A: answer with [rN] citations
-  opt faithfulness.enabled
-    A->>F: verify cited sentences vs cited passages
-    F-->>A: verdict per citation
-  end
-  A-->>U: streamed answer + trace (+ verdicts)
-```
+![Sequence of one agent turn: tool loop, streamed trace and tokens, optional faithfulness check](assets/diagrams/agent-turn.svg)
 
 Why a tool instead of always retrieving:
 
@@ -338,24 +301,7 @@ layer up, at the agent, not the retriever: `ChatAgent.compare` runs the question
 paper as an independent `ChatAgent.run` call scoped to that one paper, then makes one more
 model call to synthesize every per-paper answer into a single comparative answer.
 
-```mermaid
-sequenceDiagram
-  participant U as User
-  participant C as ChatAgent.compare
-  participant R as ChatAgent.run (x N, one per paper)
-  participant L as LLM backend
-  U->>C: question, N papers in scope
-  loop once per paper
-    C->>R: run(messages, papers=[paper_id])
-    R-->>C: that paper's own answer + citations + trace
-  end
-  C->>L: run_tools(SYNTHESIS_SYSTEM_PROMPT, per-paper answers)
-  L-->>C: synthesized answer, reusing each [rN] marker
-  opt faithfulness.enabled
-    C->>C: check synthesized text vs union of all cited passages
-  end
-  C-->>U: synthesized answer (+ per-paper carousel drill-down)
-```
+![Compare-mode sequence: one agent turn per paper, then a synthesis call and a second faithfulness check](assets/diagrams/compare.svg)
 
 Design decisions worth knowing the *why* of:
 
@@ -397,6 +343,19 @@ Design decisions worth knowing the *why* of:
   and frontend citation rendering — a parsing-tolerance fix, not a change to what markers the
   system prompts ask the model to produce.
 
+### 🤖 Auto mode: choosing Ask or Compare
+
+The composer's default **Auto** setting picks Ask or Compare per question before the turn is
+sent: a pre-flight `POST /api/chat/classify` asks the cheap tagging-tier LLM
+(`ChatAgent.classify_mode`, with the papers catalog in its prompt) whether the question needs
+Compare's per-paper guarantee. Below two papers in scope the LLM call is skipped, and any
+classifier error or the client's 10-second timeout falls back to Ask — the always-safe,
+always-cheaper path. It's a separate round trip rather than part of the SSE stream because a
+Compare over more than 12 papers asks the user to confirm first, and a stream can't pause for
+a dialog.
+
+![Auto-mode flowchart: scope check, classifier, 12-paper confirm, Ask or Compare](assets/diagrams/auto-mode.svg)
+
 ## 🗂️ Swappable backends: the ChoiceRegistry pattern
 
 Embedders, rerankers, sparse backends, faithfulness backends, and LLM backends are selected by
@@ -408,6 +367,8 @@ straight to a variant dataclass carrying only that backend's fields. Adding a ba
 and an unknown `type` or stray field fails loudly at load. See
 [How-to: add a backend](how-to.md#add-a-new-llm-backend). This is what lets "the LLM is an
 opaque config value" hold true across Anthropic, OpenAI-compatible servers, and Gemini.
+
+![The five ChoiceRegistry bases under Config, with the reranker variants expanded](assets/diagrams/registries.svg)
 
 The config itself is loaded by draccus (dataclass decoding) with OmegaConf `${...}`
 interpolation layered in; `parse_config` adds per-field CLI overrides that feed
@@ -424,19 +385,21 @@ every field.
 
 ## 🧱 Layering: `server` composes `rag`
 
+![Import layers from leaf modules up to server and eval](assets/diagrams/layering.svg)
+
 The Python packages import in one direction only — no cycles:
 
 ```text
-config  chunking  extract  manifest  sparse  config_writer       (leaves: no intra-rag deps)
+config  chunking  extract  manifest  sparse  config_writer  cited_papers   (leaves: no intra-rag deps)
   embedders(config)   llm(config)   index(chunking, embedders)   reranker(config, llm)
   tagger(llm)   query_expansion(llm)   search(embedders, reranker, sparse, query_expansion)
   pipeline(extract, index, manifest, tagger)
-  ingest(pipeline, index, manifest, tagger)
+  ingest(pipeline, manifest, tagger)
 ```
 
-`faithfulness(config)` is a sibling leaf-plus-config module (depends only on `config`, like
-`embedders`/`llm`) but sits outside this flow — it's composed directly by `server.agent`, not
-by `search`/`pipeline`.
+`faithfulness(config)` and `web_search(config)` are sibling leaf-plus-config modules (each
+depends only on `config`, like `embedders`/`llm`) but sit outside this flow — they're composed
+directly by `server.agent`, not by `search`/`pipeline`.
 
 `rag` is the config-driven core (ingestion + retrieval). `server` composes it behind a
 FastAPI app and the in-process ingestion worker, and **never** the reverse. The full graph
@@ -525,9 +488,13 @@ first-class field everywhere) isn't pluggable the same way.
   the UI renders the answer and the Thought → Action → Observation trace as they happen.
   A final `usage` event carries the turn's token counts (when the LLM backend reports them)
   and wall-clock latency, shown as a small metadata line under the answer.
+The next three facts are one lifecycle — a turn's guard, streaming, Stop, and release:
+
+![Lifecycle of one chat turn: guard, streaming, persist, release, with Stop, Compare fallback, 409 and error paths](assets/diagrams/turn-lifecycle.svg)
+
 - **Edit-and-resume is a destructive truncate, not a branch.** Editing an earlier query
-  (`edit_index` on `ChatRequest`) truncates the stored session's parallel arrays back to
-  that turn (`ChatStore.truncate_at`) before resuming — there's no branch history, the
+  (`edit_turn` on `ChatRequest`) drops that stored turn and every later one
+  (`ChatStore.truncate_before`) before resuming — there's no branch history, the
   discarded tail is gone. A per-chat single-flight guard (`ChatStore.try_acquire`/
   `release`) rejects a second `/api/chat` turn on the same `chat_id` with 409 while one is
   in flight, so the truncate-then-append can't interleave with a concurrent request and

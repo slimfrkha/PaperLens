@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 840" width="960" height="840" role="img" aria-labelledby="auto-mode-title auto-mode-desc">
+<title id="auto-mode-title">Auto mode: Ask or Compare?</title>
+<desc id="auto-mode-desc">Auto mode sends an Ask turn with fewer than two papers or on any classifier failure; if the tagging-tier classifier says Compare and more than twelve papers are in scope, the user must confirm before a Compare turn is sent.</desc>
+<defs>
+<marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+<marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
+<marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+<marker id="arrow-open" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polyline points="0 0, 8 3, 0 6" fill="none" stroke="#4f5d75" stroke-width="1.2"/></marker>
+</defs>
+<rect width="100%" height="100%" fill="#f5f5f5"/>
+<path d="M 400,80 V 120" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 312,160 H 168 Q 160,160 160,168 V 360" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 400,200 V 240" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 400,304 V 344" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 312,384 H 240" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 400,424 V 464" fill="none" stroke="#eb6c36" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
+<path d="M 488,504 H 632 Q 640,504 640,512 V 540" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 400,544 V 584" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 488,624 H 632 Q 640,624 640,616 V 588" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 400,664 V 704" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<rect x="226.0" y="140" width="28" height="12" rx="2" fill="#f5f5f5"/>
+<text x="240" y="149" fill="#7a8399" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.06em">NO</text>
+<rect x="408.0" y="214" width="32" height="12" rx="2" fill="#f5f5f5"/>
+<text x="424.0" y="223" fill="#7a8399" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.06em">YES</text>
+<rect x="240.0" y="364" width="72" height="12" rx="2" fill="#f5f5f5"/>
+<text x="276" y="373" fill="#7a8399" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.06em">NO / ERROR</text>
+<rect x="408.0" y="438" width="56" height="12" rx="2" fill="#f5f5f5"/>
+<text x="436.0" y="447" fill="#eb6c36" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.06em">COMPARE</text>
+<rect x="546.0" y="484" width="28" height="12" rx="2" fill="#f5f5f5"/>
+<text x="560" y="493" fill="#7a8399" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.06em">NO</text>
+<rect x="408.0" y="558" width="32" height="12" rx="2" fill="#f5f5f5"/>
+<text x="424.0" y="567" fill="#7a8399" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.06em">YES</text>
+<rect x="544.0" y="604" width="32" height="12" rx="2" fill="#f5f5f5"/>
+<text x="560" y="613" fill="#7a8399" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.06em">YES</text>
+<rect x="408.0" y="678" width="60" height="12" rx="2" fill="#f5f5f5"/>
+<text x="438.0" y="687" fill="#7a8399" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.06em">DECLINED</text>
+<rect x="320" y="32" width="160" height="48" rx="20" fill="#f5f5f5"/>
+<rect x="320" y="32" width="160" height="48" rx="20" fill="rgba(79,93,117,0.10)" stroke="#7a8399" stroke-width="1"/>
+<text x="400.0" y="54.0" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">Send in Auto</text>
+<text x="400.0" y="69.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">full history</text>
+<polygon points="400,120 488,160 400,200 312,160" fill="#f5f5f5"/>
+<polygon points="400,120 488,160 400,200 312,160" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<text x="400" y="158" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">≥ 2 papers?</text>
+<text x="400" y="173" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">resolved scope</text>
+<rect x="320" y="240" width="160" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="320" y="240" width="160" height="64" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
+<rect x="328" y="246" width="28" height="12" rx="2" fill="none" stroke="rgba(235,108,54,0.50)" stroke-width="0.8"/>
+<text x="342.0" y="255" fill="#eb6c36" font-size="7" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.08em">LLM</text>
+<text x="400.0" y="278.0" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">Classify</text>
+<text x="400.0" y="293.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">tagging tier · 10s cap</text>
+<polygon points="400,344 488,384 400,424 312,384" fill="#f5f5f5"/>
+<polygon points="400,344 488,384 400,424 312,384" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<text x="400" y="382" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">Says COMPARE?</text>
+<text x="400" y="397" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">one-word reply</text>
+<polygon points="400,464 488,504 400,544 312,504" fill="#f5f5f5"/>
+<polygon points="400,464 488,504 400,544 312,504" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<text x="400" y="502" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">&gt; 12 papers?</text>
+<text x="400" y="517" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">confirm threshold</text>
+<polygon points="400,584 488,624 400,664 312,624" fill="#f5f5f5"/>
+<polygon points="400,584 488,624 400,664 312,624" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<text x="400" y="622" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">User confirms?</text>
+<text x="400" y="637" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">dialog</text>
+<rect x="80" y="360" width="160" height="48" rx="20" fill="#f5f5f5"/>
+<rect x="80" y="360" width="160" height="48" rx="20" fill="rgba(79,93,117,0.10)" stroke="#7a8399" stroke-width="1"/>
+<text x="160.0" y="382.0" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">Ask turn</text>
+<text x="160.0" y="397.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">pooled answer</text>
+<rect x="560" y="540" width="160" height="48" rx="20" fill="#f5f5f5"/>
+<rect x="560" y="540" width="160" height="48" rx="20" fill="rgba(79,93,117,0.10)" stroke="#7a8399" stroke-width="1"/>
+<text x="640.0" y="562.0" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">Compare turn</text>
+<text x="640.0" y="577.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">one run per paper</text>
+<rect x="320" y="704" width="160" height="48" rx="20" fill="#f5f5f5"/>
+<rect x="320" y="704" width="160" height="48" rx="20" fill="rgba(79,93,117,0.10)" stroke="#7a8399" stroke-width="1"/>
+<text x="400.0" y="726.0" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">Not sent</text>
+<text x="400.0" y="741.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">composer keeps text</text>
+<text x="512" y="156" fill="#2d3142" font-size="14" font-style="italic" font-family="'Instrument Serif', Georgia, 'Times New Roman', serif" text-anchor="start">Below 2 papers Compare is impossible,</text>
+<text x="512" y="174" fill="#2d3142" font-size="14" font-style="italic" font-family="'Instrument Serif', Georgia, 'Times New Roman', serif" text-anchor="start">so no LLM call is made.</text>
+<path d="M 508,162 Q 498,160 490,160" fill="none" stroke="rgba(45,49,66,0.40)" stroke-width="1" stroke-dasharray="4,3"/>
+<circle cx="490" cy="160" r="2" fill="#2d3142"/>
+<text x="296" y="500" fill="#2d3142" font-size="14" font-style="italic" font-family="'Instrument Serif', Georgia, 'Times New Roman', serif" text-anchor="end">Manually picked Compare</text>
+<text x="296" y="518" fill="#2d3142" font-size="14" font-style="italic" font-family="'Instrument Serif', Georgia, 'Times New Roman', serif" text-anchor="end">hits the same gate.</text>
+<path d="M 300,506 Q 306,504 310,504" fill="none" stroke="rgba(45,49,66,0.40)" stroke-width="1" stroke-dasharray="4,3"/>
+<circle cx="310" cy="504" r="2" fill="#2d3142"/>
+<line x1="40" y1="784" x2="920" y2="784" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+<text x="40" y="800" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" letter-spacing="0.18em">LEGEND</text>
+<rect x="40" y="812" width="14" height="10" rx="2" fill="rgba(79,93,117,0.10)" stroke="#7a8399" stroke-width="1"/>
+<text x="70" y="820" fill="#4f5d75" font-size="8.5" font-family="'Geist', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">Start / outcome</text>
+<rect x="260.0" y="812" width="14" height="10" rx="2" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
+<text x="290.0" y="820" fill="#4f5d75" font-size="8.5" font-family="'Geist', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">LLM decision</text>
+<line x1="480.0" y1="817" x2="502.0" y2="817" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text x="510.0" y="820" fill="#4f5d75" font-size="8.5" font-family="'Geist', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">Flow</text>
+<line x1="700.0" y1="817" x2="722.0" y2="817" stroke="#eb6c36" stroke-width="1.2" marker-end="url(#arrow-accent)"/>
+<text x="730.0" y="820" fill="#4f5d75" font-size="8.5" font-family="'Geist', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">Classifier picks Compare</text>
+</svg>

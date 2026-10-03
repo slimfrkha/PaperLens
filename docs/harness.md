@@ -24,22 +24,7 @@ multi-query expansion, per-paper scope handling, RRF, and passage provenance. Re
 capture the raw rankings once, then derive cached candidate-depth arms from that snapshot; this
 keeps the no-retrieve re-slicing property without maintaining a second fusion implementation.
 
-```mermaid
-flowchart LR
-  cfg[config.yaml] --> pool[(ingested pool\nmarkdown + index)]
-  pool --> gen[gen: span-anchored QA set]
-  gen --> dev[(dev split)]
-  gen --> test[(test split, touched once)]
-  dev --> run[run]
-  dev --> screen[screen]
-  dev --> sweep[sweep]
-  run -.informs.-> you([you, reading the reports])
-  screen -.informs.-> you
-  sweep -.informs.-> you
-  you -->|picks a config| confirm[confirm]
-  test --> confirm
-  confirm --> block[config.yaml block]
-```
+![Eval harness flow: gen splits dev and test; run, screen and sweep use dev; confirm touches test once](assets/diagrams/eval-harness.svg)
 
 ## 🪜 The flow
 
@@ -409,8 +394,9 @@ still only writes it once, at the end, exactly as an uninterrupted run would.
 **The emitted `config.yaml` block is deliberately narrower than a full section.**
 `chunking`/`embedding`/`reranker` are dumped whole (via `draccus.dump`, so `ChoiceRegistry`
 variants keep their `type:` discriminator), but `retrieval:` carries only `candidates` — never
-`k`/`max_rounds` — with a trailing comment saying so, since pasting a bare `retrieval:` block
-over an existing one would otherwise silently reset those to their dataclass defaults.
+`min_k`/`max_k`/`max_rounds` or the elbow knobs — with a trailing comment saying so, since
+pasting a bare `retrieval:` block over an existing one would otherwise silently reset those to
+their dataclass defaults.
 
 `confirm`'s CLI only covers the axes `sweep`'s grid enumerates: `max_tokens`, `candidates`,
 `rerank`. A `screen --tier chunking` winner on `overlap_tokens`/`min_tokens`/`noise_ratio`

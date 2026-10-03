@@ -36,8 +36,9 @@ A section-sized unit of a paper that gets embedded and indexed. Its embedded tex
 
 ### 🧭 Breadcrumb
 
-The reconstructed section path prepended to a chunk, e.g. `2.1.1 Multi-Head Latent
-Attention`. Canonical extraction markdown flattens every heading to `##`, so we rebuild
+The reconstructed section path prepended to a chunk: the paper title plus each numbered
+ancestor, joined by ` > `, e.g. `<title> > 2 Architecture > 2.1 Basic Architecture > 2.1.1
+Multi-Head Latent Attention`. Canonical extraction markdown flattens every heading to `##`, so we rebuild
 the hierarchy from the section *numbering* retained in the heading text. Prepending it
 gives the embedding context.
 
